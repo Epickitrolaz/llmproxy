@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,6 +15,8 @@ from llmproxy.schemas import (
     RequestLogEntry,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class PluginManager:
     """
@@ -21,33 +26,250 @@ class PluginManager:
     """
 
     def __init__(self, plugins_dir: Optional[Path] = None, data_dir: Optional[Path] = None):
-        self.plugins_dir = plugins_dir or (Path(__file__).resolve().parent.parent.parent / "plugins")
-        self.data_dir = data_dir or (Path(__file__).resolve().parent.parent.parent / "data")
+        self.plugins_dir = Path(plugins_dir) if plugins_dir else (Path(__file__).resolve().parent.parent.parent / "plugins")
+        self.data_dir = Path(data_dir) if data_dir else (Path(__file__).resolve().parent.parent.parent / "data")
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.config_file = self.data_dir / "plugin_configs.json"
+
         self.plugins: Dict[str, BasePlugin] = {}
+        self.plugin_files: Dict[str, Path] = {}
         self.configs: Dict[str, Dict[str, Any]] = {}
         self.logs: List[RequestLogEntry] = []
 
+        self._load_configs()
+
+    def _load_configs(self) -> None:
+        """Load persisted plugin configurations from disk."""
+        if self.config_file.exists():
+            try:
+                content = self.config_file.read_text(encoding="utf-8")
+                self.configs = json.loads(content)
+            except Exception as e:
+                logger.warning("Failed to load plugin configs from %s: %s", self.config_file, e)
+                self.configs = {}
+        else:
+            self.configs = {}
+
+    def _save_configs(self) -> None:
+        """Persist current plugin configurations to disk."""
+        try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config_file.write_text(json.dumps(self.configs, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save plugin configs to %s: %s", self.config_file, e)
+
     def discover_and_load_all(self) -> None:
         """Scan plugins_dir and load all valid python plugin files."""
-        pass
+        if not self.plugins_dir.exists():
+            return
+
+        for file_path in sorted(self.plugins_dir.glob("*.py")):
+            if file_path.name.startswith("_") or file_path.name.startswith("."):
+                continue
+            try:
+                self.load_plugin_file(file_path)
+            except Exception as e:
+                logger.error("Failed to load plugin from %s: %s", file_path, e)
 
     def load_plugin_file(self, file_path: Path) -> Optional[BasePlugin]:
         """Load or reload a single python plugin file."""
-        pass
+        if not file_path.exists() or not file_path.is_file():
+            return None
+
+        importlib.invalidate_caches()
+        module_name = f"llmproxy_plugins.{file_path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+        if spec is None:
+            return None
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        code = compile(file_path.read_text(encoding="utf-8"), str(file_path), "exec")
+        exec(code, module.__dict__)
+
+        # 1. Check for `plugin` instance
+        plugin_instance: Optional[BasePlugin] = None
+        if hasattr(module, "plugin") and isinstance(module.plugin, BasePlugin):
+            plugin_instance = module.plugin
+        # 2. Check for `create_plugin()` factory function
+        elif hasattr(module, "create_plugin") and callable(module.create_plugin):
+            created = module.create_plugin()
+            if isinstance(created, BasePlugin):
+                plugin_instance = created
+        # 3. Check for any class inheriting BasePlugin defined in this module
+        if plugin_instance is None:
+            for attr_name in dir(module):
+                val = getattr(module, attr_name)
+                if (
+                    isinstance(val, type)
+                    and issubclass(val, BasePlugin)
+                    and val is not BasePlugin
+                    and getattr(val, "__module__", None) == module.__name__
+                ):
+                    try:
+                        plugin_instance = val()
+                        break
+                    except Exception:
+                        continue
+
+        # Fallback if class was defined without matching __module__
+        if plugin_instance is None:
+            for attr_name in dir(module):
+                val = getattr(module, attr_name)
+                if isinstance(val, type) and issubclass(val, BasePlugin) and val is not BasePlugin:
+                    try:
+                        plugin_instance = val()
+                        break
+                    except Exception:
+                        continue
+
+        if plugin_instance is None:
+            logger.warning("No BasePlugin instance or subclass found in %s", file_path)
+            return None
+
+        # Set filename in metadata if writable
+        try:
+            plugin_instance.metadata.filename = file_path.name
+        except Exception:
+            pass
+        setattr(plugin_instance, "_filename", file_path.name)
+        plugin_id = plugin_instance.metadata.id
+
+        self.plugins[plugin_id] = plugin_instance
+        self.plugin_files[plugin_id] = file_path
+
+        # Initialize config entry if missing
+        if plugin_id not in self.configs:
+            default_vars = {
+                v.name: v.default
+                for v in plugin_instance.metadata.variables
+                if v.default is not None
+            }
+            self.configs[plugin_id] = {
+                "enabled": plugin_instance.metadata.enabled,
+                "variables": default_vars,
+                "custom_models": [],
+                "edited_models": {},
+                "deleted_models": [],
+            }
+            self._save_configs()
+        else:
+            cfg = self.configs[plugin_id]
+            cfg.setdefault("enabled", plugin_instance.metadata.enabled)
+            cfg.setdefault("variables", {})
+            cfg.setdefault("custom_models", [])
+            cfg.setdefault("edited_models", {})
+            cfg.setdefault("deleted_models", [])
+
+        return plugin_instance
 
     def reload_plugin(self, plugin_id: str) -> Optional[BasePlugin]:
         """Hot-reload a plugin by its ID."""
-        pass
+        file_path = self.plugin_files.get(plugin_id)
+        if not file_path or not file_path.exists():
+            file_path = self.plugins_dir / f"{plugin_id}.py"
+
+        if file_path.exists():
+            try:
+                return self.load_plugin_file(file_path)
+            except Exception as e:
+                logger.error("Failed to reload plugin %s from %s: %s", plugin_id, file_path, e)
+                return None
+        return None
 
     def get_plugin(self, plugin_id: str) -> Optional[BasePlugin]:
         """Retrieve a loaded plugin by ID."""
         return self.plugins.get(plugin_id)
 
+    def get_plugin_models(self, plugin_id: str) -> List[PluginModelConfig]:
+        """Retrieve configured models for a plugin (defaults - deleted + edited + custom)."""
+        plugin = self.plugins.get(plugin_id)
+        if not plugin:
+            return []
+
+        cfg = self.configs.get(plugin_id, {})
+        deleted = set(cfg.get("deleted_models", []))
+        edited = cfg.get("edited_models", {})
+        custom = cfg.get("custom_models", [])
+
+        result: List[PluginModelConfig] = []
+        seen_ids = set()
+
+        for default_m in plugin.metadata.models:
+            if default_m.id in deleted:
+                continue
+            if default_m.id in edited:
+                model_obj = PluginModelConfig.model_validate(edited[default_m.id])
+            else:
+                model_obj = default_m.model_copy()
+            result.append(model_obj)
+            seen_ids.add(model_obj.id)
+
+        for c in custom:
+            model_obj = PluginModelConfig.model_validate(c)
+            if model_obj.id not in seen_ids:
+                result.append(model_obj)
+                seen_ids.add(model_obj.id)
+
+        return result
+
+    def get_plugin_variables(self, plugin_id: str) -> Dict[str, Any]:
+        """Return merged dictionary of variable values for a plugin."""
+        plugin = self.plugins.get(plugin_id)
+        if not plugin:
+            return {}
+
+        cfg = self.configs.get(plugin_id, {})
+        stored_vars = cfg.get("variables", {})
+        merged: Dict[str, Any] = {}
+
+        for var in plugin.metadata.variables:
+            if var.name in stored_vars and stored_vars[var.name] is not None:
+                merged[var.name] = stored_vars[var.name]
+            elif var.value != "":
+                merged[var.name] = var.value
+            else:
+                merged[var.name] = var.default
+
+        for k, v in stored_vars.items():
+            if k not in merged:
+                merged[k] = v
+
+        return merged
+
     def list_plugins(self) -> List[PluginMetadata]:
         """List all loaded plugins with their current merged configuration."""
-        return [p.metadata for p in self.plugins.values()]
+        result: List[PluginMetadata] = []
+        for plugin in self.plugins.values():
+            cfg = self.configs.get(plugin.metadata.id, {})
+            enabled = cfg.get("enabled", plugin.metadata.enabled)
+            models = self.get_plugin_models(plugin.metadata.id)
+            vars_dict = self.get_plugin_variables(plugin.metadata.id)
+
+            variables: List[PluginVariable] = []
+            declared_names = set()
+            for v in plugin.metadata.variables:
+                v_copy = v.model_copy()
+                v_copy.value = vars_dict.get(v.name, v.default)
+                variables.append(v_copy)
+                declared_names.add(v.name)
+
+            for k, v in vars_dict.items():
+                if k not in declared_names:
+                    variables.append(PluginVariable(name=k, label=k, value=v, default=v))
+
+            file_path = self.plugin_files.get(plugin.metadata.id)
+            filename = file_path.name if file_path else plugin.metadata.filename
+
+            meta_copy = plugin.metadata.model_copy(update={
+                "enabled": enabled,
+                "filename": filename,
+                "variables": variables,
+                "models": models,
+            })
+            result.append(meta_copy)
+        return result
 
     def update_plugin_config(
         self,
@@ -56,30 +278,151 @@ class PluginManager:
         variables: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Update plugin variables and/or enabled status."""
-        pass
+        if plugin_id not in self.plugins and plugin_id not in self.configs:
+            return False
+
+        cfg = self.configs.setdefault(
+            plugin_id,
+            {
+                "enabled": True,
+                "variables": {},
+                "custom_models": [],
+                "edited_models": {},
+                "deleted_models": [],
+            },
+        )
+        if enabled is not None:
+            cfg["enabled"] = enabled
+        if variables is not None:
+            cfg.setdefault("variables", {}).update(variables)
+
+        self._save_configs()
+        return True
 
     def add_custom_model(self, plugin_id: str, model_config: PluginModelConfig) -> bool:
-        """Add a custom model to a plugin."""
-        pass
+        """Add a custom model to a plugin, or un-delete / edit a default model with that ID."""
+        if plugin_id not in self.plugins:
+            return False
+
+        cfg = self.configs.setdefault(
+            plugin_id,
+            {
+                "enabled": True,
+                "variables": {},
+                "custom_models": [],
+                "edited_models": {},
+                "deleted_models": [],
+            },
+        )
+        custom_models = cfg.setdefault("custom_models", [])
+        deleted = cfg.setdefault("deleted_models", [])
+        if model_config.id in deleted:
+            deleted.remove(model_config.id)
+
+        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
+        if model_config.id in default_model_ids:
+            cfg.setdefault("edited_models", {})[model_config.id] = model_config.model_dump()
+            self._save_configs()
+            return True
+
+        for i, m in enumerate(custom_models):
+            if m.get("id") == model_config.id:
+                custom_models[i] = model_config.model_dump()
+                break
+        else:
+            custom_models.append(model_config.model_dump())
+
+        self._save_configs()
+        return True
 
     def update_custom_model(
         self, plugin_id: str, model_id: str, model_config: PluginModelConfig
     ) -> bool:
         """Update an existing model in a plugin."""
-        pass
+        if plugin_id not in self.plugins:
+            return False
+
+        cfg = self.configs.setdefault(
+            plugin_id,
+            {
+                "enabled": True,
+                "variables": {},
+                "custom_models": [],
+                "edited_models": {},
+                "deleted_models": [],
+            },
+        )
+        custom_models = cfg.setdefault("custom_models", [])
+        for i, m in enumerate(custom_models):
+            if m.get("id") == model_id:
+                custom_models[i] = model_config.model_dump()
+                self._save_configs()
+                return True
+
+        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
+        if model_id in default_model_ids:
+            cfg.setdefault("edited_models", {})[model_id] = model_config.model_dump()
+            deleted = cfg.setdefault("deleted_models", [])
+            if model_id in deleted:
+                deleted.remove(model_id)
+            self._save_configs()
+            return True
+
+        custom_models.append(model_config.model_dump())
+        self._save_configs()
+        return True
 
     def delete_custom_model(self, plugin_id: str, model_id: str) -> bool:
         """Delete/remove a model from a plugin."""
-        pass
+        if plugin_id not in self.plugins:
+            return False
+
+        cfg = self.configs.setdefault(
+            plugin_id,
+            {
+                "enabled": True,
+                "variables": {},
+                "custom_models": [],
+                "edited_models": {},
+                "deleted_models": [],
+            },
+        )
+        custom_models = cfg.setdefault("custom_models", [])
+        cfg["custom_models"] = [m for m in custom_models if m.get("id") != model_id]
+
+        if model_id in cfg.get("edited_models", {}):
+            del cfg["edited_models"][model_id]
+
+        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
+        if model_id in default_model_ids:
+            deleted = cfg.setdefault("deleted_models", [])
+            if model_id not in deleted:
+                deleted.append(model_id)
+
+        self._save_configs()
+        return True
 
     def get_all_active_models(self) -> List[Tuple[PluginModelConfig, BasePlugin]]:
         """Return list of (model_config, plugin) for all enabled plugins and models."""
-        return []
+        active: List[Tuple[PluginModelConfig, BasePlugin]] = []
+        for plugin_id, plugin in self.plugins.items():
+            cfg = self.configs.get(plugin_id, {})
+            if not cfg.get("enabled", plugin.metadata.enabled):
+                continue
+            models = self.get_plugin_models(plugin_id)
+            for m in models:
+                if m.enabled:
+                    active.append((m, plugin))
+        return active
 
     def resolve_model(
         self, model_id: str
     ) -> Optional[Tuple[PluginModelConfig, BasePlugin, Dict[str, Any]]]:
         """Resolve a model ID to its plugin, model config, and active variables."""
+        for model_config, plugin in self.get_all_active_models():
+            if model_config.id == model_id:
+                vars_dict = self.get_plugin_variables(plugin.metadata.id)
+                return (model_config, plugin, vars_dict)
         return None
 
     def add_log(self, entry: RequestLogEntry) -> None:
