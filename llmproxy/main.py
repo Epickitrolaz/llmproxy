@@ -1,7 +1,10 @@
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+from llmproxy.core.manager import plugin_manager
 
 app = FastAPI(
     title="LLMProxy",
@@ -17,6 +20,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Startup: discover plugins
+@app.on_event("startup")
+async def startup_event():
+    plugin_manager.discover_and_load_all()
+
+# Try to register API routers if available
+try:
+    from llmproxy.api.router import router as api_v1_router
+    app.include_router(api_v1_router)
+except ImportError:
+    pass
+
+try:
+    from llmproxy.dashboard.router import router as dashboard_api_router
+    app.include_router(dashboard_api_router)
+except ImportError:
+    pass
+
 # Static files for the Black and White dashboard
 static_dir = Path(__file__).resolve().parent / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
@@ -26,9 +47,17 @@ if not index_file.exists():
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+@app.get("/")
+async def root_index():
+    return FileResponse(str(index_file))
+
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "app": "llmproxy"}
+    return {
+        "status": "ok",
+        "app": "llmproxy",
+        "plugins_count": len(plugin_manager.plugins),
+    }
 
 if __name__ == "__main__":
     import uvicorn
