@@ -172,12 +172,13 @@ async def update_plugin_code(plugin_id: str, body: PluginSourceUpdate):
                 detail=f"Plugin saved, but reload failed: {e}",
             ) from e
 
-    _persist_plugin_metadata(reloaded_plugin.metadata.id, reloaded_plugin.metadata)
+    meta = reloaded_plugin.metadata.model_copy(update={"filename": filename})
+    _persist_plugin_metadata(reloaded_plugin.metadata.id, meta)
 
     return {
         "status": "ok",
         "message": f"Plugin '{plugin_id}' code updated and hot-reloaded successfully",
-        "plugin": reloaded_plugin.metadata,
+        "plugin": meta,
     }
 
 
@@ -224,12 +225,13 @@ async def create_plugin(body: PluginCreateRequest):
                 detail=f"Failed to load new plugin: {e}",
             ) from e
 
-    _persist_plugin_metadata(plugin.metadata.id, plugin.metadata)
+    meta = plugin.metadata.model_copy(update={"filename": filename})
+    _persist_plugin_metadata(plugin.metadata.id, meta)
 
     return {
         "status": "ok",
         "message": f"Plugin '{plugin.metadata.id}' created and loaded successfully",
-        "plugin": plugin.metadata,
+        "plugin": meta,
     }
 
 
@@ -291,12 +293,13 @@ async def reload_plugin_endpoint(plugin_id: str):
                 status_code=400, detail=f"Failed to hot-reload plugin '{plugin_id}': {e}"
             ) from e
 
-    _persist_plugin_metadata(plugin.metadata.id, plugin.metadata)
+    meta = plugin.metadata.model_copy(update={"filename": file_path.name})
+    _persist_plugin_metadata(plugin.metadata.id, meta)
 
     return {
         "status": "ok",
         "message": f"Plugin '{plugin_id}' hot-reloaded successfully",
-        "plugin": plugin.metadata,
+        "plugin": meta,
     }
 
 
@@ -345,7 +348,11 @@ async def add_custom_model(plugin_id: str, model_config: PluginModelConfig):
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
 
-    existing = [m for m in plugin.metadata.models if m.id == model_config.id]
+    current_models = plugin_manager.get_plugin_models(plugin_id)
+    if not current_models:
+        current_models = plugin.metadata.models
+
+    existing = [m for m in current_models if m.id == model_config.id]
     if existing:
         raise HTTPException(
             status_code=400,
@@ -378,8 +385,12 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
 
+    current_models = plugin_manager.get_plugin_models(plugin_id)
+    if not current_models:
+        current_models = plugin.metadata.models
+
     target_model: Optional[PluginModelConfig] = None
-    for m in plugin.metadata.models:
+    for m in current_models:
         if m.id == model_id:
             target_model = m
             break
@@ -407,6 +418,21 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
     except Exception:
         pass
 
+    for m in plugin.metadata.models:
+        if m.id == model_id:
+            if body.name is not None:
+                m.name = body.name
+            if body.upstream_model is not None:
+                m.upstream_model = body.upstream_model
+            if body.enabled is not None:
+                m.enabled = body.enabled
+            if body.context_window is not None:
+                m.context_window = body.context_window
+            if body.max_tokens is not None:
+                m.max_tokens = body.max_tokens
+            if body.parameters is not None:
+                m.parameters = body.parameters
+
     _persist_plugin_metadata(plugin_id, plugin.metadata)
 
     return {
@@ -425,8 +451,12 @@ async def delete_custom_model(plugin_id: str, model_id: str):
     if not plugin:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
 
-    idx = next((i for i, m in enumerate(plugin.metadata.models) if m.id == model_id), None)
-    if idx is None:
+    current_models = plugin_manager.get_plugin_models(plugin_id)
+    if not current_models:
+        current_models = plugin.metadata.models
+
+    target = next((m for m in current_models if m.id == model_id), None)
+    if target is None:
         raise HTTPException(
             status_code=404, detail=f"Model '{model_id}' not found in plugin '{plugin_id}'"
         )
@@ -436,7 +466,10 @@ async def delete_custom_model(plugin_id: str, model_id: str):
     except Exception:
         pass
 
-    plugin.metadata.models.pop(idx)
+    idx = next((i for i, m in enumerate(plugin.metadata.models) if m.id == model_id), None)
+    if idx is not None:
+        plugin.metadata.models.pop(idx)
+
     _persist_plugin_metadata(plugin_id, plugin.metadata)
 
     return {
@@ -498,49 +531,43 @@ async def test_chat(req: TestChatRequest):
     _ensure_plugins_loaded()
 
     # Model resolution
-    matched_plugin = None
-    matched_model: Optional[PluginModelConfig] = None
-    matched_vars: Dict[str, Any] = {}
+    found_model: Optional[PluginModelConfig] = None
+    found_plugin = None
 
-    # 1. Try resolve_model from plugin_manager
-    resolved = None
-    try:
-        resolved = plugin_manager.resolve_model(req.model)
-    except Exception:
-        pass
-
-    if resolved:
-        matched_model, matched_plugin, matched_vars = resolved
-        if not matched_model.enabled or not matched_plugin.metadata.enabled:
-            raise HTTPException(
-                status_code=400, detail=f"Model '{req.model}' or its provider is disabled"
-            )
-    else:
-        # Fallback resolution
-        for plugin in plugin_manager.plugins.values():
-            if not plugin.metadata.enabled:
-                continue
-            for model in plugin.metadata.models:
-                if model.id == req.model:
-                    if not model.enabled:
-                        raise HTTPException(
-                            status_code=400, detail=f"Model '{req.model}' is currently disabled"
-                        )
-                    matched_plugin = plugin
-                    matched_model = model
-                    matched_vars = {
-                        v.name: (v.value if (v.value != "" and v.value is not None) else v.default)
-                        for v in plugin.metadata.variables
-                    }
-                    break
-            if matched_plugin:
+    for p_id, p in plugin_manager.plugins.items():
+        p_models = plugin_manager.get_plugin_models(p_id)
+        if not p_models:
+            p_models = p.metadata.models
+        for m in p_models:
+            if m.id == req.model:
+                found_model = m
+                found_plugin = p
                 break
+        if found_model:
+            break
 
-    if not matched_plugin or not matched_model:
+    if not found_plugin or not found_model:
         raise HTTPException(
             status_code=404,
-            detail=f"Model '{req.model}' not found in any enabled provider plugin",
+            detail=f"Model '{req.model}' not found in any provider plugin",
         )
+
+    cfg = plugin_manager.configs.get(found_plugin.metadata.id, {})
+    p_enabled = cfg.get("enabled", found_plugin.metadata.enabled)
+    if not p_enabled or not found_model.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{req.model}' or its provider is disabled",
+        )
+
+    matched_plugin = found_plugin
+    matched_model = found_model
+    matched_vars = plugin_manager.get_plugin_variables(found_plugin.metadata.id)
+    if not matched_vars:
+        matched_vars = {
+            v.name: (v.value if (v.value != "" and v.value is not None) else v.default)
+            for v in matched_plugin.metadata.variables
+        }
 
     # Prepare chat messages
     messages: List[ChatMessage] = []
