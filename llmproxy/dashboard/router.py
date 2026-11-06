@@ -1,0 +1,661 @@
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from llmproxy.core.manager import plugin_manager
+from llmproxy.dashboard.loader import (
+    apply_persisted_config_to_plugin,
+    find_plugin_file_path,
+    is_safe_path,
+    load_plugin_from_file,
+    read_persisted_configs,
+    validate_python_syntax,
+    write_persisted_configs,
+)
+from llmproxy.dashboard.templates import STARTER_TEMPLATES
+from llmproxy.schemas import (
+    ChatMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    PluginConfigUpdate,
+    PluginMetadata,
+    PluginModelConfig,
+    PluginSourceUpdate,
+    RequestLogEntry,
+)
+
+router = APIRouter(prefix="/api", tags=["dashboard"])
+
+
+class PluginCreateRequest(BaseModel):
+    filename: str
+    code: str
+
+
+class PluginModelUpdate(BaseModel):
+    name: Optional[str] = None
+    upstream_model: Optional[str] = None
+    enabled: Optional[bool] = None
+    context_window: Optional[int] = None
+    max_tokens: Optional[int] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class TestChatRequest(BaseModel):
+    model: str
+    prompt: Optional[str] = None
+    messages: Optional[List[ChatMessage]] = None
+    temperature: Optional[float] = 1.0
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
+
+
+def _ensure_plugins_loaded() -> None:
+    """Ensure plugins from plugins_dir are discovered if plugins dictionary is empty."""
+    plugins_dir = Path(plugin_manager.plugins_dir)
+    if not plugins_dir.exists():
+        return
+
+    # If plugin_manager.discover_and_load_all() works, it will populate plugins
+    if not plugin_manager.plugins:
+        try:
+            plugin_manager.discover_and_load_all()
+        except Exception:
+            pass
+
+    # Fallback discovery if still empty
+    if not plugin_manager.plugins:
+        for py_file in plugins_dir.glob("*.py"):
+            if py_file.name.startswith("__"):
+                continue
+            try:
+                plugin = load_plugin_from_file(py_file, data_dir=plugin_manager.data_dir)
+                plugin_manager.plugins[plugin.metadata.id] = plugin
+            except Exception:
+                continue
+
+
+def _persist_plugin_metadata(plugin_id: str, meta: PluginMetadata) -> None:
+    """Save plugin configuration to persistent storage."""
+    saved_configs = read_persisted_configs(plugin_manager.data_dir)
+    saved_configs[plugin_id] = {
+        "enabled": meta.enabled,
+        "variables": {v.name: v.value for v in meta.variables},
+        "models": [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in meta.models],
+    }
+    write_persisted_configs(plugin_manager.data_dir, saved_configs)
+
+
+# =========================================================================
+# Plugins Management
+# =========================================================================
+
+@router.get("/plugins", response_model=List[PluginMetadata])
+async def list_plugins():
+    """List all loaded plugins with their metadata, variables, models, and enabled status."""
+    _ensure_plugins_loaded()
+    plugins = plugin_manager.list_plugins()
+    if not plugins and plugin_manager.plugins:
+        plugins = [p.metadata for p in plugin_manager.plugins.values()]
+    for p in plugins:
+        if not p.filename:
+            fp = find_plugin_file_path(plugin_manager, p.id)
+            if fp:
+                p.filename = fp.name
+    return plugins
+
+
+@router.get("/plugins/{plugin_id}/code")
+async def get_plugin_code(plugin_id: str):
+    """Retrieve raw Python source code of the plugin file."""
+    _ensure_plugins_loaded()
+    file_path = find_plugin_file_path(plugin_manager, plugin_id)
+    if not file_path or not file_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Source file for plugin '{plugin_id}' not found"
+        )
+
+    code = file_path.read_text(encoding="utf-8")
+    return {
+        "plugin_id": plugin_id,
+        "filename": file_path.name,
+        "code": code,
+    }
+
+
+@router.put("/plugins/{plugin_id}/code")
+async def update_plugin_code(plugin_id: str, body: PluginSourceUpdate):
+    """Update/overwrite plugin Python source code and trigger hot reload."""
+    _ensure_plugins_loaded()
+    code = body.code
+    if not code or not code.strip():
+        raise HTTPException(status_code=400, detail="Plugin code cannot be empty")
+
+    file_path = find_plugin_file_path(plugin_manager, plugin_id)
+    plugins_dir = Path(plugin_manager.plugins_dir)
+    filename = file_path.name if file_path else f"{plugin_id}.py"
+    target_path = (plugins_dir / filename).resolve()
+
+    if not is_safe_path(plugins_dir, target_path):
+        raise HTTPException(status_code=400, detail="Invalid plugin file path")
+
+    try:
+        validate_python_syntax(code, filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # Write source code to disk
+    target_path.write_text(code, encoding="utf-8")
+
+    # Trigger hot-reload
+    reloaded_plugin = None
+    try:
+        reloaded_plugin = plugin_manager.reload_plugin(plugin_id)
+    except Exception:
+        pass
+
+    if reloaded_plugin is None:
+        try:
+            reloaded_plugin = load_plugin_from_file(target_path, data_dir=plugin_manager.data_dir)
+            plugin_manager.plugins[reloaded_plugin.metadata.id] = reloaded_plugin
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Plugin saved, but reload failed: {e}",
+            ) from e
+
+    _persist_plugin_metadata(reloaded_plugin.metadata.id, reloaded_plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Plugin '{plugin_id}' code updated and hot-reloaded successfully",
+        "plugin": reloaded_plugin.metadata,
+    }
+
+
+@router.post("/plugins")
+async def create_plugin(body: PluginCreateRequest):
+    """Create or upload a new plugin Python file and load it."""
+    filename = Path(body.filename).name.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    if not filename.endswith(".py"):
+        filename = f"{filename}.py"
+
+    code = body.code
+    if not code or not code.strip():
+        raise HTTPException(status_code=400, detail="Plugin code cannot be empty")
+
+    try:
+        validate_python_syntax(code, filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    plugins_dir = Path(plugin_manager.plugins_dir)
+    target_path = (plugins_dir / filename).resolve()
+    if not is_safe_path(plugins_dir, target_path):
+        raise HTTPException(status_code=400, detail="Invalid plugin filename")
+
+    target_path.write_text(code, encoding="utf-8")
+
+    plugin = None
+    try:
+        plugin = plugin_manager.load_plugin_file(target_path)
+    except Exception:
+        pass
+
+    if plugin is None:
+        try:
+            plugin = load_plugin_from_file(target_path, data_dir=plugin_manager.data_dir)
+            plugin_manager.plugins[plugin.metadata.id] = plugin
+        except Exception as e:
+            if target_path.exists():
+                target_path.unlink()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load new plugin: {e}",
+            ) from e
+
+    _persist_plugin_metadata(plugin.metadata.id, plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Plugin '{plugin.metadata.id}' created and loaded successfully",
+        "plugin": plugin.metadata,
+    }
+
+
+@router.delete("/plugins/{plugin_id}")
+async def delete_plugin(plugin_id: str):
+    """Delete the plugin file from disk and unregister it."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    file_path = find_plugin_file_path(plugin_manager, plugin_id)
+
+    if not plugin and not file_path:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    if file_path and file_path.exists():
+        try:
+            file_path.unlink()
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete plugin file {file_path.name}: {e}"
+            ) from e
+
+    plugin_manager.plugins.pop(plugin_id, None)
+    plugin_manager.configs.pop(plugin_id, None)
+
+    # Clean up persisted configs
+    saved = read_persisted_configs(plugin_manager.data_dir)
+    if plugin_id in saved:
+        saved.pop(plugin_id, None)
+        write_persisted_configs(plugin_manager.data_dir, saved)
+
+    return {
+        "status": "ok",
+        "message": f"Plugin '{plugin_id}' deleted successfully",
+    }
+
+
+@router.post("/plugins/{plugin_id}/reload")
+async def reload_plugin_endpoint(plugin_id: str):
+    """Explicitly trigger hot-reload of a plugin."""
+    _ensure_plugins_loaded()
+    file_path = find_plugin_file_path(plugin_manager, plugin_id)
+    if not file_path or not file_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Plugin file for '{plugin_id}' not found on disk"
+        )
+
+    plugin = None
+    try:
+        plugin = plugin_manager.reload_plugin(plugin_id)
+    except Exception:
+        pass
+
+    if plugin is None:
+        try:
+            plugin = load_plugin_from_file(file_path, data_dir=plugin_manager.data_dir)
+            plugin_manager.plugins[plugin.metadata.id] = plugin
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Failed to hot-reload plugin '{plugin_id}': {e}"
+            ) from e
+
+    _persist_plugin_metadata(plugin.metadata.id, plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Plugin '{plugin_id}' hot-reloaded successfully",
+        "plugin": plugin.metadata,
+    }
+
+
+@router.put("/plugins/{plugin_id}/config")
+async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
+    """Update custom variables and/or enabled status of a plugin."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    try:
+        plugin_manager.update_plugin_config(
+            plugin_id, enabled=body.enabled, variables=body.variables
+        )
+    except Exception:
+        pass
+
+    meta = plugin.metadata
+    if body.enabled is not None:
+        meta.enabled = body.enabled
+
+    if body.variables is not None:
+        for var in meta.variables:
+            if var.name in body.variables:
+                var.value = body.variables[var.name]
+
+    _persist_plugin_metadata(plugin_id, meta)
+
+    return {
+        "status": "ok",
+        "message": f"Configuration for plugin '{plugin_id}' updated",
+        "plugin": meta,
+    }
+
+
+# =========================================================================
+# Models Management
+# =========================================================================
+
+@router.post("/plugins/{plugin_id}/models")
+async def add_custom_model(plugin_id: str, model_config: PluginModelConfig):
+    """Add a new custom model to a plugin."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    existing = [m for m in plugin.metadata.models if m.id == model_config.id]
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model with ID '{model_config.id}' already exists in plugin '{plugin_id}'",
+        )
+
+    try:
+        plugin_manager.add_custom_model(plugin_id, model_config)
+    except Exception:
+        pass
+
+    if model_config.id not in [m.id for m in plugin.metadata.models]:
+        plugin.metadata.models.append(model_config)
+
+    _persist_plugin_metadata(plugin_id, plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Model '{model_config.id}' added to plugin '{plugin_id}'",
+        "model": model_config,
+        "plugin": plugin.metadata,
+    }
+
+
+@router.put("/plugins/{plugin_id}/models/{model_id}")
+async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUpdate):
+    """Edit model properties (name, upstream_model, enabled, parameters, context window, max tokens)."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    target_model: Optional[PluginModelConfig] = None
+    for m in plugin.metadata.models:
+        if m.id == model_id:
+            target_model = m
+            break
+
+    if not target_model:
+        raise HTTPException(
+            status_code=404, detail=f"Model '{model_id}' not found in plugin '{plugin_id}'"
+        )
+
+    if body.name is not None:
+        target_model.name = body.name
+    if body.upstream_model is not None:
+        target_model.upstream_model = body.upstream_model
+    if body.enabled is not None:
+        target_model.enabled = body.enabled
+    if body.context_window is not None:
+        target_model.context_window = body.context_window
+    if body.max_tokens is not None:
+        target_model.max_tokens = body.max_tokens
+    if body.parameters is not None:
+        target_model.parameters = body.parameters
+
+    try:
+        plugin_manager.update_custom_model(plugin_id, model_id, target_model)
+    except Exception:
+        pass
+
+    _persist_plugin_metadata(plugin_id, plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Model '{model_id}' updated",
+        "model": target_model,
+        "plugin": plugin.metadata,
+    }
+
+
+@router.delete("/plugins/{plugin_id}/models/{model_id}")
+async def delete_custom_model(plugin_id: str, model_id: str):
+    """Remove/delete a model from a plugin."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    idx = next((i for i, m in enumerate(plugin.metadata.models) if m.id == model_id), None)
+    if idx is None:
+        raise HTTPException(
+            status_code=404, detail=f"Model '{model_id}' not found in plugin '{plugin_id}'"
+        )
+
+    try:
+        plugin_manager.delete_custom_model(plugin_id, model_id)
+    except Exception:
+        pass
+
+    plugin.metadata.models.pop(idx)
+    _persist_plugin_metadata(plugin_id, plugin.metadata)
+
+    return {
+        "status": "ok",
+        "message": f"Model '{model_id}' removed from plugin '{plugin_id}'",
+    }
+
+
+# =========================================================================
+# Telemetry, Stats, and Logs
+# =========================================================================
+
+@router.get("/logs", response_model=List[RequestLogEntry])
+async def get_logs(limit: int = Query(default=100, ge=1, le=1000)):
+    """Retrieve recent request logs."""
+    return plugin_manager.get_logs(limit=limit)
+
+
+@router.get("/stats")
+async def get_stats():
+    """Return summary metrics for the router and dashboard."""
+    _ensure_plugins_loaded()
+    logs = plugin_manager.get_logs(limit=1000)
+    total_requests = len(logs)
+    success_requests = sum(1 for log in logs if log.status == "success")
+    success_rate = (
+        round((success_requests / total_requests) * 100.0, 1) if total_requests > 0 else 100.0
+    )
+
+    active_plugins = [p for p in plugin_manager.plugins.values() if p.metadata.enabled]
+    active_plugins_count = len(active_plugins)
+
+    active_models_count = sum(
+        sum(1 for m in p.metadata.models if m.enabled) for p in active_plugins
+    )
+
+    avg_latency = (
+        round(sum(log.latency_ms for log in logs) / total_requests, 1)
+        if total_requests > 0
+        else 0.0
+    )
+
+    return {
+        "total_requests": total_requests,
+        "success_rate": success_rate,
+        "active_models_count": active_models_count,
+        "active_plugins_count": active_plugins_count,
+        "avg_latency_ms": avg_latency,
+    }
+
+
+# =========================================================================
+# Chat Playground Test Endpoint
+# =========================================================================
+
+@router.post("/test-chat")
+async def test_chat(req: TestChatRequest):
+    """Test endpoint that routes a test prompt through the router to a specific model."""
+    _ensure_plugins_loaded()
+
+    # Model resolution
+    matched_plugin = None
+    matched_model: Optional[PluginModelConfig] = None
+    matched_vars: Dict[str, Any] = {}
+
+    # 1. Try resolve_model from plugin_manager
+    resolved = None
+    try:
+        resolved = plugin_manager.resolve_model(req.model)
+    except Exception:
+        pass
+
+    if resolved:
+        matched_model, matched_plugin, matched_vars = resolved
+        if not matched_model.enabled or not matched_plugin.metadata.enabled:
+            raise HTTPException(
+                status_code=400, detail=f"Model '{req.model}' or its provider is disabled"
+            )
+    else:
+        # Fallback resolution
+        for plugin in plugin_manager.plugins.values():
+            if not plugin.metadata.enabled:
+                continue
+            for model in plugin.metadata.models:
+                if model.id == req.model:
+                    if not model.enabled:
+                        raise HTTPException(
+                            status_code=400, detail=f"Model '{req.model}' is currently disabled"
+                        )
+                    matched_plugin = plugin
+                    matched_model = model
+                    matched_vars = {
+                        v.name: (v.value if (v.value != "" and v.value is not None) else v.default)
+                        for v in plugin.metadata.variables
+                    }
+                    break
+            if matched_plugin:
+                break
+
+    if not matched_plugin or not matched_model:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{req.model}' not found in any enabled provider plugin",
+        )
+
+    # Prepare chat messages
+    messages: List[ChatMessage] = []
+    if req.messages:
+        messages = req.messages
+    elif req.prompt:
+        messages = [ChatMessage(role="user", content=req.prompt)]
+    else:
+        raise HTTPException(status_code=400, detail="Either 'prompt' or 'messages' must be provided")
+
+    chat_request = ChatCompletionRequest(
+        model=req.model,
+        messages=messages,
+        temperature=req.temperature or 1.0,
+        max_tokens=req.max_tokens,
+        stream=bool(req.stream),
+    )
+
+    start_time = time.perf_counter()
+
+    try:
+        result = await matched_plugin.chat_completion(chat_request, matched_model, matched_vars)
+        latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+
+        # Handle streaming responses
+        if req.stream:
+            async def event_generator():
+                if hasattr(result, "__aiter__"):
+                    async for chunk in result:
+                        chunk_json = (
+                            chunk.model_dump_json()
+                            if hasattr(chunk, "model_dump_json")
+                            else json.dumps(chunk)
+                        )
+                        yield f"data: {chunk_json}\n\n"
+                else:
+                    content = (
+                        result.choices[0].message.content
+                        if result.choices and result.choices[0].message
+                        else ""
+                    )
+                    chunk_obj = {
+                        "id": getattr(result, "id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
+                        "object": "chat.completion.chunk",
+                        "model": req.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": content},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk_obj)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            prompt_tokens = sum(len(str(m.content).split()) for m in messages)
+            log_entry = RequestLogEntry(
+                id=f"log-{uuid.uuid4().hex[:8]}",
+                timestamp=time.time(),
+                model=req.model,
+                plugin_id=matched_plugin.metadata.id,
+                status="success",
+                status_code=200,
+                latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=20,
+            )
+            plugin_manager.add_log(log_entry)
+
+            return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+        # Non-streaming response
+        prompt_tokens = result.usage.prompt_tokens if result.usage else sum(len(str(m.content).split()) for m in messages)
+        completion_tokens = result.usage.completion_tokens if result.usage else 20
+
+        log_entry = RequestLogEntry(
+            id=f"log-{uuid.uuid4().hex[:8]}",
+            timestamp=time.time(),
+            model=req.model,
+            plugin_id=matched_plugin.metadata.id,
+            status="success",
+            status_code=200,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        plugin_manager.add_log(log_entry)
+
+        resp_dict = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+        resp_dict["latency_ms"] = latency_ms
+        return resp_dict
+
+    except Exception as e:
+        latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+        plugin_id = getattr(matched_plugin, "metadata", None) and matched_plugin.metadata.id
+        log_entry = RequestLogEntry(
+            id=f"log-{uuid.uuid4().hex[:8]}",
+            timestamp=time.time(),
+            model=req.model,
+            plugin_id=plugin_id,
+            status="error",
+            status_code=500,
+            latency_ms=latency_ms,
+            error_message=str(e),
+        )
+        plugin_manager.add_log(log_entry)
+        raise HTTPException(status_code=500, detail=f"Chat completion error: {e}") from e
+
+
+# =========================================================================
+# Templates Gallery
+# =========================================================================
+
+@router.get("/templates")
+async def get_templates():
+    """Return starter provider plugin templates for quick creation and swapping."""
+    return STARTER_TEMPLATES

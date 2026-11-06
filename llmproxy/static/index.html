@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLMProxy • AI Router & Management Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+</head>
+<body>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="brand-section">
+      <div class="brand-logo">
+        <div class="brand-icon">L</div>
+        <span>LLMPROXY</span>
+      </div>
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        <span>ROUTER ACTIVE</span>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="nav-tab active" data-tab="overview">Overview</button>
+      <button class="nav-tab" data-tab="providers">Providers & Plugins</button>
+      <button class="nav-tab" data-tab="editor">Code Editor</button>
+      <button class="nav-tab" data-tab="models">Models</button>
+      <button class="nav-tab" data-tab="playground">Playground</button>
+      <button class="nav-tab" data-tab="logs">Request Logs</button>
+    </nav>
+
+    <!-- Header Quick Actions -->
+    <div class="header-meta">
+      <div class="endpoint-chip">
+        <span>Endpoint:</span>
+        <strong id="header-endpoint-display">http://localhost:8000/v1</strong>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="copy-endpoint-btn" title="Copy base URL">Copy URL</button>
+    </div>
+  </header>
+
+  <!-- Main Content Layout -->
+  <main class="main-content">
+
+    <!-- TAB 1: OVERVIEW -->
+    <section class="tab-panel active" id="tab-overview">
+      <div class="quickstart-banner">
+        <div class="quickstart-details">
+          <h3>
+            <span>High-Performance AI Router</span>
+            <span class="status-pill" style="font-size: 10px;">OpenAI v1 Compatible</span>
+          </h3>
+          <p>Dynamically routes incoming requests to active provider plugins with live hot-reloadable Python modules.</p>
+        </div>
+        <div class="quickstart-url-box">
+          <span>POST /v1/chat/completions</span>
+        </div>
+      </div>
+
+      <!-- Stat Metrics Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-eyebrow">Total Requests</span>
+          <span class="stat-value" id="stat-total-requests">0</span>
+          <span class="stat-subtext">Lifetime routed requests</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Success Rate</span>
+          <span class="stat-value" id="stat-success-rate">100%</span>
+          <span class="stat-subtext">HTTP 200 responses</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Active Models</span>
+          <span class="stat-value" id="stat-active-models">0</span>
+          <span class="stat-subtext">Enabled across providers</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Average Latency</span>
+          <span class="stat-value" id="stat-avg-latency">0 ms</span>
+          <span class="stat-subtext">Roundtrip upstream response</span>
+        </div>
+      </div>
+
+      <!-- Quickstart Code Snippet Generator -->
+      <div class="card">
+        <div class="card-header">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <h3>Quickstart Integration</h3>
+            <span style="font-size: 12px; color: var(--ink-muted);">Select model:</span>
+            <select class="select-input" id="snippet-model-select"></select>
+          </div>
+          <button class="btn btn-primary btn-sm" id="copy-snippet-btn">Copy Snippet</button>
+        </div>
+        <div class="snippet-box" style="border: none; border-radius: 0;">
+          <div class="snippet-header">
+            <div class="snippet-tabs">
+              <button class="snippet-tab active" data-lang="python">Python (OpenAI SDK)</button>
+              <button class="snippet-tab" data-lang="curl">cURL</button>
+              <button class="snippet-tab" data-lang="cursor">Cursor / Cline AI</button>
+            </div>
+          </div>
+          <pre class="snippet-content"><code id="snippet-code">Loading snippet...</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: PROVIDERS & PLUGINS -->
+    <section class="tab-panel" id="tab-providers">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Providers & Plugins</h2>
+          <p>Modular Python plugins dynamically loaded from the <code style="font-family: var(--font-mono); color: var(--ink-primary);">plugins/</code> directory.</p>
+        </div>
+        <div class="section-actions">
+          <button class="btn btn-primary" id="btn-new-provider">+ New Provider</button>
+        </div>
+      </div>
+
+      <!-- Providers Grid -->
+      <div class="providers-grid" id="providers-grid">
+        <!-- Rendered dynamically via app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 3: CODE EDITOR / SWAP -->
+    <section class="tab-panel" id="tab-editor">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Plugin Code Editor & Live Swap</h2>
+          <p>Edit or swap Python provider plugins live on disk with immediate hot-reload feedback.</p>
+        </div>
+      </div>
+
+      <div class="editor-toolbar">
+        <div class="editor-selector-group">
+          <label style="font-size: 12px; color: var(--ink-muted);">Provider File:</label>
+          <select class="select-input" id="editor-plugin-select"></select>
+          <span class="badge" id="editor-filename-badge">plugin.py</span>
+        </div>
+
+        <div class="editor-actions-group">
+          <select class="select-input" id="editor-template-select">
+            <option value="">-- Insert Template --</option>
+          </select>
+          <button class="btn btn-secondary" id="editor-swap-btn" title="Upload a local Python file to replace code">Swap File</button>
+          <input type="file" id="editor-file-input" accept=".py" style="display: none;">
+          <button class="btn btn-primary" id="editor-save-btn">Save & Hot-Reload (⌘S)</button>
+        </div>
+      </div>
+
+      <!-- Feedback Banner for Hot-Reload -->
+      <div id="editor-feedback" class="feedback-banner"></div>
+
+      <!-- In-Browser Code Editor -->
+      <div class="editor-wrapper">
+        <div class="line-numbers" id="editor-line-numbers">1</div>
+        <textarea class="code-textarea" id="editor-code" spellcheck="false" placeholder="# Python plugin source code here..."></textarea>
+      </div>
+    </section>
+
+    <!-- TAB 4: MODELS -->
+    <section class="tab-panel" id="tab-models">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Unified Models Catalog</h2>
+          <p>All active and custom models registered across installed provider plugins.</p>
+        </div>
+        <div class="section-actions">
+          <input type="text" class="form-input" id="models-search-input" placeholder="Filter models or providers..." style="width: 220px;">
+          <button class="btn btn-primary" id="btn-add-model">+ Add Custom Model</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Model ID</th>
+                <th>Display Name</th>
+                <th>Provider</th>
+                <th>Upstream Mapping</th>
+                <th>Context / Max Tokens</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="models-table-body">
+              <!-- Rendered dynamically via app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: PLAYGROUND -->
+    <section class="tab-panel" id="tab-playground">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Interactive Chat Playground</h2>
+          <p>Test completion routing and evaluate model output, latency, and token consumption.</p>
+        </div>
+        <div class="section-actions">
+          <button class="btn btn-secondary btn-sm" id="playground-clear-btn">Clear Thread</button>
+        </div>
+      </div>
+
+      <div class="playground-grid">
+        <!-- Playground Parameters Sidebar -->
+        <div class="playground-sidebar">
+          <div class="card">
+            <div class="card-header">
+              <h3>Parameters</h3>
+            </div>
+            <div class="card-body" style="display: flex; flex-direction: column; gap: 14px;">
+              <div class="form-group">
+                <label class="form-label">Target Model</label>
+                <select class="select-input" id="playground-model-select" style="width: 100%;"></select>
+              </div>
+
+              <div class="form-group">
+                <div style="display: flex; justify-content: space-between;">
+                  <label class="form-label">Temperature</label>
+                  <span id="playground-temp-display" style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-secondary);">1.0</span>
+                </div>
+                <input type="range" id="playground-temp-input" min="0" max="2" step="0.1" value="1.0" style="width: 100%; accent-color: var(--accent-white);">
+              </div>
+
+              <div class="form-group">
+                <label class="form-label">Max Tokens</label>
+                <input type="number" class="form-input" id="playground-tokens-input" placeholder="Default (e.g. 4096)">
+              </div>
+
+              <div class="form-group">
+                <label class="form-label">System Prompt</label>
+                <textarea class="form-input" id="playground-system-input" rows="3" placeholder="You are a helpful assistant..." style="resize: vertical;"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="playground-chat-card">
+          <div class="chat-history" id="playground-history">
+            <!-- Messages rendered dynamically via app.js -->
+          </div>
+
+          <div class="chat-input-area">
+            <textarea class="chat-textarea" id="playground-prompt" placeholder="Send a message to test this model (Cmd+Enter to send)..."></textarea>
+            <div class="chat-input-footer">
+              <span class="input-hint">Press ⌘ + Enter to send</span>
+              <button class="btn btn-primary" id="playground-send-btn">Send Message</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: REQUEST LOGS -->
+    <section class="tab-panel" id="tab-logs">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Request Logs & Telemetry</h2>
+          <p>Real-time audit log of routed requests, model aliases, latency, and status.</p>
+        </div>
+        <div class="section-actions">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-secondary); cursor: pointer;">
+            <input type="checkbox" id="logs-auto-toggle" style="accent-color: var(--accent-white);">
+            Auto-refresh (5s)
+          </label>
+          <button class="btn btn-secondary btn-sm" id="logs-refresh-btn">Refresh</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Status</th>
+                <th>Model</th>
+                <th>Plugin Provider</th>
+                <th>Latency</th>
+                <th>Tokens (In / Out)</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="logs-table-body">
+              <!-- Rendered dynamically via app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- =========================================================================
+       MODALS
+       ========================================================================= -->
+
+  <!-- Modal: New Provider -->
+  <div class="modal-overlay" id="modal-new-provider">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3>Create New Provider Plugin</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Starter Template (Optional)</label>
+          <select class="select-input" id="new-provider-template-select" style="width: 100%;">
+            <option value="">-- Choose Starter Template --</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Filename</label>
+          <input type="text" class="form-input" id="new-provider-filename" placeholder="e.g. groq_provider.py">
+          <span class="form-hint">Will be saved directly into the <code style="color: var(--ink-primary);">plugins/</code> directory.</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Python Source Code</label>
+          <textarea class="form-input" id="new-provider-code" rows="12" style="font-family: var(--font-mono); font-size: 12px; tab-size: 4;" placeholder="# BasePlugin implementation..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button class="btn btn-primary" id="btn-submit-new-provider">Create & Load Plugin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Variables Configuration -->
+  <div class="modal-overlay" id="modal-variables">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3>Configure Variables: <span id="vars-plugin-name" style="color: var(--ink-secondary);"></span></h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="vars-modal-body">
+        <!-- Rendered dynamically via app.js -->
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button class="btn btn-primary" id="btn-save-variables">Save Variables</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Custom Model Form -->
+  <div class="modal-overlay" id="modal-model">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-model-title">Add Custom Model</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Provider</label>
+          <select class="select-input" id="model-form-plugin" style="width: 100%;"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Model ID (Exposed to OpenAI clients)</label>
+          <input type="text" class="form-input" id="model-form-id" placeholder="e.g. gpt-4o-custom">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Display Name</label>
+          <input type="text" class="form-input" id="model-form-name" placeholder="e.g. GPT-4o Custom Endpoint">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Upstream Model ID</label>
+          <input type="text" class="form-input" id="model-form-upstream" placeholder="e.g. gpt-4o-2024-08-06 (or blank for same)">
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label class="form-label">Context Window</label>
+            <input type="number" class="form-input" id="model-form-context" value="128000">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max Tokens</label>
+            <input type="number" class="form-input" id="model-form-max-tokens" value="4096">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button class="btn btn-primary" id="btn-save-model">Save Model</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- App Script -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
