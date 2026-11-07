@@ -49,6 +49,14 @@ The container runs with volume mounts for `./plugins` and `./data`, so any plugi
 
 ### 2. Run with Docker CLI
 
+Run the pre-built image from GitHub Container Registry (GHCR):
+
+```bash
+docker run -d --name llmproxy -p 8000:8000 -v $(pwd)/plugins:/app/plugins -v $(pwd)/data:/app/data ghcr.io/epickitrolaz/llmproxy:latest
+```
+
+Or build and run locally:
+
 ```bash
 docker build -t llmproxy:latest .
 docker run -d --name llmproxy -p 8000:8000 -v $(pwd)/plugins:/app/plugins -v $(pwd)/data:/app/data llmproxy:latest

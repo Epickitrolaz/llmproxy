@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: llmproxy:latest
+    image: ghcr.io/epickitrolaz/llmproxy:latest
     container_name: llmproxy
     ports:
       - "8000:8000"
