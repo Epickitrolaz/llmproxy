@@ -30,9 +30,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+from pathlib import Path
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import httpx
 
@@ -62,6 +64,194 @@ from llmproxy.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+_THOUGHT_SIGNATURES: Dict[str, str] = {}
+_THOUGHT_SIGNATURES_FILE: Optional[str] = None
+
+
+def _get_thought_signatures_file() -> str:
+    global _THOUGHT_SIGNATURES_FILE
+    if _THOUGHT_SIGNATURES_FILE:
+        return _THOUGHT_SIGNATURES_FILE
+    for candidate in ["/app/data", "./data", "/tmp/antigravity", "/tmp"]:
+        p = Path(candidate)
+        if p.exists() and p.is_dir():
+            _THOUGHT_SIGNATURES_FILE = str(p / "thought_signatures.json")
+            return _THOUGHT_SIGNATURES_FILE
+    _THOUGHT_SIGNATURES_FILE = "/tmp/thought_signatures.json"
+    return _THOUGHT_SIGNATURES_FILE
+
+
+def _load_thought_signatures() -> None:
+    global _THOUGHT_SIGNATURES
+    fpath = _get_thought_signatures_file()
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                _THOUGHT_SIGNATURES = json.load(f)
+        except Exception:
+            _THOUGHT_SIGNATURES = {}
+
+
+def _save_thought_signature(
+    call_id: Optional[str], func_name: Optional[str], args: Any, signature: str
+) -> None:
+    global _THOUGHT_SIGNATURES
+    if not signature:
+        return
+    if call_id:
+        _THOUGHT_SIGNATURES[call_id] = signature
+    if func_name:
+        _THOUGHT_SIGNATURES[f"name:{func_name}"] = signature
+        if args is not None:
+            args_key = json.dumps(args, sort_keys=True) if isinstance(args, dict) else str(args)
+            _THOUGHT_SIGNATURES[f"{func_name}:{args_key}"] = signature
+    _THOUGHT_SIGNATURES["latest"] = signature
+    try:
+        fpath = _get_thought_signatures_file()
+        if len(_THOUGHT_SIGNATURES) > 1000:
+            items = list(_THOUGHT_SIGNATURES.items())[-500:]
+            _THOUGHT_SIGNATURES = dict(items)
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(_THOUGHT_SIGNATURES, f)
+    except Exception:
+        pass
+
+
+def _get_thought_signature(
+    call_id: Optional[str], func_name: Optional[str] = None, args: Any = None
+) -> Optional[str]:
+    if not _THOUGHT_SIGNATURES:
+        _load_thought_signatures()
+    if call_id and call_id in _THOUGHT_SIGNATURES:
+        return _THOUGHT_SIGNATURES[call_id]
+    if func_name and args is not None:
+        args_key = json.dumps(args, sort_keys=True) if isinstance(args, dict) else str(args)
+        sig = _THOUGHT_SIGNATURES.get(f"{func_name}:{args_key}")
+        if sig:
+            return sig
+    if func_name and f"name:{func_name}" in _THOUGHT_SIGNATURES:
+        return _THOUGHT_SIGNATURES[f"name:{func_name}"]
+    return _THOUGHT_SIGNATURES.get("latest")
+
+
+def _to_gemini_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {"type": "OBJECT", "properties": {}}
+
+    type_map = {
+        "string": "STRING",
+        "number": "NUMBER",
+        "integer": "INTEGER",
+        "boolean": "BOOLEAN",
+        "array": "ARRAY",
+        "object": "OBJECT",
+    }
+
+    out: Dict[str, Any] = {}
+
+    if "exclusiveMinimum" in schema and "minimum" not in schema:
+        val = schema["exclusiveMinimum"]
+        if isinstance(val, (int, float)):
+            out["minimum"] = val + 1 if isinstance(val, int) else val
+    if "exclusiveMaximum" in schema and "maximum" not in schema:
+        val = schema["exclusiveMaximum"]
+        if isinstance(val, (int, float)):
+            out["maximum"] = val - 1 if isinstance(val, int) else val
+
+    ALLOWED_FIELDS = {
+        "type",
+        "format",
+        "description",
+        "nullable",
+        "enum",
+        "maxItems",
+        "minItems",
+        "properties",
+        "required",
+        "items",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "default",
+    }
+
+    for k, v in schema.items():
+        if k not in ALLOWED_FIELDS:
+            continue
+        if k == "type":
+            if isinstance(v, str):
+                out["type"] = type_map.get(v.lower(), v.upper())
+            elif isinstance(v, list):
+                types = [t for t in v if t != "null"]
+                t0 = types[0] if types else "string"
+                out["type"] = type_map.get(t0.lower(), t0.upper())
+                if "null" in v:
+                    out["nullable"] = True
+            else:
+                out["type"] = "STRING"
+        elif k == "properties" and isinstance(v, dict):
+            out["properties"] = {pk: _to_gemini_schema(pv) for pk, pv in v.items()}
+        elif k == "items" and isinstance(v, dict):
+            out["items"] = _to_gemini_schema(v)
+        elif k == "enum" and isinstance(v, list):
+            out["enum"] = [str(x) for x in v]
+        elif k in ALLOWED_FIELDS:
+            out[k] = v
+
+    if "type" not in out:
+        out["type"] = "OBJECT"
+    return out
+
+
+def _convert_openai_tools_to_gemini(
+    tools: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return None
+    gemini_tools: List[Dict[str, Any]] = []
+    for t in tools:
+        if "function" in t:
+            fn = t["function"]
+            decl = {
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": _to_gemini_schema(fn.get("parameters", {})),
+            }
+            gemini_tools.append({"functionDeclarations": [decl]})
+        elif "functionDeclarations" in t:
+            gemini_tools.append(t)
+        elif "name" in t:
+            decl = {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "parameters": _to_gemini_schema(t.get("parameters", {})),
+            }
+            gemini_tools.append({"functionDeclarations": [decl]})
+    return gemini_tools or None
+
+
+def _convert_tool_choice_to_gemini(
+    tool_choice: Optional[Union[str, Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    if not tool_choice or tool_choice == "auto":
+        return {"functionCallingConfig": {"mode": "AUTO"}}
+    if tool_choice == "none":
+        return {"functionCallingConfig": {"mode": "NONE"}}
+    if tool_choice == "required":
+        return {"functionCallingConfig": {"mode": "ANY"}}
+    if isinstance(tool_choice, dict):
+        if tool_choice.get("type") == "function":
+            fn_name = tool_choice.get("function", {}).get("name")
+            if fn_name:
+                return {
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": [fn_name],
+                    }
+                }
+    return None
 
 
 class AntigravityPlugin(BasePlugin):
@@ -281,7 +471,50 @@ class AntigravityPlugin(BasePlugin):
     ) -> ChatCompletionResponse:
         model_name = model_config.id
         acc_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(m.role in ("tool", "function") for m in request.messages[-2:]):
+            fn = request.tools[0].get("function", {}) if "function" in request.tools[0] else request.tools[0]
+            call_id = f"call_ag_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {})
+            if props:
+                first_k = next(iter(props.keys()))
+                mock_args = json.dumps({first_k: "test_value"})
+            return ChatCompletionResponse(
+                id=f"chatcmpl-ag-{uuid.uuid4().hex[:12]}",
+                created=int(time.time()),
+                model=model_name,
+                choices=[
+                    ChatChoice(
+                        index=0,
+                        message=ChatMessage(
+                            role="assistant",
+                            content=None,
+                            tool_calls=[
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": mock_args,
+                                    },
+                                }
+                            ],
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=15,
+                    completion_tokens=25,
+                    total_tokens=40,
+                ),
+            )
+
         content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label}."
+        if any(m.role in ("tool", "function") for m in request.messages):
+            content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label} with tool output processed."
 
         return ChatCompletionResponse(
             id=f"chatcmpl-ag-{uuid.uuid4().hex[:12]}",
@@ -309,12 +542,87 @@ class AntigravityPlugin(BasePlugin):
     ) -> AsyncIterator[ChatCompletionChunk]:
         model_name = model_config.id
         chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
         acc_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(m.role in ("tool", "function") for m in request.messages[-2:]):
+            fn = request.tools[0].get("function", {}) if "function" in request.tools[0] else request.tools[0]
+            call_id = f"call_ag_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {})
+            if props:
+                first_k = next(iter(props.keys()))
+                mock_args = json.dumps({first_k: "test_value"})
+
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": "",
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason=None,
+                    )
+                ],
+            )
+            arg_chunks = [mock_args[: len(mock_args) // 2], mock_args[len(mock_args) // 2 :]]
+            for arg_piece in arg_chunks:
+                if arg_piece:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatChoiceDelta(
+                                index=0,
+                                delta={
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": arg_piece},
+                                        }
+                                    ]
+                                },
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={},
+                        finish_reason="tool_calls",
+                    )
+                ],
+            )
+            return
+
         text = f"Simulated 9Router Antigravity stream response for {model_name}{acc_label}."
         words = text.split(" ")
 
         yield ChatCompletionChunk(
             id=chunk_id,
+            created=created,
             model=model_name,
             choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
         )
@@ -322,6 +630,7 @@ class AntigravityPlugin(BasePlugin):
         for i, word in enumerate(words):
             yield ChatCompletionChunk(
                 id=chunk_id,
+                created=created,
                 model=model_name,
                 choices=[
                     ChatChoiceDelta(
@@ -333,6 +642,7 @@ class AntigravityPlugin(BasePlugin):
 
         yield ChatCompletionChunk(
             id=chunk_id,
+            created=created,
             model=model_name,
             choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
         )
@@ -383,20 +693,86 @@ class AntigravityPlugin(BasePlugin):
         contents: List[Dict[str, Any]] = []
         system_instruction_text = ""
 
+        # Map call_id -> function_name for tool response mapping
+        call_id_to_name: Dict[str, str] = {}
+        for m in request.messages:
+            if getattr(m, "tool_calls", None):
+                for tc in m.tool_calls:
+                    cid = tc.get("id")
+                    cname = tc.get("function", {}).get("name")
+                    if cid and cname:
+                        call_id_to_name[cid] = cname
+
         for m in request.messages:
             if m.role == "system":
                 system_instruction_text += (str(m.content) + "\n")
+            elif m.role in ("tool", "function"):
+                call_id = m.tool_call_id or getattr(m, "id", None)
+                func_name = m.name or (call_id_to_name.get(call_id) if call_id else None) or "tool"
+                resp_content = m.content
+                if isinstance(resp_content, str):
+                    try:
+                        parsed_resp = json.loads(resp_content)
+                        if not isinstance(parsed_resp, dict):
+                            parsed_resp = {"output": resp_content}
+                    except Exception:
+                        parsed_resp = {"output": resp_content}
+                elif isinstance(resp_content, dict):
+                    parsed_resp = resp_content
+                else:
+                    parsed_resp = {"output": str(resp_content)}
+
+                fr_part: Dict[str, Any] = {
+                    "name": func_name,
+                    "response": parsed_resp,
+                }
+                if call_id:
+                    fr_part["id"] = call_id
+                contents.append({"role": "user", "parts": [{"functionResponse": fr_part}]})
             elif m.role == "user":
-                prompt_text = str(m.content)
+                prompt_text = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
                 wrapped_text = f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>" if not prompt_text.startswith("<USER_REQUEST>") else prompt_text
                 contents.append({
                     "role": "user",
                     "parts": [{"text": wrapped_text}]
                 })
             elif m.role in ("assistant", "model"):
+                parts = []
+                if m.content:
+                    text_val = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
+                    if text_val:
+                        parts.append({"text": text_val})
+                if getattr(m, "tool_calls", None):
+                    for tc in m.tool_calls:
+                        call_id = tc.get("id")
+                        func = tc.get("function", {})
+                        name = func.get("name", "")
+                        raw_args = func.get("arguments", "{}")
+                        if isinstance(raw_args, str):
+                            try:
+                                parsed_args = json.loads(raw_args)
+                            except Exception:
+                                parsed_args = {}
+                        else:
+                            parsed_args = raw_args or {}
+
+                        fc_part: Dict[str, Any] = {
+                            "name": name,
+                            "args": parsed_args,
+                        }
+                        if call_id:
+                            fc_part["id"] = call_id
+
+                        part_entry: Dict[str, Any] = {"functionCall": fc_part}
+                        thought_sig = _get_thought_signature(call_id, name, parsed_args)
+                        if thought_sig:
+                            part_entry["thoughtSignature"] = thought_sig
+                        parts.append(part_entry)
+                if not parts:
+                    parts.append({"text": ""})
                 contents.append({
                     "role": "model",
-                    "parts": [{"text": str(m.content)}]
+                    "parts": parts,
                 })
 
         if not contents:
@@ -454,6 +830,13 @@ class AntigravityPlugin(BasePlugin):
             "sessionId": session_id_str,
         }
 
+        gemini_tools = _convert_openai_tools_to_gemini(request.tools)
+        if gemini_tools:
+            inner_request["tools"] = gemini_tools
+            gemini_tool_config = _convert_tool_choice_to_gemini(request.tool_choice)
+            if gemini_tool_config:
+                inner_request["toolConfig"] = gemini_tool_config
+
         body: Dict[str, Any] = {
             "project": project_id,
             "requestId": request_id,
@@ -496,6 +879,9 @@ class AntigravityPlugin(BasePlugin):
             async def sse_stream_generator() -> AsyncIterator[ChatCompletionChunk]:
                 chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
+                current_thought_sig = None
+                tool_call_idx = 0
+                has_tool_call = False
 
                 yield ChatCompletionChunk(
                     id=chunk_id,
@@ -533,7 +919,44 @@ class AntigravityPlugin(BasePlugin):
                                 for cand in candidates:
                                     parts = cand.get("content", {}).get("parts", [])
                                     for part in parts:
-                                        if "text" in part and part["text"]:
+                                        if "thoughtSignature" in part and part["thoughtSignature"]:
+                                            current_thought_sig = part["thoughtSignature"]
+
+                                        if "functionCall" in part:
+                                            fc = part["functionCall"]
+                                            name = fc.get("name", "")
+                                            args = fc.get("args", {})
+                                            call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                                            has_tool_call = True
+                                            if current_thought_sig:
+                                                _save_thought_signature(call_id, name, args, current_thought_sig)
+
+                                            yield ChatCompletionChunk(
+                                                id=chunk_id,
+                                                created=created,
+                                                model=target_model,
+                                                choices=[
+                                                    ChatChoiceDelta(
+                                                        index=0,
+                                                        delta={
+                                                            "tool_calls": [
+                                                                {
+                                                                    "index": tool_call_idx,
+                                                                    "id": call_id,
+                                                                    "type": "function",
+                                                                    "function": {
+                                                                        "name": name,
+                                                                        "arguments": json.dumps(args),
+                                                                    },
+                                                                }
+                                                            ]
+                                                        },
+                                                        finish_reason=None,
+                                                    )
+                                                ],
+                                            )
+                                            tool_call_idx += 1
+                                        elif "text" in part and part["text"]:
                                             yield ChatCompletionChunk(
                                                 id=chunk_id,
                                                 created=created,
@@ -548,17 +971,20 @@ class AntigravityPlugin(BasePlugin):
                             except Exception:
                                 continue
 
+                finish_reason = "tool_calls" if has_tool_call else "stop"
                 yield ChatCompletionChunk(
                     id=chunk_id,
                     created=created,
                     model=target_model,
-                    choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
+                    choices=[ChatChoiceDelta(index=0, delta={}, finish_reason=finish_reason)],
                 )
 
             return sse_stream_generator()
 
         # Non-streaming: accumulate response parts
         full_text = []
+        tool_calls: List[Dict[str, Any]] = []
+        current_thought_sig = None
         prompt_tokens = 0
         completion_tokens = 0
         total_tokens = 0
@@ -599,12 +1025,32 @@ class AntigravityPlugin(BasePlugin):
                         for cand in candidates:
                             parts = cand.get("content", {}).get("parts", [])
                             for part in parts:
-                                if "text" in part and part["text"]:
+                                if "thoughtSignature" in part and part["thoughtSignature"]:
+                                    current_thought_sig = part["thoughtSignature"]
+                                if "functionCall" in part:
+                                    fc = part["functionCall"]
+                                    name = fc.get("name", "")
+                                    args = fc.get("args", {})
+                                    call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                                    if current_thought_sig:
+                                        _save_thought_signature(call_id, name, args, current_thought_sig)
+                                    tool_calls.append({
+                                        "id": call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": json.dumps(args),
+                                        },
+                                    })
+                                elif "text" in part and part["text"]:
                                     full_text.append(part["text"])
                     except Exception:
                         continue
 
         assembled_text = "".join(full_text)
+        finish_reason = "tool_calls" if tool_calls else "stop"
+        msg_content = assembled_text if (assembled_text or not tool_calls) else None
+
         return ChatCompletionResponse(
             id=f"chatcmpl-ag-{uuid.uuid4().hex[:12]}",
             created=int(time.time()),
@@ -612,8 +1058,12 @@ class AntigravityPlugin(BasePlugin):
             choices=[
                 ChatChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=assembled_text),
-                    finish_reason="stop",
+                    message=ChatMessage(
+                        role="assistant",
+                        content=msg_content,
+                        tool_calls=tool_calls if tool_calls else None,
+                    ),
+                    finish_reason=finish_reason,
                 )
             ],
             usage=CompletionUsage(

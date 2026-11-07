@@ -27,7 +27,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Custom variables per plugin (API keys, base URLs, options).
   - In-browser code editor with AST syntax checking and instant hot-reload.
 - **OpenAI-Compatible Local API**:
-  - `POST /v1/chat/completions`: Supports standard JSON and real-time streaming Server-Sent Events (`stream: true`).
+  - `POST /v1/chat/completions`: Supports standard JSON, real-time streaming Server-Sent Events (`stream: true`), and tool / function calling (`tools`, `tool_choice`, `tool_calls`).
   - `GET /v1/models` and `GET /v1/models/{model_id}`: Dynamic catalog of all enabled models.
 - **Minimalist Black & White Dashboard**:
   - Obsidian/monochrome high-contrast design.
@@ -139,4 +139,35 @@ for chunk in response:
     content = chunk.choices[0].delta.content or ""
     print(content, end="", flush=True)
 print()
+```
+
+### Using with OpenCode (`opencode.json`)
+
+To route OpenCode requests through LLMProxy, configure a provider in your `opencode.json` (e.g. `~/.config/opencode/opencode.json`). Make sure to specify `"package": "@opencode/ai/providers/openai-compatible"`:
+
+```json
+{
+  "providers": {
+    "llmproxy": {
+      "name": "LLMProxy",
+      "settings": {
+        "baseURL": "http://localhost:8000/v1",
+        "apiKey": "llmproxy"
+      },
+      "models": {
+        "gemini-3.8-flash-high": {
+          "limit": {
+            "context": 512000
+          }
+        }
+      },
+      "package": "@opencode/ai/providers/openai-compatible"
+    }
+  }
+}
+```
+
+Then run OpenCode with:
+```bash
+opencode run -m llmproxy/gemini-3.8-flash-high "Explain quantum computing briefly."
 ```
