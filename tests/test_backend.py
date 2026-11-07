@@ -18,7 +18,7 @@ def setup_backend():
     """Ensure plugins and test credentials are initialized for backend tests."""
     plugin_manager.discover_and_load_all()
     # Configure test API keys so variable validation succeeds
-    plugin_manager.update_plugin_config("antigravity", enabled=True, variables={"api_key": "test-key"})
+    plugin_manager.update_plugin_config("antigravity", enabled=True, variables={"api_key": "test-key", "timeout": 60})
     plugin_manager.update_plugin_config("codex", enabled=True, variables={"api_key": "test-key"})
     plugin_manager.update_plugin_config("claude_code", enabled=True, variables={"api_key": "test-key"})
     plugin_manager.update_plugin_config("openai_compatible", enabled=True, variables={"api_key": ""})
@@ -185,10 +185,10 @@ def test_error_handling_disabled_plugin():
 
 
 def test_error_handling_variable_validation():
-    """Verify 400 is returned when required plugin variables are missing."""
+    """Verify 400 is returned when required operational plugin variables are missing."""
     with TestClient(app) as client:
-        # Clear api_key for antigravity
-        plugin_manager.update_plugin_config("antigravity", variables={"api_key": ""})
+        # Clear timeout for antigravity
+        plugin_manager.update_plugin_config("antigravity", variables={"timeout": ""})
 
         resp = client.post(
             "/v1/chat/completions",
@@ -201,8 +201,8 @@ def test_error_handling_variable_validation():
         data = resp.json()
         assert "required" in data["detail"]["error"]["message"].lower()
 
-        # Restore api_key
-        plugin_manager.update_plugin_config("antigravity", variables={"api_key": "test-key"})
+        # Restore timeout
+        plugin_manager.update_plugin_config("antigravity", variables={"timeout": 60})
 
 
 def test_telemetry_logs_recording():

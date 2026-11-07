@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
@@ -81,6 +82,51 @@ class ModelListResponse(BaseModel):
 # ==========================================
 # Plugin & Customization Schemas
 # ==========================================
+
+class Account(BaseModel):
+    id: str = Field(default_factory=lambda: f"acc_{uuid.uuid4().hex[:8]}")
+    provider_id: str
+    name: str
+    api_key: str = ""
+    base_url: Optional[str] = None
+    priority: int = 1
+    weight: int = 1
+    enabled: bool = True
+    rate_limited_until: Optional[float] = None
+    error_count: int = 0
+    success_count: int = 0
+    last_used_at: Optional[float] = None
+    extra_config: Dict[str, Any] = Field(default_factory=dict)
+
+    def is_available(self, now: Optional[float] = None) -> bool:
+        if not self.enabled:
+            return False
+        current_time = now if now is not None else time.time()
+        if self.rate_limited_until is not None and self.rate_limited_until > current_time:
+            return False
+        return True
+
+
+class AccountCreate(BaseModel):
+    provider_id: str
+    name: str
+    api_key: str = ""
+    base_url: Optional[str] = None
+    priority: int = 1
+    weight: int = 1
+    enabled: bool = True
+    extra_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountUpdate(BaseModel):
+    name: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    priority: Optional[int] = None
+    weight: Optional[int] = None
+    enabled: Optional[bool] = None
+    extra_config: Optional[Dict[str, Any]] = None
+
 
 class PluginVariable(BaseModel):
     name: str

@@ -11,6 +11,9 @@
     currentTab: "overview",
     plugins: [],
     templates: [],
+    accounts: [],
+    accountProviderFilter: "",
+    selectedAccountId: null,
     stats: {},
     logs: [],
     activeSnippetLang: "python",
@@ -40,6 +43,26 @@
     // Providers
     providersGrid: document.getElementById("providers-grid"),
     btnNewProvider: document.getElementById("btn-new-provider"),
+    // Accounts
+    statTotalAccounts: document.getElementById("stat-total-accounts"),
+    statActiveAccounts: document.getElementById("stat-active-accounts"),
+    statCooldownAccounts: document.getElementById("stat-cooldown-accounts"),
+    statRoutingStrategy: document.getElementById("stat-routing-strategy"),
+    accountsTableBody: document.getElementById("accounts-table-body"),
+    accountsProviderFilter: document.getElementById("accounts-provider-filter"),
+    btnConnectAccount: document.getElementById("btn-connect-account"),
+    modalAccount: document.getElementById("modal-account"),
+    modalAccountTitle: document.getElementById("modal-account-title"),
+    accountFormId: document.getElementById("account-form-id"),
+    accountProviderSelect: document.getElementById("account-provider-select"),
+    accountName: document.getElementById("account-name"),
+    accountApiKey: document.getElementById("account-api-key"),
+    btnToggleAccountKey: document.getElementById("btn-toggle-account-key"),
+    accountBaseUrl: document.getElementById("account-base-url"),
+    accountPriority: document.getElementById("account-priority"),
+    accountWeight: document.getElementById("account-weight"),
+    accountEnabledToggle: document.getElementById("account-enabled-toggle"),
+    btnSaveAccount: document.getElementById("btn-save-account"),
     // Editor
     editorPluginSelect: document.getElementById("editor-plugin-select"),
     editorTemplateSelect: document.getElementById("editor-template-select"),
@@ -150,8 +173,13 @@
     if (tabId === "overview") {
       fetchStats();
       fetchPlugins();
+      fetchAccounts();
     } else if (tabId === "providers") {
       fetchPlugins();
+      fetchAccounts();
+    } else if (tabId === "accounts") {
+      fetchPlugins();
+      fetchAccounts();
     } else if (tabId === "editor") {
       if (state.plugins.length > 0 && !state.selectedEditorPluginId) {
         selectEditorPlugin(state.plugins[0].id);
@@ -187,6 +215,7 @@
     try {
       const data = await api("/api/plugins");
       state.plugins = Array.isArray(data) ? data : data.plugins || [];
+      syncAccountProviderSelects();
       renderProvidersGrid();
       renderModelsTable();
       syncEditorPluginSelect();
@@ -195,6 +224,44 @@
       renderStats();
     } catch (err) {
       console.error("Failed to fetch plugins", err);
+    }
+  }
+
+  async function fetchAccounts() {
+    try {
+      const data = await api("/api/accounts");
+      state.accounts = Array.isArray(data) ? data : [];
+      renderAccountsTable();
+      renderAccountsStats();
+      renderProvidersGrid();
+    } catch (err) {
+      console.error("Failed to fetch accounts", err);
+    }
+  }
+
+  function syncAccountProviderSelects() {
+    if (el.accountProviderSelect) {
+      const current = el.accountProviderSelect.value;
+      el.accountProviderSelect.innerHTML = "";
+      state.plugins.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = `${p.name} (${p.id})`;
+        el.accountProviderSelect.appendChild(opt);
+      });
+      if (current) el.accountProviderSelect.value = current;
+    }
+
+    if (el.accountsProviderFilter) {
+      const current = el.accountsProviderFilter.value;
+      el.accountsProviderFilter.innerHTML = '<option value="">All Providers</option>';
+      state.plugins.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.name;
+        el.accountsProviderFilter.appendChild(opt);
+      });
+      if (current) el.accountsProviderFilter.value = current;
     }
   }
 
@@ -379,6 +446,9 @@ print(response.choices[0].message.content)`;
         .map((m) => `<span class="badge">${m.id}</span>`)
         .join(" ");
 
+      const connectedAccounts = (state.accounts || []).filter((a) => a.provider_id === p.id);
+      const accountsBadge = `<span class="badge ${connectedAccounts.length > 0 ? 'badge-success' : 'badge-muted'} btn-jump-accounts" data-id="${p.id}" style="cursor: pointer;" title="View in Accounts tab">${connectedAccounts.length} accounts connected</span>`;
+
       card.innerHTML = `
         <div>
           <div class="provider-header">
@@ -396,6 +466,7 @@ print(response.choices[0].message.content)`;
           </div>
           <p class="provider-desc">${escapeHtml(p.description || "Provider plugin for upstream model routing.")}</p>
           <div class="provider-models-badge-group">
+            ${accountsBadge}
             ${modelBadges}
             ${modelsCount > 3 ? `<span class="badge">+${modelsCount - 3} more</span>` : ""}
           </div>
@@ -403,6 +474,7 @@ print(response.choices[0].message.content)`;
         <div class="provider-footer">
           <span style="font-size: 12px; color: var(--ink-muted); font-family: var(--font-mono);">${modelsCount} models</span>
           <div class="provider-actions">
+            <button class="btn btn-secondary btn-sm btn-provider-account" data-id="${p.id}">+ Account</button>
             <button class="btn btn-secondary btn-sm btn-vars" data-id="${p.id}">Variables</button>
             <button class="btn btn-secondary btn-sm btn-edit-code" data-id="${p.id}">Edit Code</button>
             <button class="btn btn-secondary btn-sm btn-reload" data-id="${p.id}" title="Hot reload plugin">⟳</button>
@@ -428,6 +500,14 @@ print(response.choices[0].message.content)`;
         }
       });
 
+      card.querySelector(".btn-jump-accounts").addEventListener("click", () => {
+        state.accountProviderFilter = p.id;
+        if (el.accountsProviderFilter) el.accountsProviderFilter.value = p.id;
+        switchTab("accounts");
+      });
+      card.querySelector(".btn-provider-account").addEventListener("click", () => {
+        openAccountModal(null, p.id);
+      });
       card.querySelector(".btn-vars").addEventListener("click", () => openVariablesModal(p.id));
       card.querySelector(".btn-edit-code").addEventListener("click", () => {
         switchTab("editor");
@@ -455,6 +535,316 @@ print(response.choices[0].message.content)`;
       });
 
       el.providersGrid.appendChild(card);
+    });
+  }
+
+  // =========================================================================
+  // Accounts & Multi-Account Load Balancing Tab
+  // =========================================================================
+
+  function renderAccountsStats() {
+    const total = state.accounts.length;
+    const now = Date.now() / 1000;
+    const cooldownCount = state.accounts.filter(
+      (a) => a.rate_limited_until && a.rate_limited_until > now
+    ).length;
+    const activeCount = state.accounts.filter(
+      (a) => a.enabled && (!a.rate_limited_until || a.rate_limited_until <= now)
+    ).length;
+
+    if (el.statTotalAccounts) el.statTotalAccounts.textContent = total;
+    if (el.statActiveAccounts) el.statActiveAccounts.textContent = activeCount;
+    if (el.statCooldownAccounts) el.statCooldownAccounts.textContent = cooldownCount;
+
+    if (el.statRoutingStrategy) {
+      const agPlugin = state.plugins.find((p) => p.id === "antigravity");
+      const stratVar = agPlugin?.variables?.find((v) => v.name === "load_balancing_strategy");
+      const stratVal = stratVar?.value || stratVar?.default || "round_robin";
+      el.statRoutingStrategy.textContent = String(stratVal).replace("_", " ");
+    }
+  }
+
+  function renderAccountsTable() {
+    if (!el.accountsTableBody) return;
+    el.accountsTableBody.innerHTML = "";
+
+    const filterProvider = state.accountProviderFilter;
+    const filtered = filterProvider
+      ? state.accounts.filter((a) => a.provider_id === filterProvider)
+      : state.accounts;
+
+    if (filtered.length === 0) {
+      el.accountsTableBody.innerHTML = `
+        <tr>
+          <td colspan="8" style="text-align: center; padding: 48px 16px; color: var(--ink-secondary);">
+            <div style="font-size: 14px; margin-bottom: 8px;">No Connected Accounts ${filterProvider ? `for ${filterProvider}` : ''}</div>
+            <p style="font-size: 12px; color: var(--ink-muted); margin-bottom: 16px;">Connect accounts to enable automated load balancing and priority failovers.</p>
+            <button class="btn btn-primary btn-sm" id="btn-empty-connect">+ Connect Account</button>
+          </td>
+        </tr>
+      `;
+      const emptyBtn = document.getElementById("btn-empty-connect");
+      if (emptyBtn) emptyBtn.addEventListener("click", () => openAccountModal(null, filterProvider));
+      return;
+    }
+
+    const now = Date.now() / 1000;
+
+    filtered.forEach((acc) => {
+      const plugin = state.plugins.find((p) => p.id === acc.provider_id);
+      const providerLabel = plugin ? plugin.name : acc.provider_id;
+      const isCooldown = Boolean(acc.rate_limited_until && acc.rate_limited_until > now);
+      const remSeconds = isCooldown ? Math.ceil(acc.rate_limited_until - now) : 0;
+
+      let statusBadge = "";
+      if (!acc.enabled) {
+        statusBadge = `<span class="badge badge-muted">Disabled</span>`;
+      } else if (isCooldown) {
+        statusBadge = `<span class="badge badge-warning" data-cooldown-until="${acc.rate_limited_until}">⏳ Cooldown (${remSeconds}s)</span>`;
+      } else {
+        statusBadge = `<span class="badge badge-success"><span class="status-dot"></span> Active</span>`;
+      }
+
+      const maskedKey = acc.api_key
+        ? `${acc.api_key.slice(0, 4)}••••••••${acc.api_key.slice(-4)}`
+        : `<span style="color: var(--ink-muted);">(No Key Required)</span>`;
+
+      const lastUsed = acc.last_used_at
+        ? new Date(acc.last_used_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : `<span style="color: var(--ink-muted);">Never</span>`;
+
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>
+          <span class="badge" style="font-weight: 600;">${escapeHtml(providerLabel)}</span>
+        </td>
+        <td>
+          <div style="font-weight: 500; color: var(--ink-primary);">${escapeHtml(acc.name)}</div>
+          <div class="mono-cell" style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(acc.id)}</div>
+        </td>
+        <td>${statusBadge}</td>
+        <td>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span class="mono-cell" id="key-text-${acc.id}">${maskedKey}</span>
+            ${acc.api_key ? `<button class="btn btn-secondary btn-sm btn-show-key" data-id="${acc.id}" style="padding: 2px 6px; font-size: 10px;">Reveal</button>` : ''}
+          </div>
+        </td>
+        <td>
+          <span class="mono-cell">Pri: ${acc.priority || 1} • Wt: ${acc.weight || 1}</span>
+        </td>
+        <td>
+          <span class="mono-cell" style="color: #34d399;">✓ ${acc.success_count || 0}</span>
+          <span class="mono-cell" style="color: #f43f5e; margin-left: 6px;">✕ ${acc.error_count || 0}</span>
+        </td>
+        <td>${lastUsed}</td>
+        <td>
+          <div style="display: flex; gap: 6px; align-items: center;">
+            ${isCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cooldown" data-id="${acc.id}" title="Reset cooldown">Reset</button>` : ''}
+            <button class="btn btn-secondary btn-sm btn-edit-account" data-id="${acc.id}">Edit</button>
+            <button class="btn btn-secondary btn-sm btn-toggle-account" data-id="${acc.id}">${acc.enabled ? "Disable" : "Enable"}</button>
+            <button class="btn btn-danger btn-sm btn-delete-account" data-id="${acc.id}" title="Delete account">✕</button>
+          </div>
+        </td>
+      `;
+
+      // Event handlers
+      const revealBtn = row.querySelector(".btn-show-key");
+      if (revealBtn) {
+        revealBtn.addEventListener("click", () => {
+          const keySpan = document.getElementById(`key-text-${acc.id}`);
+          if (revealBtn.textContent === "Reveal") {
+            keySpan.textContent = acc.api_key;
+            revealBtn.textContent = "Hide";
+          } else {
+            keySpan.innerHTML = maskedKey;
+            revealBtn.textContent = "Reveal";
+          }
+        });
+      }
+
+      const resetBtn = row.querySelector(".btn-reset-cooldown");
+      if (resetBtn) {
+        resetBtn.addEventListener("click", () => resetAccountCooldown(acc.id));
+      }
+
+      row.querySelector(".btn-edit-account").addEventListener("click", () => openAccountModal(acc));
+      row.querySelector(".btn-toggle-account").addEventListener("click", async () => {
+        try {
+          await api(`/api/accounts/${acc.id}`, {
+            method: "PUT",
+            body: JSON.stringify({ enabled: !acc.enabled }),
+          });
+          acc.enabled = !acc.enabled;
+          showToast(`Account '${acc.name}' ${acc.enabled ? "enabled" : "disabled"}`);
+          fetchAccounts();
+        } catch (err) {
+          showToast(`Failed: ${err.message}`, "error");
+        }
+      });
+
+      row.querySelector(".btn-delete-account").addEventListener("click", async () => {
+        if (confirm(`Delete account '${acc.name}' from ${providerLabel}?`)) {
+          try {
+            await api(`/api/accounts/${acc.id}`, { method: "DELETE" });
+            showToast(`Account '${acc.name}' deleted`);
+            fetchAccounts();
+          } catch (err) {
+            showToast(`Delete failed: ${err.message}`, "error");
+          }
+        }
+      });
+
+      el.accountsTableBody.appendChild(row);
+    });
+  }
+
+  function openAccountModal(account = null, defaultProviderId = null) {
+    syncAccountProviderSelects();
+    if (account) {
+      if (el.modalAccountTitle) el.modalAccountTitle.textContent = "Edit Provider Account";
+      if (el.accountFormId) el.accountFormId.value = account.id;
+      if (el.accountProviderSelect) el.accountProviderSelect.value = account.provider_id;
+      if (el.accountName) el.accountName.value = account.name;
+      if (el.accountApiKey) el.accountApiKey.value = account.api_key || "";
+      if (el.accountBaseUrl) el.accountBaseUrl.value = account.base_url || "";
+      if (el.accountPriority) el.accountPriority.value = account.priority || 1;
+      if (el.accountWeight) el.accountWeight.value = account.weight || 1;
+      if (el.accountEnabledToggle) el.accountEnabledToggle.checked = account.enabled !== false;
+    } else {
+      if (el.modalAccountTitle) el.modalAccountTitle.textContent = "Connect Provider Account";
+      if (el.accountFormId) el.accountFormId.value = "";
+      if (el.accountProviderSelect) {
+        if (defaultProviderId) {
+          el.accountProviderSelect.value = defaultProviderId;
+        } else if (state.plugins.length > 0) {
+          el.accountProviderSelect.value = state.plugins[0].id;
+        }
+      }
+      if (el.accountName) el.accountName.value = "";
+      if (el.accountApiKey) el.accountApiKey.value = "";
+      if (el.accountBaseUrl) el.accountBaseUrl.value = "";
+      if (el.accountPriority) el.accountPriority.value = 1;
+      if (el.accountWeight) el.accountWeight.value = 1;
+      if (el.accountEnabledToggle) el.accountEnabledToggle.checked = true;
+    }
+
+    if (el.btnToggleAccountKey && el.accountApiKey) {
+      el.accountApiKey.type = "password";
+      el.btnToggleAccountKey.textContent = "Show";
+    }
+
+    if (el.modalAccount) el.modalAccount.classList.add("active");
+  }
+
+  async function saveAccount() {
+    const id = el.accountFormId ? el.accountFormId.value.trim() : "";
+    const providerId = el.accountProviderSelect ? el.accountProviderSelect.value : "";
+    const name = el.accountName ? el.accountName.value.trim() : "";
+    const apiKey = el.accountApiKey ? el.accountApiKey.value.trim() : "";
+    const baseUrl = el.accountBaseUrl ? el.accountBaseUrl.value.trim() : "";
+    const priority = el.accountPriority ? parseInt(el.accountPriority.value, 10) || 1 : 1;
+    const weight = el.accountWeight ? parseInt(el.accountWeight.value, 10) || 1 : 1;
+    const enabled = el.accountEnabledToggle ? el.accountEnabledToggle.checked : true;
+
+    if (!name) {
+      showToast("Account name / label is required", "error");
+      return;
+    }
+    if (!providerId) {
+      showToast("Please select a provider", "error");
+      return;
+    }
+
+    try {
+      if (id) {
+        await api(`/api/accounts/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            name,
+            api_key: apiKey,
+            base_url: baseUrl || null,
+            priority,
+            weight,
+            enabled,
+          }),
+        });
+        showToast(`Account '${name}' updated`);
+      } else {
+        await api("/api/accounts", {
+          method: "POST",
+          body: JSON.stringify({
+            provider_id: providerId,
+            name,
+            api_key: apiKey,
+            base_url: baseUrl || null,
+            priority,
+            weight,
+            enabled,
+          }),
+        });
+        showToast(`Account '${name}' connected successfully`);
+      }
+
+      if (el.modalAccount) el.modalAccount.classList.remove("active");
+      fetchAccounts();
+    } catch (err) {
+      showToast(`Save failed: ${err.message}`, "error");
+    }
+  }
+
+  async function resetAccountCooldown(accountId) {
+    try {
+      await api(`/api/accounts/${accountId}/reset-cooldown`, { method: "POST" });
+      showToast("Cooldown reset. Account is active.");
+      fetchAccounts();
+    } catch (err) {
+      showToast(`Failed to reset cooldown: ${err.message}`, "error");
+    }
+  }
+
+  // Periodic cooldown countdown updater
+  setInterval(() => {
+    if (state.currentTab !== "accounts") return;
+    const now = Date.now() / 1000;
+    const cooldownSpans = document.querySelectorAll("[data-cooldown-until]");
+    cooldownSpans.forEach((span) => {
+      const until = parseFloat(span.dataset.cooldownUntil);
+      if (until > now) {
+        const rem = Math.ceil(until - now);
+        span.textContent = `⏳ Cooldown (${rem}s)`;
+      } else {
+        span.className = "badge badge-success";
+        span.innerHTML = `<span class="status-dot"></span> Active`;
+        span.removeAttribute("data-cooldown-until");
+      }
+    });
+  }, 1000);
+
+  // Wire Accounts Event Listeners
+  if (el.btnConnectAccount) {
+    el.btnConnectAccount.addEventListener("click", () => openAccountModal());
+  }
+
+  if (el.accountsProviderFilter) {
+    el.accountsProviderFilter.addEventListener("change", (e) => {
+      state.accountProviderFilter = e.target.value;
+      renderAccountsTable();
+    });
+  }
+
+  if (el.btnSaveAccount) {
+    el.btnSaveAccount.addEventListener("click", saveAccount);
+  }
+
+  if (el.btnToggleAccountKey && el.accountApiKey) {
+    el.btnToggleAccountKey.addEventListener("click", () => {
+      if (el.accountApiKey.type === "password") {
+        el.accountApiKey.type = "text";
+        el.btnToggleAccountKey.textContent = "Hide";
+      } else {
+        el.accountApiKey.type = "password";
+        el.btnToggleAccountKey.textContent = "Show";
+      }
     });
   }
 
@@ -1384,6 +1774,7 @@ print(response.choices[0].message.content)`;
     await Promise.all([
       fetchStats(),
       fetchPlugins(),
+      fetchAccounts(),
       fetchTemplates(),
       fetchLogs(),
     ]);

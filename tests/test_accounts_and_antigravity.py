@@ -1,0 +1,213 @@
+"""Tests for Accounts, Multi-Account Load Balancing, and 9Router Antigravity Implementation."""
+
+import time
+import pytest
+from fastapi.testclient import TestClient
+from llmproxy.main import app
+from llmproxy.core.manager import plugin_manager
+from llmproxy.schemas import Account, AccountCreate, AccountUpdate
+from plugins.antigravity import AntigravityPlugin
+
+
+def test_antigravity_9router_algorithms():
+    """Verify 9Router IDE trajectory generation, field stripping, and telemetry headers."""
+    plugin = AntigravityPlugin()
+
+    # 1. Deterministic SHA-256 UUID
+    uuid_str = plugin.generate_sha256_uuid("test-session-seed-123")
+    assert len(uuid_str) == 36
+    assert uuid_str.count("-") == 4
+    # Deterministic check
+    assert uuid_str == plugin.generate_sha256_uuid("test-session-seed-123")
+
+    # 2. 9Router Trajectory ID format: agent/<conversation_id>/<timestamp>/<trajectory_id>/<step>
+    traj_id = plugin.generate_trajectory_id(
+        conversation_seed="conv-1",
+        trajectory_seed="traj-1",
+        step=3,
+        timestamp_ms=1700000000000,
+    )
+    assert traj_id.startswith("agent/")
+    parts = traj_id.split("/")
+    assert len(parts) == 5
+    assert parts[0] == "agent"
+    assert parts[2] == "1700000000000"
+    assert parts[4] == "3"
+
+    # 3. IDE Request ID format
+    ide_req_id = plugin.generate_ide_request_id(seed="req-seed")
+    assert ide_req_id.startswith("ide_req_")
+    assert len(ide_req_id) > 10
+
+    # 4. Strict field sanitization of Google-rejected fields
+    dirty_payload = {
+        "model": "gemini-3.8-flash-high",
+        "messages": [{"role": "user", "content": "hi"}],
+        "temperature": 0.7,
+        # Google-rejected parameters
+        "thinking": True,
+        "thinkingConfig": {"thinkingBudget": 1000},
+        "reasoning_effort": "high",
+        "enable_thinking": True,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.5,
+        "logprobs": True,
+        "user": "test-user",
+    }
+    cleaned = plugin.sanitize_payload(dirty_payload)
+    assert "thinking" not in cleaned
+    assert "thinkingConfig" not in cleaned
+    assert "reasoning_effort" not in cleaned
+    assert "enable_thinking" not in cleaned
+    assert "frequency_penalty" not in cleaned
+    assert "presence_penalty" not in cleaned
+    assert "logprobs" not in cleaned
+    assert "user" not in cleaned
+    assert cleaned["model"] == "gemini-3.8-flash-high"
+    assert cleaned["temperature"] == 0.7
+
+    # 5. Header injection
+    account = Account(
+        id="acc_test",
+        provider_id="antigravity",
+        name="9Router Test Account",
+        api_key="ag-token-xyz",
+        extra_config={"session_id": "session-456", "step": 2},
+    )
+    headers = plugin.build_headers(account=account)
+    assert headers["User-Agent"] == "Antigravity-IDE/1.0"
+    assert headers["x-goog-api-client"] == "ide/antigravity"
+    assert headers["Authorization"] == "Bearer ag-token-xyz"
+    assert headers["x-trajectory-id"].startswith("agent/")
+    assert headers["x-ide-request-id"].startswith("ide_req_")
+    assert headers["x-request-id"] == headers["x-ide-request-id"]
+
+
+def test_accounts_crud_and_load_balancing():
+    """Verify multi-account management, round-robin, least-used, fallback, and cooldown."""
+    plugin_manager.accounts.clear()
+
+    # 1. Add accounts
+    acc1 = plugin_manager.add_account(
+        AccountCreate(
+            provider_id="antigravity",
+            name="Antigravity Account 1",
+            api_key="key-1",
+            priority=1,
+            weight=1,
+        )
+    )
+    acc2 = plugin_manager.add_account(
+        AccountCreate(
+            provider_id="antigravity",
+            name="Antigravity Account 2",
+            api_key="key-2",
+            priority=2,
+            weight=1,
+        )
+    )
+    acc3 = plugin_manager.add_account(
+        AccountCreate(
+            provider_id="antigravity",
+            name="Antigravity Account 3",
+            api_key="key-3",
+            priority=3,
+            weight=1,
+        )
+    )
+
+    all_ag_accounts = plugin_manager.get_accounts("antigravity")
+    assert len(all_ag_accounts) == 3
+
+    # 2. Test Round Robin
+    plugin_manager.rr_indices["antigravity"] = 0
+    pick1 = plugin_manager.select_account("antigravity", strategy="round_robin")
+    pick2 = plugin_manager.select_account("antigravity", strategy="round_robin")
+    pick3 = plugin_manager.select_account("antigravity", strategy="round_robin")
+    pick4 = plugin_manager.select_account("antigravity", strategy="round_robin")
+
+    assert pick1.id == acc1.id
+    assert pick2.id == acc2.id
+    assert pick3.id == acc3.id
+    assert pick4.id == acc1.id  # cycles back to 1
+
+    # 3. Test Least Used
+    plugin_manager.mark_account_result(acc1.id, success=True)
+    plugin_manager.mark_account_result(acc1.id, success=True)
+    plugin_manager.mark_account_result(acc2.id, success=True)
+    # acc3 has 0 success_count, so least_used must pick acc3
+    least = plugin_manager.select_account("antigravity", strategy="least_used")
+    assert least.id == acc3.id
+
+    # 4. Test Fallback / Priority
+    # acc1 has priority 1 (highest), acc2 has 2, acc3 has 3
+    priority_pick = plugin_manager.select_account("antigravity", strategy="fallback")
+    assert priority_pick.id == acc1.id
+
+    # 5. Cooldown / Rate Limit Test
+    # Mark acc1 as rate-limited for 60 seconds
+    plugin_manager.mark_account_result(acc1.id, success=False, is_rate_limit=True, cooldown_seconds=60)
+    assert not acc1.is_available()
+
+    # Now priority pick should fallback to acc2!
+    fallback_pick = plugin_manager.select_account("antigravity", strategy="fallback")
+    assert fallback_pick.id == acc2.id
+
+    # Reset cooldown on acc1
+    plugin_manager.reset_account_cooldown(acc1.id)
+    assert acc1.is_available()
+    priority_restored = plugin_manager.select_account("antigravity", strategy="fallback")
+    assert priority_restored.id == acc1.id
+
+    # Cleanup
+    plugin_manager.delete_account(acc1.id)
+    plugin_manager.delete_account(acc2.id)
+    plugin_manager.delete_account(acc3.id)
+    assert len(plugin_manager.get_accounts("antigravity")) == 0
+
+
+def test_accounts_api_endpoints():
+    """Verify REST API /api/accounts CRUD endpoints."""
+    with TestClient(app) as client:
+        # Create account
+        create_res = client.post(
+            "/api/accounts",
+            json={
+                "provider_id": "codex",
+                "name": "Primary Codex Account",
+                "api_key": "sk-codex-test-key-123",
+                "base_url": "https://api.openai.com/v1",
+                "priority": 1,
+            },
+        )
+        assert create_res.status_code == 200
+        acc_data = create_res.json()
+        account_id = acc_data["id"]
+        assert acc_data["name"] == "Primary Codex Account"
+        assert acc_data["provider_id"] == "codex"
+
+        # List accounts
+        list_res = client.get("/api/accounts?provider_id=codex")
+        assert list_res.status_code == 200
+        assert any(a["id"] == account_id for a in list_res.json())
+
+        # Update account
+        upd_res = client.put(
+            f"/api/accounts/{account_id}",
+            json={"name": "Renamed Codex Account", "priority": 2},
+        )
+        assert upd_res.status_code == 200
+        assert upd_res.json()["name"] == "Renamed Codex Account"
+        assert upd_res.json()["priority"] == 2
+
+        # Reset cooldown endpoint
+        cooldown_res = client.post(f"/api/accounts/{account_id}/reset-cooldown")
+        assert cooldown_res.status_code == 200
+
+        # Delete account
+        del_res = client.delete(f"/api/accounts/{account_id}")
+        assert del_res.status_code == 200
+
+        # Check not found
+        get_res = client.get(f"/api/accounts/{account_id}")
+        assert get_res.status_code == 404

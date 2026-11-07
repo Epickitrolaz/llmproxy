@@ -22,6 +22,9 @@ from llmproxy.dashboard.loader import (
 )
 from llmproxy.dashboard.templates import STARTER_TEMPLATES
 from llmproxy.schemas import (
+    Account,
+    AccountCreate,
+    AccountUpdate,
     ChatMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -479,6 +482,68 @@ async def delete_custom_model(plugin_id: str, model_id: str):
 
 
 # =========================================================================
+# Accounts Management & Multi-Account Load Balancing
+# =========================================================================
+
+@router.get("/accounts", response_model=List[Account])
+async def list_accounts(provider_id: Optional[str] = Query(default=None)):
+    """List connected accounts, optionally filtered by provider_id."""
+    return plugin_manager.get_accounts(provider_id=provider_id)
+
+
+@router.post("/accounts", response_model=Account)
+async def create_account(account_in: AccountCreate):
+    """Connect a new account to a provider."""
+    _ensure_plugins_loaded()
+    if account_in.provider_id not in plugin_manager.plugins:
+        # Check if provider exists on disk or in configs
+        pass
+    account = plugin_manager.add_account(account_in)
+    return account
+
+
+@router.get("/accounts/{account_id}", response_model=Account)
+async def get_account(account_id: str):
+    """Get detail for a specific account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    return account
+
+
+@router.put("/accounts/{account_id}", response_model=Account)
+async def update_account(account_id: str, updates: AccountUpdate):
+    """Update properties of a connected account."""
+    account = plugin_manager.update_account(account_id, updates)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    return account
+
+
+@router.delete("/accounts/{account_id}")
+async def delete_account(account_id: str):
+    """Delete a connected account."""
+    success = plugin_manager.delete_account(account_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    return {"status": "ok", "message": f"Account '{account_id}' deleted successfully"}
+
+
+@router.post("/accounts/{account_id}/reset-cooldown")
+async def reset_account_cooldown(account_id: str):
+    """Reset rate-limit / cooldown status for an account."""
+    success = plugin_manager.reset_account_cooldown(account_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    account = plugin_manager.get_account(account_id)
+    return {
+        "status": "ok",
+        "message": f"Cooldown reset for account '{account_id}'",
+        "account": account,
+    }
+
+
+# =========================================================================
 # Telemetry, Stats, and Logs
 # =========================================================================
 
@@ -512,11 +577,17 @@ async def get_stats():
         else 0.0
     )
 
+    all_accounts = plugin_manager.get_accounts()
+    total_accounts = len(all_accounts)
+    active_accounts = len([a for a in all_accounts if a.is_available()])
+
     return {
         "total_requests": total_requests,
         "success_rate": success_rate,
         "active_models_count": active_models_count,
         "active_plugins_count": active_plugins_count,
+        "total_accounts": total_accounts,
+        "active_accounts": active_accounts,
         "avg_latency_ms": avg_latency,
     }
 
@@ -586,10 +657,34 @@ async def test_chat(req: TestChatRequest):
         stream=bool(req.stream),
     )
 
+    # Select Account for test chat
+    strategy = str(matched_vars.get("load_balancing_strategy", "round_robin"))
+    accounts = plugin_manager.get_accounts(matched_plugin.metadata.id)
+    account: Optional[Account] = None
+    if accounts:
+        account = plugin_manager.select_account(matched_plugin.metadata.id, strategy=strategy)
+    if not account:
+        account = Account(
+            id=f"default-{matched_plugin.metadata.id}",
+            provider_id=matched_plugin.metadata.id,
+            name="Default Account",
+            api_key=str(matched_vars.get("api_key", "")),
+            base_url=matched_vars.get("base_url"),
+        )
+
     start_time = time.perf_counter()
 
     try:
-        result = await matched_plugin.chat_completion(chat_request, matched_model, matched_vars)
+        import inspect
+        sig = inspect.signature(matched_plugin.chat_completion)
+        if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            result = await matched_plugin.chat_completion(
+                chat_request, matched_model, matched_vars, account=account
+            )
+        else:
+            result = await matched_plugin.chat_completion(
+                chat_request, matched_model, matched_vars
+            )
         latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
 
         # Handle streaming responses

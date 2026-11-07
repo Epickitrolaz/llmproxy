@@ -3,12 +3,18 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import random
 import sys
+import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
+    Account,
+    AccountCreate,
+    AccountUpdate,
     PluginMetadata,
     PluginModelConfig,
     PluginVariable,
@@ -31,13 +37,17 @@ class PluginManager:
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.data_dir / "plugin_configs.json"
+        self.accounts_file = self.data_dir / "accounts.json"
 
         self.plugins: Dict[str, BasePlugin] = {}
         self.plugin_files: Dict[str, Path] = {}
         self.configs: Dict[str, Dict[str, Any]] = {}
+        self.accounts: Dict[str, Account] = {}
+        self.rr_indices: Dict[str, int] = {}
         self.logs: List[RequestLogEntry] = []
 
         self._load_configs()
+        self._load_accounts()
 
     def _load_configs(self) -> None:
         """Load persisted plugin configurations from disk."""
@@ -58,6 +68,156 @@ class PluginManager:
             self.config_file.write_text(json.dumps(self.configs, indent=2), encoding="utf-8")
         except Exception as e:
             logger.error("Failed to save plugin configs to %s: %s", self.config_file, e)
+
+    def _load_accounts(self) -> None:
+        """Load connected accounts from disk."""
+        if self.accounts_file.exists():
+            try:
+                data = json.loads(self.accounts_file.read_text(encoding="utf-8"))
+                self.accounts = {
+                    item["id"]: Account.model_validate(item)
+                    for item in data
+                }
+            except Exception as e:
+                logger.warning("Failed to load accounts from %s: %s", self.accounts_file, e)
+                self.accounts = {}
+        else:
+            self.accounts = {}
+
+    def _save_accounts(self) -> None:
+        """Persist accounts to disk."""
+        try:
+            self.accounts_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = [acc.model_dump() for acc in self.accounts.values()]
+            self.accounts_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save accounts to %s: %s", self.accounts_file, e)
+
+    # ==========================================
+    # Accounts Management & Load Balancing
+    # ==========================================
+
+    def get_accounts(self, provider_id: Optional[str] = None) -> List[Account]:
+        """Return all accounts, optionally filtered by provider_id."""
+        if provider_id:
+            return [acc for acc in self.accounts.values() if acc.provider_id == provider_id]
+        return list(self.accounts.values())
+
+    def get_account(self, account_id: str) -> Optional[Account]:
+        """Retrieve an account by ID."""
+        return self.accounts.get(account_id)
+
+    def add_account(self, account_data: Union[Account, AccountCreate, Dict[str, Any]]) -> Account:
+        """Add a new connected account."""
+        if isinstance(account_data, Account):
+            account = account_data
+        elif isinstance(account_data, AccountCreate):
+            account = Account(
+                id=f"acc_{uuid.uuid4().hex[:8]}",
+                provider_id=account_data.provider_id,
+                name=account_data.name,
+                api_key=account_data.api_key,
+                base_url=account_data.base_url,
+                priority=account_data.priority,
+                weight=account_data.weight,
+                enabled=account_data.enabled,
+                extra_config=account_data.extra_config,
+            )
+        else:
+            acc_dict = dict(account_data)
+            if "id" not in acc_dict:
+                acc_dict["id"] = f"acc_{uuid.uuid4().hex[:8]}"
+            account = Account.model_validate(acc_dict)
+
+        self.accounts[account.id] = account
+        self._save_accounts()
+        return account
+
+    def update_account(
+        self, account_id: str, updates: Union[AccountUpdate, Dict[str, Any]]
+    ) -> Optional[Account]:
+        """Update account properties."""
+        account = self.accounts.get(account_id)
+        if not account:
+            return None
+
+        upd = updates.model_dump(exclude_unset=True) if isinstance(updates, AccountUpdate) else updates
+        for k, v in upd.items():
+            if v is not None and hasattr(account, k):
+                setattr(account, k, v)
+
+        self._save_accounts()
+        return account
+
+    def delete_account(self, account_id: str) -> bool:
+        """Delete an account."""
+        if account_id in self.accounts:
+            del self.accounts[account_id]
+            self._save_accounts()
+            return True
+        return False
+
+    def reset_account_cooldown(self, account_id: str) -> bool:
+        """Clear rate limit / cooldown status on an account."""
+        account = self.accounts.get(account_id)
+        if not account:
+            return False
+        account.rate_limited_until = None
+        self._save_accounts()
+        return True
+
+    def select_account(
+        self, provider_id: str, strategy: Optional[str] = None
+    ) -> Optional[Account]:
+        """
+        Select an available account based on load balancing strategy:
+        - round_robin: cyclically cycles through active, non-rate-limited accounts
+        - least_used: picks account with lowest success count
+        - random: picks a random active account
+        - fallback/priority: picks highest priority (lowest number) available
+        """
+        all_accounts = [a for a in self.accounts.values() if a.provider_id == provider_id]
+        if not all_accounts:
+            return None
+
+        available = [a for a in all_accounts if a.is_available()]
+        if not available:
+            return None
+
+        strat = (strategy or "round_robin").lower().replace("-", "_")
+
+        if strat == "least_used":
+            return min(available, key=lambda a: (a.success_count, a.last_used_at or 0))
+        elif strat == "random":
+            return random.choice(available)
+        elif strat in ("fallback", "priority"):
+            return sorted(available, key=lambda a: (a.priority, a.last_used_at or 0))[0]
+        else:
+            # Default: round_robin
+            idx = self.rr_indices.get(provider_id, 0)
+            selected = available[idx % len(available)]
+            self.rr_indices[provider_id] = (idx + 1) % len(available)
+            return selected
+
+    def mark_account_result(
+        self,
+        account_id: str,
+        success: bool,
+        is_rate_limit: bool = False,
+        cooldown_seconds: float = 60.0,
+    ) -> None:
+        """Record success or error/rate-limit result for an account."""
+        account = self.accounts.get(account_id)
+        if not account:
+            return
+        if success:
+            account.success_count += 1
+            account.last_used_at = time.time()
+        else:
+            account.error_count += 1
+            if is_rate_limit:
+                account.rate_limited_until = time.time() + cooldown_seconds
+        self._save_accounts()
 
     def discover_and_load_all(self) -> None:
         """Scan plugins_dir and load all valid python plugin files."""

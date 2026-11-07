@@ -565,6 +565,24 @@ button {
   font-family: var(--font-mono);
 }
 
+.badge.badge-success {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+.badge.badge-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+}
+
+.badge.badge-muted {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--border-subtle);
+  color: var(--ink-muted);
+}
+
 .provider-footer {
   display: flex;
   align-items: center;

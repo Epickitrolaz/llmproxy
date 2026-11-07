@@ -26,6 +26,7 @@
     <nav class="nav-tabs">
       <button class="nav-tab active" data-tab="overview">Overview</button>
       <button class="nav-tab" data-tab="providers">Providers & Plugins</button>
+      <button class="nav-tab" data-tab="accounts">Accounts</button>
       <button class="nav-tab" data-tab="editor">Code Editor</button>
       <button class="nav-tab" data-tab="models">Models</button>
       <button class="nav-tab" data-tab="playground">Playground</button>
@@ -122,6 +123,69 @@
       <!-- Providers Grid -->
       <div class="providers-grid" id="providers-grid">
         <!-- Rendered dynamically via app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 3: ACCOUNTS & MULTI-ACCOUNT LOAD BALANCING -->
+    <section class="tab-panel" id="tab-accounts">
+      <div class="section-header">
+        <div class="section-title-group">
+          <h2>Connected Accounts & Multi-Account Pools</h2>
+          <p>Connect multiple accounts per provider with intelligent load balancing, priority failovers, and automatic rate-limit cooldowns.</p>
+        </div>
+        <div class="section-actions">
+          <select class="select-input" id="accounts-provider-filter">
+            <option value="">All Providers</option>
+          </select>
+          <button class="btn btn-primary" id="btn-connect-account">+ Connect Account</button>
+        </div>
+      </div>
+
+      <!-- Accounts Stats Strip -->
+      <div class="stats-grid" style="margin-bottom: 24px;">
+        <div class="stat-card">
+          <span class="stat-eyebrow">Connected Accounts</span>
+          <span class="stat-value" id="stat-total-accounts">0</span>
+          <span class="stat-subtext">Total accounts in pool</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Active Accounts</span>
+          <span class="stat-value" id="stat-active-accounts">0</span>
+          <span class="stat-subtext">Ready to serve requests</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">In Cooldown</span>
+          <span class="stat-value" id="stat-cooldown-accounts">0</span>
+          <span class="stat-subtext">Rate-limited accounts</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Routing Strategy</span>
+          <span class="stat-value" style="font-size: 15px; font-family: var(--font-mono); font-weight: 500; text-transform: uppercase;" id="stat-routing-strategy">Round Robin</span>
+          <span class="stat-subtext">Configured per provider</span>
+        </div>
+      </div>
+
+      <!-- Accounts Table -->
+      <div class="card">
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Account Name</th>
+                <th>Status</th>
+                <th>API Key / Token</th>
+                <th>Priority / Weight</th>
+                <th>Success / Errors</th>
+                <th>Last Used</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="accounts-table-body">
+              <!-- Rendered dynamically via app.js -->
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -347,6 +411,68 @@
       <div class="modal-footer">
         <button class="btn btn-secondary modal-close">Cancel</button>
         <button class="btn btn-primary" id="btn-save-variables">Save Variables</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Connect / Edit Account -->
+  <div class="modal-overlay" id="modal-account">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-account-title">Connect Provider Account</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="account-form-id">
+        <div class="form-group">
+          <label class="form-label">Provider Provider <span style="color: var(--ink-secondary);">*</span></label>
+          <select class="select-input" id="account-provider-select" style="width: 100%;">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Account Name / Label <span style="color: var(--ink-secondary);">*</span></label>
+          <input type="text" class="form-input" id="account-name" placeholder="e.g. Primary Work Key, Secondary Backup">
+        </div>
+        <div class="form-group">
+          <label class="form-label">API Key / Token <span style="color: var(--ink-secondary);">*</span></label>
+          <div style="display: flex; gap: 8px;">
+            <input type="password" class="form-input" id="account-api-key" placeholder="Enter API key or bearer token" style="font-family: var(--font-mono); font-size: 13px;">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-account-key" style="white-space: nowrap;">Show</button>
+          </div>
+          <span class="form-hint">Stored securely on the router. Used by load balancer for upstream authentication.</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Base URL Override (Optional)</label>
+          <input type="text" class="form-input" id="account-base-url" placeholder="Leave empty to use provider default">
+          <span class="form-hint">Useful for custom endpoints, region-specific URLs, or corporate gateways.</span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div class="form-group">
+            <label class="form-label">Priority (1 = Highest)</label>
+            <input type="number" class="form-input" id="account-priority" value="1" min="1" max="100">
+            <span class="form-hint">Used in fallback routing</span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Weight</label>
+            <input type="number" class="form-input" id="account-weight" value="1" min="1" max="100">
+            <span class="form-hint">Traffic distribution weight</span>
+          </div>
+        </div>
+        <div class="form-group" style="display: flex; align-items: center; justify-content: space-between; padding-top: 8px;">
+          <div>
+            <label class="form-label" style="margin-bottom: 2px;">Enabled</label>
+            <span class="form-hint">Disabled accounts are skipped during routing</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="account-enabled-toggle" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button class="btn btn-primary" id="btn-save-account">Save Account</button>
       </div>
     </div>
   </div>

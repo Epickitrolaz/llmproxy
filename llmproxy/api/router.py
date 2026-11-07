@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator, List
+from typing import Any, AsyncIterator, List, Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from llmproxy.core.manager import plugin_manager
 from llmproxy.schemas import (
+    Account,
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -39,6 +42,40 @@ def _estimate_tokens(content: Any) -> int:
 
 def _calc_prompt_tokens(messages: list) -> int:
     return sum(_estimate_tokens(m.content) for m in messages)
+
+
+def _safe_float(val: Any, default: float) -> float:
+    try:
+        if val is None or val == "":
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val: Any, default: int) -> int:
+    try:
+        if val is None or val == "":
+            return default
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if exception represents a rate limit / 429 quota error."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        return True
+    msg = str(exc).lower()
+    return "rate limit" in msg or "429" in msg or "quota" in msg or "too many requests" in msg
+
+
+async def _invoke_plugin_completion(plugin, request, model_config, variables, account):
+    import inspect
+    sig = inspect.signature(plugin.chat_completion)
+    if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return await plugin.chat_completion(request, model_config, variables, account=account)
+    return await plugin.chat_completion(request, model_config, variables)
 
 
 @router.post("/chat/completions")
@@ -105,13 +142,62 @@ async def chat_completions(request: ChatCompletionRequest):
             },
         )
 
-    # 3. Handle Streaming vs Non-Streaming
+    # 3. Select Account with Load Balancing & Cooldown checks
+    strategy = str(variables.get("load_balancing_strategy", "round_robin"))
+    accounts = plugin_manager.get_accounts(plugin.metadata.id)
+    account: Optional[Account] = None
+
+    if accounts:
+        account = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
+        if not account:
+            cooling_down = [
+                a for a in accounts
+                if a.rate_limited_until and a.rate_limited_until > time.time()
+            ]
+            if cooling_down:
+                min_wait = max(1, int(min(a.rate_limited_until - time.time() for a in cooling_down)))
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": {
+                            "message": f"All accounts for provider '{plugin.metadata.id}' are in cooldown. Retry in {min_wait}s.",
+                            "type": "rate_limit_error",
+                            "code": "accounts_rate_limited",
+                        }
+                    },
+                )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "message": f"No active accounts available for provider '{plugin.metadata.id}'",
+                        "type": "service_unavailable_error",
+                        "code": "no_active_accounts",
+                    }
+                },
+            )
+    else:
+        # Fallback account when no dedicated accounts have been configured yet
+        account = Account(
+            id=f"default-{plugin.metadata.id}",
+            provider_id=plugin.metadata.id,
+            name="Default Account",
+            api_key=str(variables.get("api_key", "")),
+            base_url=variables.get("base_url"),
+        )
+
+    cooldown_sec = _safe_float(variables.get("account_switch_cooldown"), 10.0)
+
+    # 4. Handle Streaming vs Non-Streaming
     if request.stream:
         async def sse_event_stream() -> AsyncIterator[str]:
             completion_tokens = 0
             log_id = f"chatcmpl-stream-{uuid.uuid4().hex[:12]}"
+            current_account = account
             try:
-                stream_result = await plugin.chat_completion(request, model_config, variables)
+                stream_result = await _invoke_plugin_completion(
+                    plugin, request, model_config, variables, current_account
+                )
                 async for chunk in stream_result:
                     if isinstance(chunk, ChatCompletionChunk):
                         if chunk.id:
@@ -126,6 +212,9 @@ async def chat_completions(request: ChatCompletionRequest):
                 yield "data: [DONE]\n\n"
 
                 latency_ms = round((time.time() - start_time) * 1000, 2)
+                if current_account:
+                    plugin_manager.mark_account_result(current_account.id, success=True)
+
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=log_id,
@@ -140,13 +229,22 @@ async def chat_completions(request: ChatCompletionRequest):
                 )
             except Exception as e:
                 latency_ms = round((time.time() - start_time) * 1000, 2)
+                is_rate_limit = _is_rate_limit_error(e)
+                if current_account:
+                    plugin_manager.mark_account_result(
+                        current_account.id,
+                        success=False,
+                        is_rate_limit=is_rate_limit,
+                        cooldown_seconds=cooldown_sec,
+                    )
+
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=log_id,
                         model=request.model,
                         plugin_id=plugin.metadata.id,
                         status="error",
-                        status_code=500,
+                        status_code=429 if is_rate_limit else 500,
                         latency_ms=latency_ms,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
@@ -163,85 +261,130 @@ async def chat_completions(request: ChatCompletionRequest):
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    # Non-streaming
-    try:
-        response = await plugin.chat_completion(request, model_config, variables)
-        latency_ms = round((time.time() - start_time) * 1000, 2)
+    # Non-streaming with account failover
+    max_retries = max(1, _safe_int(variables.get("max_retries"), 2))
+    switch_wait = _safe_float(variables.get("account_switch_wait"), 0.0)
+    current_account = account
+    last_exception: Optional[Exception] = None
 
-        completion_tokens = 0
-        if isinstance(response, ChatCompletionResponse):
-            if response.usage and response.usage.prompt_tokens:
-                prompt_tokens = response.usage.prompt_tokens
-            if response.usage and response.usage.completion_tokens:
-                completion_tokens = response.usage.completion_tokens
-            elif response.choices and response.choices[0].message.content:
-                completion_tokens = _estimate_tokens(response.choices[0].message.content)
-                response.usage = CompletionUsage(
+    for attempt in range(max_retries):
+        try:
+            response = await _invoke_plugin_completion(
+                plugin, request, model_config, variables, current_account
+            )
+            latency_ms = round((time.time() - start_time) * 1000, 2)
+
+            completion_tokens = 0
+            if isinstance(response, ChatCompletionResponse):
+                if response.usage and response.usage.prompt_tokens:
+                    prompt_tokens = response.usage.prompt_tokens
+                if response.usage and response.usage.completion_tokens:
+                    completion_tokens = response.usage.completion_tokens
+                elif response.choices and response.choices[0].message.content:
+                    completion_tokens = _estimate_tokens(response.choices[0].message.content)
+                    response.usage = CompletionUsage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=prompt_tokens + completion_tokens,
+                    )
+
+            if current_account:
+                plugin_manager.mark_account_result(current_account.id, success=True)
+
+            plugin_manager.add_log(
+                RequestLogEntry(
+                    id=getattr(response, "id", f"req-{uuid.uuid4().hex[:12]}"),
+                    model=request.model,
+                    plugin_id=plugin.metadata.id,
+                    status="success",
+                    status_code=200,
+                    latency_ms=latency_ms,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
+                )
+            )
+            return response
+        except Exception as e:
+            last_exception = e
+            is_rate_limit = _is_rate_limit_error(e)
+            if current_account:
+                plugin_manager.mark_account_result(
+                    current_account.id,
+                    success=False,
+                    is_rate_limit=is_rate_limit,
+                    cooldown_seconds=cooldown_sec,
                 )
 
-        plugin_manager.add_log(
-            RequestLogEntry(
-                id=getattr(response, "id", f"req-{uuid.uuid4().hex[:12]}"),
-                model=request.model,
-                plugin_id=plugin.metadata.id,
-                status="success",
-                status_code=200,
-                latency_ms=latency_ms,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+            # Try to failover to next account if retries remain
+            if attempt < max_retries - 1 and accounts:
+                if switch_wait > 0:
+                    await asyncio.sleep(switch_wait)
+                next_acc = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
+                if next_acc and next_acc.id != current_account.id:
+                    current_account = next_acc
+                    continue
+            break
+
+    # If all attempts failed
+    latency_ms = round((time.time() - start_time) * 1000, 2)
+    status_code = 429 if _is_rate_limit_error(last_exception) else 500
+    plugin_manager.add_log(
+        RequestLogEntry(
+            id=f"req-{uuid.uuid4().hex[:12]}",
+            model=request.model,
+            plugin_id=plugin.metadata.id,
+            status="error",
+            status_code=status_code,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=0,
+            error_message=str(last_exception),
         )
-        return response
-    except Exception as e:
-        latency_ms = round((time.time() - start_time) * 1000, 2)
-        plugin_manager.add_log(
-            RequestLogEntry(
-                id=f"req-{uuid.uuid4().hex[:12]}",
-                model=request.model,
-                plugin_id=plugin.metadata.id,
-                status="error",
-                status_code=500,
-                latency_ms=latency_ms,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=0,
-                error_message=str(e),
-            )
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"message": str(e), "type": "server_error"}},
-        )
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "message": f"Plugin execution error: {last_exception}",
+                "type": "server_error",
+                "code": "plugin_execution_failed",
+            }
+        },
+    )
 
 
 @router.get("/models", response_model=ModelListResponse)
-async def list_models() -> ModelListResponse:
+async def list_models():
+    """List all available models from active plugins in OpenAI format."""
     active_models = plugin_manager.get_all_active_models()
-    cards = [
-        ModelCard(
-            id=model_cfg.id,
-            owned_by=plugin.metadata.id,
-        )
-        for model_cfg, plugin in active_models
-    ]
-    return ModelListResponse(object="list", data=cards)
+    cards: List[ModelCard] = []
+    seen = set()
+    for model_config, plugin in active_models:
+        if model_config.id not in seen:
+            cards.append(
+                ModelCard(
+                    id=model_config.id,
+                    owned_by=plugin.metadata.id,
+                )
+            )
+            seen.add(model_config.id)
+    return ModelListResponse(data=cards)
 
 
 @router.get("/models/{model_id}", response_model=ModelCard)
-async def get_model(model_id: str) -> ModelCard:
-    resolved = plugin_manager.resolve_model(model_id)
-    if not resolved:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": {
-                    "message": f"Model '{model_id}' not found",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
-    model_cfg, plugin, _ = resolved
-    return ModelCard(id=model_cfg.id, owned_by=plugin.metadata.id)
+async def get_model(model_id: str):
+    """Get information about a specific model."""
+    active_models = plugin_manager.get_all_active_models()
+    for model_config, plugin in active_models:
+        if model_config.id == model_id:
+            return ModelCard(id=model_config.id, owned_by=plugin.metadata.id)
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "error": {
+                "message": f"Model '{model_id}' not found",
+                "type": "invalid_request_error",
+                "code": "model_not_found",
+            }
+        },
+    )

@@ -73,17 +73,17 @@ def test_plugin_discovery_and_metadata():
 
 
 def test_variable_validation():
-    """Verify validation of required vs optional variables."""
+    """Verify validation of operational variables (timeouts, etc.) rather than credential keys."""
     ag = plugin_manager.get_plugin("antigravity")
     assert ag is not None
 
-    # Missing api_key
+    # Missing required timeout variable
     errs = ag.validate_variables({})
     assert len(errs) == 1
-    assert "api_key" in errs[0]
+    assert "timeout" in errs[0]
 
-    # Valid api_key
-    assert len(ag.validate_variables({"api_key": "sk-antigravity-123"})) == 0
+    # Valid operational variable
+    assert len(ag.validate_variables({"timeout": 30})) == 0
 
     # OpenAI compatible has no required variables by default
     oai = plugin_manager.get_plugin("openai_compatible")

@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 import httpx
 
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
+    Account,
     ChatChoice,
     ChatChoiceDelta,
     ChatMessage,
@@ -26,7 +27,7 @@ class OpenAICompatiblePlugin(BasePlugin):
     """
     Generic OpenAI-compatible provider plugin.
     Compatible with Ollama, vLLM, LMStudio, LocalAI, and any OpenAI API clone.
-    Supports custom headers, streaming SSE, and fallback simulation for offline/test environments.
+    Supports multi-account load balancing, custom headers, streaming SSE, and fallback simulation.
     """
 
     def __init__(self):
@@ -34,32 +35,60 @@ class OpenAICompatiblePlugin(BasePlugin):
             id="openai_compatible",
             name="OpenAI Compatible",
             description="Generic OpenAI-compatible provider (e.g. Ollama, vLLM, LMStudio, LocalAI)",
-            version="1.0.0",
+            version="2.0.0",
             author="Community",
             enabled=True,
             filename="openai_compatible.py",
             variables=[
                 PluginVariable(
-                    name="api_key",
-                    label="API Key",
-                    type="secret",
-                    required=False,
-                    default="",
-                    description="Optional API key for authentication",
+                    name="timeout",
+                    label="Timeout (seconds)",
+                    type="number",
+                    default=60,
+                    description="Request timeout in seconds",
+                ),
+                PluginVariable(
+                    name="load_balancing_strategy",
+                    label="Load Balancing Strategy",
+                    type="select",
+                    default="round_robin",
+                    options=["round_robin", "least_used", "fallback", "random"],
+                    description="Strategy for distributing requests across connected accounts",
+                ),
+                PluginVariable(
+                    name="account_switch_cooldown",
+                    label="Account Cooldown (s)",
+                    type="number",
+                    default=10,
+                    description="Cooldown period when an account hits rate limits before retrying",
+                ),
+                PluginVariable(
+                    name="account_switch_wait",
+                    label="Switch Wait Delay (s)",
+                    type="number",
+                    default=0.1,
+                    description="Wait delay before switching to another account on failover",
+                ),
+                PluginVariable(
+                    name="max_retries",
+                    label="Max Failover Retries",
+                    type="number",
+                    default=2,
+                    description="Maximum number of account failovers per request",
                 ),
                 PluginVariable(
                     name="base_url",
-                    label="Base URL",
+                    label="Default Base URL",
                     type="string",
                     default="http://localhost:11434/v1",
-                    description="OpenAI-compatible server base URL",
+                    description="OpenAI-compatible server default base URL",
                 ),
                 PluginVariable(
                     name="custom_headers",
                     label="Custom Headers",
                     type="string",
                     default="{}",
-                    description="JSON dictionary of custom HTTP headers",
+                    description="JSON dictionary of default custom HTTP headers",
                 ),
             ],
             models=[
@@ -82,16 +111,17 @@ class OpenAICompatiblePlugin(BasePlugin):
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
         if any(key.startswith(p) for p in prefixes) or key in ("test-key", "test_key", "secret123"):
             return True
-        # If url is localhost default and likely no service running during unit tests
-        if "localhost" in base_url or "127.0.0.1" in base_url:
-            return False  # will attempt and fallback if connection fails
         return False
 
     def _mock_response(
-        self, request: ChatCompletionRequest, model_config: PluginModelConfig
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        account: Optional[Account] = None,
     ) -> ChatCompletionResponse:
         model_name = model_config.id
-        content = f"Simulated response from OpenAI Compatible ({model_name})."
+        acc_label = f" via account '{account.name}'" if account else ""
+        content = f"Simulated response from OpenAI Compatible ({model_name}){acc_label}."
         return ChatCompletionResponse(
             id=f"chatcmpl-oai-{uuid.uuid4().hex[:12]}",
             created=int(time.time()),
@@ -111,11 +141,15 @@ class OpenAICompatiblePlugin(BasePlugin):
         )
 
     async def _mock_stream(
-        self, request: ChatCompletionRequest, model_config: PluginModelConfig
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        account: Optional[Account] = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         model_name = model_config.id
         chunk_id = f"chatcmpl-oai-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
+        acc_label = f" via account '{account.name}'" if account else ""
 
         yield ChatCompletionChunk(
             id=chunk_id,
@@ -130,7 +164,7 @@ class OpenAICompatiblePlugin(BasePlugin):
             ],
         )
 
-        tokens = ["Simulated ", "stream ", "response ", f"from OpenAI Compatible for {model_name}."]
+        tokens = ["Simulated ", "stream ", "response ", f"from OpenAI Compatible for {model_name}{acc_label}."]
         for token in tokens:
             yield ChatCompletionChunk(
                 id=chunk_id,
@@ -165,6 +199,7 @@ class OpenAICompatiblePlugin(BasePlugin):
         body: Dict[str, Any],
         model_config: PluginModelConfig,
         request: ChatCompletionRequest,
+        account: Optional[Account] = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -184,7 +219,7 @@ class OpenAICompatiblePlugin(BasePlugin):
                             except Exception:
                                 continue
         except Exception:
-            async for chunk in self._mock_stream(request, model_config):
+            async for chunk in self._mock_stream(request, model_config, account=account):
                 yield chunk
 
     async def chat_completion(
@@ -192,28 +227,21 @@ class OpenAICompatiblePlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         variables: Dict[str, Any],
+        account: Optional[Account] = None,
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
-        api_key = str(variables.get("api_key") or "").strip()
-        base_url = str(variables.get("base_url") or "http://localhost:11434/v1").rstrip("/")
-        raw_headers = variables.get("custom_headers") or "{}"
+        api_key = account.api_key if account else str(variables.get("api_key") or "")
+        base_url = (
+            account.base_url
+            if (account and account.base_url)
+            else str(variables.get("base_url") or "http://localhost:11434/v1")
+        ).rstrip("/")
+        raw_custom_headers = str(variables.get("custom_headers") or "{}")
         target_model = model_config.upstream_model or model_config.id
 
         if self._is_test_mode(api_key, base_url):
             if request.stream:
-                return self._mock_stream(request, model_config)
-            return self._mock_response(request, model_config)
-
-        body: Dict[str, Any] = {
-            "model": target_model,
-            "messages": [m.model_dump(exclude_none=True) for m in request.messages],
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "stream": bool(request.stream),
-        }
-        if request.max_tokens:
-            body["max_tokens"] = request.max_tokens
-        if request.stop:
-            body["stop"] = request.stop
+                return self._mock_stream(request, model_config, account=account)
+            return self._mock_response(request, model_config, account=account)
 
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
@@ -221,28 +249,40 @@ class OpenAICompatiblePlugin(BasePlugin):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        if isinstance(raw_headers, str):
+        if raw_custom_headers:
             try:
-                parsed_headers = json.loads(raw_headers)
+                parsed_headers = json.loads(raw_custom_headers)
                 if isinstance(parsed_headers, dict):
                     headers.update({str(k): str(v) for k, v in parsed_headers.items()})
             except Exception:
                 pass
-        elif isinstance(raw_headers, dict):
-            headers.update({str(k): str(v) for k, v in raw_headers.items()})
+
+        body: Dict[str, Any] = {
+            "model": target_model,
+            "messages": [m.model_dump(exclude_none=True) for m in request.messages],
+            "stream": bool(request.stream),
+        }
+        if request.temperature is not None:
+            body["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            body["max_tokens"] = request.max_tokens
+        if request.top_p is not None:
+            body["top_p"] = request.top_p
 
         url = f"{base_url}/chat/completions"
 
         if request.stream:
-            return self._stream_request(url, headers, body, model_config, request)
+            return self._stream_request(url, headers, body, model_config, request, account=account)
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            timeout = float(variables.get("timeout", 60.0))
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, headers=headers, json=body)
                 resp.raise_for_status()
-                return ChatCompletionResponse.model_validate(resp.json())
+                data = resp.json()
+                return ChatCompletionResponse.model_validate(data)
         except Exception:
-            return self._mock_response(request, model_config)
+            return self._mock_response(request, model_config, account=account)
 
 
 plugin = OpenAICompatiblePlugin()

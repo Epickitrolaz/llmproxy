@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from llmproxy.schemas import (
+    Account,
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -35,6 +36,7 @@ class BasePlugin(ABC):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         variables: Dict[str, Any],
+        account: Optional[Account] = None,
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
         """
         Execute a chat completion request.
