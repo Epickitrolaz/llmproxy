@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,31 @@ import httpx
 from llmproxy.schemas import Account
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_ssl_env() -> None:
+    """Clear SSL certificate environment variables if they point to non-existent files to prevent FileNotFoundError."""
+    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        val = os.environ.get(var)
+        if val and not os.path.exists(val):
+            logger.warning(
+                "Clearing invalid %s='%s' (file not found) to prevent SSL failures",
+                var,
+                val,
+            )
+            del os.environ[var]
+    for var in ("SSL_CERT_DIR",):
+        val = os.environ.get(var)
+        if val and not os.path.isdir(val):
+            logger.warning(
+                "Clearing invalid %s='%s' (directory not found) to prevent SSL failures",
+                var,
+                val,
+            )
+            del os.environ[var]
+
+
+sanitize_ssl_env()
 
 # Exact Google Antigravity OAuth parameters from 9Router / Antigravity ACP
 ANTIGRAVITY_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -96,6 +122,8 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
 
 class AntigravityOAuthManager:
     """Manages Google Antigravity OAuth flows, token exchange, and local import."""
+
+    sanitize_ssl_env = staticmethod(sanitize_ssl_env)
 
     def __init__(self):
         self.active_flows: Dict[str, Dict[str, Any]] = {}
@@ -202,6 +230,7 @@ class AntigravityOAuthManager:
         redirect_uri: str,
     ) -> Account:
         """Exchange authorization code for tokens, fetch user info, and return Account."""
+        sanitize_ssl_env()
         async with httpx.AsyncClient(timeout=15.0) as client:
             # 1. Exchange code for access & refresh tokens
             token_resp = await client.post(
@@ -283,6 +312,7 @@ class AntigravityOAuthManager:
 
     async def refresh_account_token(self, account: Account) -> bool:
         """Refresh Google access token using the account's refresh_token."""
+        sanitize_ssl_env()
         refresh_token = account.extra_config.get("refresh_token")
         if not refresh_token:
             return False
@@ -315,6 +345,7 @@ class AntigravityOAuthManager:
 
     async def import_local_session(self) -> Optional[Account]:
         """Auto-discover and import local Antigravity acp_token.json credentials."""
+        sanitize_ssl_env()
         search_paths = [
             Path("/root/.t3/userdata/providers/antigravity"),
             Path.home() / ".t3/userdata/providers/antigravity",

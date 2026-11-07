@@ -1,3 +1,5 @@
+import logging
+import os
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,6 +7,33 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from llmproxy.core.manager import plugin_manager
+
+logger = logging.getLogger(__name__)
+
+
+def sanitize_ssl_env() -> None:
+    """Clear SSL certificate environment variables if they point to non-existent files to prevent FileNotFoundError."""
+    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        val = os.environ.get(var)
+        if val and not os.path.exists(val):
+            logger.warning(
+                "Clearing invalid %s='%s' (file not found) to prevent SSL failures",
+                var,
+                val,
+            )
+            del os.environ[var]
+    for var in ("SSL_CERT_DIR",):
+        val = os.environ.get(var)
+        if val and not os.path.isdir(val):
+            logger.warning(
+                "Clearing invalid %s='%s' (directory not found) to prevent SSL failures",
+                var,
+                val,
+            )
+            del os.environ[var]
+
+
+sanitize_ssl_env()
 
 app = FastAPI(
     title="LLMProxy",

@@ -651,6 +651,7 @@ async def get_antigravity_account_quota(account_id: str):
 
     import httpx
     try:
+        antigravity_oauth.sanitize_ssl_env()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",

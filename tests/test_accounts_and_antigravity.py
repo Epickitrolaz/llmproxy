@@ -245,3 +245,30 @@ def test_antigravity_import_local_and_live_quota():
             quota_data = quota_res.json()
             assert "groups" in quota_data or "buckets" in quota_data
 
+
+def test_sanitize_ssl_env_prevents_file_not_found_error(monkeypatch):
+    """Verify that invalid SSL_CERT_FILE or CA bundle paths are cleared and don't cause [Errno 2] No such file or directory."""
+    import os
+    import httpx
+    from llmproxy.core.antigravity_oauth import sanitize_ssl_env
+
+    # Simulate environment where SSL_CERT_FILE was set to a non-existent path
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/data/ca.crt")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/nonexistent/bundle.crt")
+    monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent/ssl/certs")
+
+    # Before sanitization, httpx.AsyncClient() fails with FileNotFoundError: [Errno 2] No such file or directory
+    with pytest.raises(FileNotFoundError):
+        httpx.AsyncClient()
+
+    # Call sanitize_ssl_env
+    sanitize_ssl_env()
+
+    assert "SSL_CERT_FILE" not in os.environ
+    assert "REQUESTS_CA_BUNDLE" not in os.environ
+    assert "SSL_CERT_DIR" not in os.environ
+
+    # Now httpx.AsyncClient() succeeds without error
+    client = httpx.AsyncClient()
+    assert client is not None
+

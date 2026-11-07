@@ -10,8 +10,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
-      - HTTPS_PROXY=http://172.17.0.1:9999
-      - SSL_CERT_FILE=/app/data/ca.crt
     volumes:
       - ./plugins:/app/plugins
       - ./data:/app/data

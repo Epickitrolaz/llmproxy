@@ -44,6 +44,7 @@ from llmproxy.core.antigravity_oauth import (
     ANTIGRAVITY_USER_AGENT,
     CLOUDCODE_PA_ENDPOINTS,
     antigravity_oauth,
+    sanitize_ssl_env,
 )
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
@@ -471,6 +472,7 @@ class AntigravityPlugin(BasePlugin):
         variables: Dict[str, Any],
         account: Optional[Account] = None,
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
+        sanitize_ssl_env()
         api_key = account.api_key if account else str(variables.get("api_key", ""))
         base_url = (
             account.base_url
