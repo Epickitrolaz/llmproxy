@@ -425,11 +425,51 @@
       <div class="modal-body">
         <input type="hidden" id="account-form-id">
         <div class="form-group">
-          <label class="form-label">Provider Provider <span style="color: var(--ink-secondary);">*</span></label>
+          <label class="form-label">Provider <span style="color: var(--ink-secondary);">*</span></label>
           <select class="select-input" id="account-provider-select" style="width: 100%;">
             <!-- Populated dynamically -->
           </select>
         </div>
+
+        <!-- Google Antigravity 1:1 Connection Section -->
+        <div id="antigravity-oauth-section" style="margin-bottom: 20px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card);">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+            <div>
+              <div style="font-weight: 600; font-size: 13px; color: var(--ink-primary); display: flex; align-items: center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/><path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15s.7 5.3 1.9 7.7l3.7-2.9z"/><path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.4-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z"/></svg>
+                Google Antigravity Connection
+              </div>
+              <div style="font-size: 11.5px; color: var(--ink-muted); margin-top: 2px;">1:1 9Router Google connection with loopback redirect & token refresh</div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-local-google" title="Auto-detect local Antigravity session">⟳ Auto-Import</button>
+          </div>
+
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-start-google-oauth" style="display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
+              <svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/></svg>
+              Sign in with Google (OAuth)
+            </button>
+          </div>
+
+          <!-- OAuth Progress / Paste Area (Hidden by default) -->
+          <div id="google-oauth-flow-box" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle);">
+            <div id="google-oauth-status-text" style="font-size: 12px; color: var(--ink-secondary); margin-bottom: 8px;">
+              Waiting for Google authorization...
+            </div>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+              <a href="#" target="_blank" class="btn btn-secondary btn-sm" id="btn-open-google-auth" style="text-decoration: none; flex: 1; text-align: center;">Open Sign-In Tab ↗</a>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-google-url">Copy Link</button>
+            </div>
+            <div style="margin-top: 8px;">
+              <span class="form-hint" style="margin-bottom: 4px; display: block;">Paste browser redirect URL here if running headless or in Docker:</span>
+              <div style="display: flex; gap: 8px;">
+                <input type="text" class="form-input" id="google-callback-url-paste" placeholder="http://127.0.0.1:.../?code=..." style="font-size: 11.5px; font-family: var(--font-mono);">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-submit-callback-paste">Connect</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label class="form-label">Account Name / Label <span style="color: var(--ink-secondary);">*</span></label>
           <input type="text" class="form-input" id="account-name" placeholder="e.g. Primary Work Key, Secondary Backup">
@@ -473,6 +513,22 @@
       <div class="modal-footer">
         <button class="btn btn-secondary modal-close">Cancel</button>
         <button class="btn btn-primary" id="btn-save-account">Save Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Google Quota Viewer -->
+  <div class="modal-overlay" id="modal-quota">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-quota-title">Google Antigravity Quota Summary</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-quota-body">
+        <!-- Rendered dynamically -->
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Close</button>
       </div>
     </div>
   </div>

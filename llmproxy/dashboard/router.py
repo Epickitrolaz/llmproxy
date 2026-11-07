@@ -10,6 +10,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from llmproxy.core.antigravity_oauth import (
+    ANTIGRAVITY_CLIENT_ID,
+    ANTIGRAVITY_SCOPES,
+    CLOUDCODE_PA_ENDPOINTS,
+    antigravity_oauth,
+)
 from llmproxy.core.manager import plugin_manager
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
@@ -541,6 +547,121 @@ async def reset_account_cooldown(account_id: str):
         "message": f"Cooldown reset for account '{account_id}'",
         "account": account,
     }
+
+
+class AntigravityCallbackRequest(BaseModel):
+    callback_url: Optional[str] = None
+    code: Optional[str] = None
+    redirect_uri: Optional[str] = None
+    flow_id: Optional[str] = None
+
+
+@router.post("/antigravity/oauth/start")
+async def start_antigravity_oauth():
+    """Start Google OAuth consent flow with loopback redirect listener."""
+    flow = antigravity_oauth.start_flow()
+    return flow
+
+
+@router.get("/antigravity/oauth/status/{flow_id}")
+async def check_antigravity_oauth_status(flow_id: str):
+    """Check loopback callback status for a pending Google OAuth flow."""
+    res = await antigravity_oauth.check_flow_status(flow_id)
+    if res.get("status") == "complete" and res.get("account"):
+        # Ensure account is persisted in manager
+        saved = plugin_manager.add_account(res["account"])
+        res["account"] = saved
+    return res
+
+
+@router.post("/antigravity/oauth/callback")
+async def complete_antigravity_oauth_callback(payload: AntigravityCallbackRequest):
+    """
+    Complete Google OAuth via manual callback URL or authorization code paste
+    (useful for remote/docker/headless instances where loopback isn't reachable).
+    """
+    code = payload.code
+    redirect_uri = payload.redirect_uri or "http://127.0.0.1:45123/"
+
+    if payload.callback_url:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(payload.callback_url)
+        params = urllib.parse.parse_qs(parsed.query)
+        code = params.get("code", [None])[0]
+        # Reconstruct redirect_uri from the pasted URL
+        redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    if not code:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract Google authorization code from input",
+        )
+
+    try:
+        account = await antigravity_oauth.exchange_code_and_create_account(
+            code=code, redirect_uri=redirect_uri
+        )
+        saved = plugin_manager.add_account(account)
+        return {"status": "complete", "account": saved}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Google OAuth completion failed: {e}")
+
+
+@router.post("/antigravity/oauth/import-local")
+async def import_local_antigravity_session():
+    """Auto-detect and import local Antigravity acp_token.json credentials from the environment."""
+    account = await antigravity_oauth.import_local_session()
+    if not account:
+        raise HTTPException(
+            status_code=404,
+            detail="No local Antigravity session (acp_token.json) found on this machine",
+        )
+    saved = plugin_manager.add_account(account)
+    return {
+        "status": "ok",
+        "message": f"Successfully imported Google account '{saved.name}'",
+        "account": saved,
+    }
+
+
+@router.get("/antigravity/quota/{account_id}")
+async def get_antigravity_account_quota(account_id: str):
+    """Fetch live 5-hour and weekly Google Antigravity quota usage summary."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    if account.provider_id != "antigravity":
+        raise HTTPException(status_code=400, detail="Account is not an Antigravity account")
+
+    # Refresh token if needed
+    if account.extra_config.get("refresh_token"):
+        await antigravity_oauth.refresh_account_token(account)
+        plugin_manager._save_accounts()
+
+    access_token = account.api_key
+    project_id = account.extra_config.get("project_id", "aicode-consumers")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)",
+        "x-goog-api-client": "ide/antigravity",
+        "Content-Type": "application/json",
+    }
+    body = {"project": project_id}
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+                headers=headers,
+                json=body,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return {"error": f"Upstream error {resp.status_code}: {resp.text}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # =========================================================================

@@ -595,6 +595,7 @@ print(response.choices[0].message.content)`;
       const providerLabel = plugin ? plugin.name : acc.provider_id;
       const isCooldown = Boolean(acc.rate_limited_until && acc.rate_limited_until > now);
       const remSeconds = isCooldown ? Math.ceil(acc.rate_limited_until - now) : 0;
+      const isGoogleAccount = acc.provider_id === "antigravity" && Boolean(acc.extra_config?.refresh_token || acc.extra_config?.auth_type);
 
       let statusBadge = "";
       if (!acc.enabled) {
@@ -610,13 +611,18 @@ print(response.choices[0].message.content)`;
         : `<span style="color: var(--ink-muted);">(No Key Required)</span>`;
 
       const lastUsed = acc.last_used_at
-        ? new Date(acc.last_used_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        ? new Date(acc.last_used_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" } )
         : `<span style="color: var(--ink-muted);">Never</span>`;
+
+      const googleBadge = isGoogleAccount
+        ? `<span class="badge" style="background: rgba(66, 133, 244, 0.1); border-color: rgba(66, 133, 244, 0.3); color: #60a5fa; font-size: 10px; margin-left: 4px;">Google 1:1</span>`
+        : "";
 
       const row = document.createElement("tr");
       row.innerHTML = `
         <td>
           <span class="badge" style="font-weight: 600;">${escapeHtml(providerLabel)}</span>
+          ${googleBadge}
         </td>
         <td>
           <div style="font-weight: 500; color: var(--ink-primary);">${escapeHtml(acc.name)}</div>
@@ -639,6 +645,7 @@ print(response.choices[0].message.content)`;
         <td>${lastUsed}</td>
         <td>
           <div style="display: flex; gap: 6px; align-items: center;">
+            ${isGoogleAccount ? `<button class="btn btn-secondary btn-sm btn-view-quota" data-id="${acc.id}" title="View live Google Antigravity quota">Quota</button>` : ''}
             ${isCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cooldown" data-id="${acc.id}" title="Reset cooldown">Reset</button>` : ''}
             <button class="btn btn-secondary btn-sm btn-edit-account" data-id="${acc.id}">Edit</button>
             <button class="btn btn-secondary btn-sm btn-toggle-account" data-id="${acc.id}">${acc.enabled ? "Disable" : "Enable"}</button>
@@ -648,6 +655,10 @@ print(response.choices[0].message.content)`;
       `;
 
       // Event handlers
+      const quotaBtn = row.querySelector(".btn-view-quota");
+      if (quotaBtn) {
+        quotaBtn.addEventListener("click", () => openQuotaModal(acc));
+      }
       const revealBtn = row.querySelector(".btn-show-key");
       if (revealBtn) {
         revealBtn.addEventListener("click", () => {
@@ -733,7 +744,19 @@ print(response.choices[0].message.content)`;
       el.btnToggleAccountKey.textContent = "Show";
     }
 
+    toggleAntigravitySection();
     if (el.modalAccount) el.modalAccount.classList.add("active");
+  }
+
+  function toggleAntigravitySection() {
+    const section = document.getElementById("antigravity-oauth-section");
+    if (!section) return;
+    const isAg = el.accountProviderSelect && el.accountProviderSelect.value === "antigravity";
+    section.style.display = isAg ? "block" : "none";
+  }
+
+  if (el.accountProviderSelect) {
+    el.accountProviderSelect.addEventListener("change", toggleAntigravitySection);
   }
 
   async function saveAccount() {
@@ -799,6 +822,182 @@ print(response.choices[0].message.content)`;
       fetchAccounts();
     } catch (err) {
       showToast(`Failed to reset cooldown: ${err.message}`, "error");
+    }
+  }
+
+  // =========================================================================
+  // Google Antigravity OAuth & Quota Handlers
+  // =========================================================================
+
+  let currentOAuthPollInterval = null;
+
+  const btnStartGoogleOAuth = document.getElementById("btn-start-google-oauth");
+  const btnImportLocalGoogle = document.getElementById("btn-import-local-google");
+  const btnOpenGoogleAuth = document.getElementById("btn-open-google-auth");
+  const btnCopyGoogleUrl = document.getElementById("btn-copy-google-url");
+  const btnSubmitCallbackPaste = document.getElementById("btn-submit-callback-paste");
+  const googleOAuthFlowBox = document.getElementById("google-oauth-flow-box");
+  const googleOAuthStatusText = document.getElementById("google-oauth-status-text");
+  const googleCallbackUrlPaste = document.getElementById("google-callback-url-paste");
+
+  if (btnStartGoogleOAuth) {
+    btnStartGoogleOAuth.addEventListener("click", async () => {
+      try {
+        btnStartGoogleOAuth.disabled = true;
+        btnStartGoogleOAuth.textContent = "Starting OAuth Flow...";
+        const flow = await api("/api/antigravity/oauth/start", { method: "POST" });
+        btnStartGoogleOAuth.disabled = false;
+        btnStartGoogleOAuth.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/></svg>
+          Restart Google Sign-In
+        `;
+
+        if (googleOAuthFlowBox) googleOAuthFlowBox.style.display = "block";
+        if (btnOpenGoogleAuth) btnOpenGoogleAuth.href = flow.auth_url;
+        if (googleOAuthStatusText) {
+          googleOAuthStatusText.innerHTML = `
+            <span class="status-dot"></span>
+            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
+          `;
+        }
+
+        if (btnCopyGoogleUrl) {
+          btnCopyGoogleUrl.onclick = () => {
+            navigator.clipboard.writeText(flow.auth_url);
+            showToast("Google authorization URL copied to clipboard");
+          };
+        }
+
+        if (currentOAuthPollInterval) clearInterval(currentOAuthPollInterval);
+
+        currentOAuthPollInterval = setInterval(async () => {
+          try {
+            const check = await api(`/api/antigravity/oauth/status/${flow.flow_id}`);
+            if (check.status === "complete") {
+              clearInterval(currentOAuthPollInterval);
+              showToast(`Google account '${check.account.name}' connected!`);
+              if (el.modalAccount) el.modalAccount.classList.remove("active");
+              fetchAccounts();
+            } else if (check.status === "error") {
+              clearInterval(currentOAuthPollInterval);
+              showToast(`OAuth error: ${check.error}`, "error");
+              if (googleOAuthStatusText) googleOAuthStatusText.textContent = `Error: ${check.error}`;
+            }
+          } catch (e) {
+            // Ignore poll hiccups
+          }
+        }, 2000);
+      } catch (err) {
+        btnStartGoogleOAuth.disabled = false;
+        btnStartGoogleOAuth.textContent = "Sign in with Google (OAuth)";
+        showToast(`Failed to start OAuth: ${err.message}`, "error");
+      }
+    });
+  }
+
+  if (btnImportLocalGoogle) {
+    btnImportLocalGoogle.addEventListener("click", async () => {
+      try {
+        btnImportLocalGoogle.disabled = true;
+        btnImportLocalGoogle.textContent = "Importing...";
+        const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
+        showToast(res.message || "Google Antigravity account imported!");
+        if (el.modalAccount) el.modalAccount.classList.remove("active");
+        fetchAccounts();
+      } catch (err) {
+        showToast(`Import failed: ${err.message}`, "error");
+      } finally {
+        btnImportLocalGoogle.disabled = false;
+        btnImportLocalGoogle.textContent = "⟳ Auto-Import";
+      }
+    });
+  }
+
+  if (btnSubmitCallbackPaste) {
+    btnSubmitCallbackPaste.addEventListener("click", async () => {
+      const val = googleCallbackUrlPaste ? googleCallbackUrlPaste.value.trim() : "";
+      if (!val) {
+        showToast("Please paste the callback URL or code first", "error");
+        return;
+      }
+      try {
+        btnSubmitCallbackPaste.disabled = true;
+        btnSubmitCallbackPaste.textContent = "Connecting...";
+        const res = await api("/api/antigravity/oauth/callback", {
+          method: "POST",
+          body: JSON.stringify({ callback_url: val }),
+        });
+        showToast(`Connected Google account '${res.account.name}'!`);
+        if (currentOAuthPollInterval) clearInterval(currentOAuthPollInterval);
+        if (el.modalAccount) el.modalAccount.classList.remove("active");
+        fetchAccounts();
+      } catch (err) {
+        showToast(`Connection failed: ${err.message}`, "error");
+      } finally {
+        btnSubmitCallbackPaste.disabled = false;
+        btnSubmitCallbackPaste.textContent = "Connect";
+      }
+    });
+  }
+
+  async function openQuotaModal(account) {
+    const modalQuota = document.getElementById("modal-quota");
+    const quotaTitle = document.getElementById("modal-quota-title");
+    const quotaBody = document.getElementById("modal-quota-body");
+    if (!modalQuota || !quotaBody) return;
+
+    if (quotaTitle) quotaTitle.textContent = `Google Quota: ${account.name}`;
+    quotaBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live quota from Google CloudCode PA...</div>`;
+    modalQuota.classList.add("active");
+
+    try {
+      const quota = await api(`/api/antigravity/quota/${account.id}`);
+      if (quota.error) {
+        quotaBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Failed to fetch quota: ${escapeHtml(quota.error)}</div>`;
+        return;
+      }
+
+      let groupsHtml = "";
+      const groups = quota.groups || [{ buckets: quota.buckets || [] }];
+      groups.forEach((grp) => {
+        const title = grp.displayName || "Quota Limits";
+        const buckets = grp.buckets || [];
+        const bucketCards = buckets
+          .filter((b) => !b.disabled)
+          .map((b) => {
+            const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
+            const pct = Math.round(frac * 100);
+            const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleString() : "Rolling";
+            const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+            return `
+              <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 14px 16px; margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <strong style="color: var(--ink-primary); font-size: 13px;">${escapeHtml(b.displayName || b.bucketId)}</strong>
+                  <span style="font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: ${color};">${pct}% remaining</span>
+                </div>
+                <div style="background: rgba(255, 255, 255, 0.08); border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 8px;">
+                  <div style="background: ${color}; height: 100%; width: ${pct}%;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-muted);">
+                  <span>Window: ${escapeHtml(b.window || "standard")}</span>
+                  <span>Resets at: ${escapeHtml(resetStr)}</span>
+                </div>
+              </div>
+            `;
+          })
+          .join("");
+
+        groupsHtml += `
+          <div style="margin-bottom: 16px;">
+            <div style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-muted); margin-bottom: 8px;">${escapeHtml(title)}</div>
+            ${bucketCards || '<div style="color: var(--ink-muted); font-size: 12px;">No active buckets in group</div>'}
+          </div>
+        `;
+      });
+
+      quotaBody.innerHTML = groupsHtml || `<div style="padding: 16px; color: var(--ink-muted);">No quota information returned</div>`;
+    } catch (err) {
+      quotaBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Error: ${escapeHtml(err.message)}</div>`;
     }
   }
 

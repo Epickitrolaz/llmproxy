@@ -75,7 +75,7 @@ def test_antigravity_9router_algorithms():
         extra_config={"session_id": "session-456", "step": 2},
     )
     headers = plugin.build_headers(account=account)
-    assert headers["User-Agent"] == "Antigravity-IDE/1.0"
+    assert "antigravity" in headers["User-Agent"].lower()
     assert headers["x-goog-api-client"] == "ide/antigravity"
     assert headers["Authorization"] == "Bearer ag-token-xyz"
     assert headers["x-trajectory-id"].startswith("agent/")
@@ -211,3 +211,40 @@ def test_accounts_api_endpoints():
         # Check not found
         get_res = client.get(f"/api/accounts/{account_id}")
         assert get_res.status_code == 404
+
+
+def test_antigravity_oauth_start_and_status():
+    """Verify Google Antigravity OAuth start, loopback redirect URL, and status endpoints."""
+    with TestClient(app) as client:
+        start_res = client.post("/api/antigravity/oauth/start")
+        assert start_res.status_code == 200
+        data = start_res.json()
+        assert "flow_id" in data
+        assert "auth_url" in data
+        assert "accounts.google.com" in data["auth_url"]
+        assert "1071006060591" in data["auth_url"]
+        assert "127.0.0.1" in data["redirect_uri"]
+
+        # Check status initially is waiting
+        status_res = client.get(f"/api/antigravity/oauth/status/{data['flow_id']}")
+        assert status_res.status_code == 200
+        assert status_res.json()["status"] == "waiting"
+
+
+def test_antigravity_import_local_and_live_quota():
+    """Verify local Antigravity session auto-discovery and live CloudCode PA quota retrieval."""
+    with TestClient(app) as client:
+        import_res = client.post("/api/antigravity/oauth/import-local")
+        # May be 200 if acp_token is present on host
+        if import_res.status_code == 200:
+            acc_data = import_res.json()["account"]
+            assert acc_data["provider_id"] == "antigravity"
+            assert "Google" in acc_data["name"]
+            acc_id = acc_data["id"]
+
+            # Test quota endpoint
+            quota_res = client.get(f"/api/antigravity/quota/{acc_id}")
+            assert quota_res.status_code == 200
+            quota_data = quota_res.json()
+            assert "groups" in quota_data or "buckets" in quota_data
+

@@ -385,9 +385,9 @@ class PluginManager:
         merged: Dict[str, Any] = {}
 
         for var in plugin.metadata.variables:
-            if var.name in stored_vars and stored_vars[var.name] is not None:
+            if var.name in stored_vars:
                 merged[var.name] = stored_vars[var.name]
-            elif var.value != "":
+            elif var.value != "" and var.value is not None:
                 merged[var.name] = var.value
             else:
                 merged[var.name] = var.default
