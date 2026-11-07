@@ -76,11 +76,8 @@ def test_antigravity_9router_algorithms():
     )
     headers = plugin.build_headers(account=account)
     assert "antigravity" in headers["User-Agent"].lower()
-    assert headers["x-goog-api-client"] == "ide/antigravity"
     assert headers["Authorization"] == "Bearer ag-token-xyz"
-    assert headers["x-trajectory-id"].startswith("agent/")
-    assert headers["x-ide-request-id"].startswith("ide_req_")
-    assert headers["x-request-id"] == headers["x-ide-request-id"]
+    assert headers["Content-Type"] == "application/json"
 
 
 def test_accounts_crud_and_load_balancing():

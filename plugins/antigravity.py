@@ -3,7 +3,7 @@ Google Antigravity Provider Plugin
 ==================================
 
 Implementation based on 9Router IDE protocols and authentic Google Antigravity
-Cloud Code PA internal endpoints (/v1internal:generateChat, /v1internal:loadCodeAssist).
+Cloud Code PA internal endpoints (/v1internal:streamGenerateContent?alt=sse).
 
 Key Features:
 1. Authentic Google Account Connection:
@@ -14,15 +14,14 @@ Key Features:
      agent/<conversation_id>/<timestamp>/<trajectory_id>/<step>
    where conversation_id and trajectory_id are generated using deterministic SHA-256
    derived UUIDs seeded from session/model/client metadata.
-3. Official Antigravity IDE Telemetry Headers:
-   User-Agent: antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)
+3. Official Antigravity CLI Telemetry Headers:
+   User-Agent: antigravity/cli/1.5.3 (aidev_client; os_type=linux; arch=amd64; cl=1016078699; auth_method=consumer)
    Authorization: Bearer <access_token>
-   x-goog-api-client: ide/antigravity
-   x-trajectory-id: agent/...
-   x-ide-request-id: ide_req_...
-4. Multi-Account Support & Operational Variables:
-   Variables control operational parameters (timeouts, account switch wait,
-   load balancing strategy, and max retries).
+   Content-Type: application/json
+4. Endpoint Protocol:
+   POST /v1internal:streamGenerateContent?alt=sse
+   Payload matching official agy CLI with contents, generationConfig, project, requestId,
+   model, userAgent, and requestType.
 """
 
 from __future__ import annotations
@@ -67,10 +66,9 @@ logger = logging.getLogger(__name__)
 class AntigravityPlugin(BasePlugin):
     """
     Google Antigravity Provider Plugin with 9Router reference algorithms
-    and direct Cloud Code PA integration.
+    and direct Cloud Code PA integration matching official `agy` CLI 1:1.
     """
 
-    # Parameters strictly rejected by Google Gemini/Antigravity APIs.
     REJECTED_GOOGLE_FIELDS: Set[str] = {
         "output_config",
         "thinking",
@@ -97,7 +95,7 @@ class AntigravityPlugin(BasePlugin):
             id="antigravity",
             name="Antigravity",
             description="Google Antigravity provider with 9Router IDE trajectory/session ID algorithms, multi-account load balancing, and authentic Cloud Code PA integration",
-            version="2.1.0",
+            version="2.2.0",
             author="9Router",
             enabled=True,
             filename="antigravity.py",
@@ -153,7 +151,7 @@ class AntigravityPlugin(BasePlugin):
                     name="Gemini 3.8 Flash High",
                     upstream_model="gemini-3.8-flash-high",
                     context_window=1048576,
-                    max_tokens=8192,
+                    max_tokens=65536,
                 ),
                 PluginModelConfig(
                     id="gemini-3.1-pro-high",
@@ -249,20 +247,8 @@ class AntigravityPlugin(BasePlugin):
     def build_headers(
         self, account: Optional[Account] = None, api_key: str = ""
     ) -> Dict[str, str]:
-        """Constructs authentic HTTP headers required for Google Antigravity endpoints."""
+        """Constructs authentic HTTP headers matching agy CLI 1:1."""
         key = account.api_key if account else api_key
-        acc_id = account.id if account else "default"
-        conv_seed = (account.extra_config.get("session_id") if account else None) or acc_id
-        traj_seed = (account.extra_config.get("trajectory_seed") if account else None) or f"traj_{acc_id}_{time.time()}"
-        step = int(account.extra_config.get("step", 1)) if account else 1
-
-        trajectory_id = self.generate_trajectory_id(
-            conversation_seed=conv_seed,
-            trajectory_seed=traj_seed,
-            step=step,
-        )
-        ide_req_id = self.generate_ide_request_id(seed=f"{acc_id}_{time.time()}")
-
         user_agent = (
             (account.extra_config.get("user_agent") if account else None)
             or ANTIGRAVITY_USER_AGENT
@@ -270,10 +256,6 @@ class AntigravityPlugin(BasePlugin):
         headers = {
             "Content-Type": "application/json",
             "User-Agent": user_agent,
-            "x-goog-api-client": "ide/antigravity",
-            "x-trajectory-id": trajectory_id,
-            "x-ide-request-id": ide_req_id,
-            "x-request-id": ide_req_id,
         }
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -364,75 +346,123 @@ class AntigravityPlugin(BasePlugin):
 
         expires_at = float(account.extra_config.get("expires_at", 0))
         now = time.time()
-        # Refresh if token expired or expiring within 2 minutes
         if not account.api_key or (expires_at > 0 and now >= expires_at - 120):
             refreshed = await antigravity_oauth.refresh_account_token(account)
             if refreshed:
                 from llmproxy.core.manager import plugin_manager
                 plugin_manager._save_accounts()
 
-    async def _execute_google_antigravity(
+    def _build_upstream_request(
         self,
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account],
-        base_url: str,
-        timeout: float,
-    ) -> Dict[str, Any]:
-        """Execute request against authentic Google Cloud Code PA v1internal:generateChat endpoint."""
-        await self._ensure_token_freshness(account)
-
+    ) -> Tuple[Dict[str, str], Dict[str, Any]]:
+        """Constructs headers and request body matching agy CLI 1:1."""
         headers = self.build_headers(account=account)
-        target_model = model_config.upstream_model or model_config.id
         project_id = (account.extra_config.get("project_id") if account else None) or ANTIGRAVITY_DEFAULT_PROJECT
+        target_model = model_config.upstream_model or model_config.id
 
-        # Convert OpenAI chat messages to Google Antigravity history and userMessage
-        history: List[Dict[str, Any]] = []
-        messages = list(request.messages)
-        if messages:
-            last_msg = messages[-1]
-            user_message = str(last_msg.content)
-            for m in messages[:-1]:
-                # 1 = USER, 2 = MODEL/BOT, 3 = SYSTEM
-                author = 1 if m.role == "user" else 2
-                history.append({"author": author, "content": str(m.content)})
-        else:
-            user_message = "Hello"
+        # Generate trajectory and conversation seeds
+        acc_id = account.id if account else "default"
+        conv_seed = (account.extra_config.get("session_id") if account else None) or f"conv_{acc_id}_{int(time.time() // 3600)}"
+        traj_seed = (account.extra_config.get("trajectory_seed") if account else None) or f"traj_{acc_id}_{uuid.uuid4().hex[:8]}"
+        step = int(account.extra_config.get("step", 1)) if account else 1
+
+        conv_id = self.generate_sha256_uuid(conv_seed)
+        traj_id = self.generate_sha256_uuid(traj_seed)
+        timestamp_ms = int(time.time() * 1000)
+        request_id = f"agent/{conv_id}/{timestamp_ms}/{traj_id}/{step}"
+
+        # 64-bit integer session ID matching agy
+        session_hash = int(hashlib.sha256(conv_id.encode("utf-8")).hexdigest()[:16], 16)
+        session_id_str = str(session_hash - (1 << 63))
+
+        # Build contents from messages
+        contents: List[Dict[str, Any]] = []
+        system_instruction_text = ""
+
+        for m in request.messages:
+            if m.role == "system":
+                system_instruction_text += (str(m.content) + "\n")
+            elif m.role == "user":
+                prompt_text = str(m.content)
+                wrapped_text = f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>" if not prompt_text.startswith("<USER_REQUEST>") else prompt_text
+                contents.append({
+                    "role": "user",
+                    "parts": [{"text": wrapped_text}]
+                })
+            elif m.role in ("assistant", "model"):
+                contents.append({
+                    "role": "model",
+                    "parts": [{"text": str(m.content)}]
+                })
+
+        if not contents:
+            contents.append({
+                "role": "user",
+                "parts": [{"text": "<USER_REQUEST>\nHello\n</USER_REQUEST>"}]
+            })
+
+        max_tokens = request.max_tokens or model_config.max_tokens or 65536
+        generation_config: Dict[str, Any] = {
+            "maxOutputTokens": max_tokens,
+            "thinkingConfig": {
+                "includeThoughts": True,
+                "thinkingLevel": "HIGH",
+            },
+        }
+        if request.temperature is not None and request.temperature != 1.0:
+            generation_config["temperature"] = request.temperature
+        if request.top_p is not None and request.top_p != 1.0:
+            generation_config["topP"] = request.top_p
+
+        # Standard agy identity instructions when none explicitly supplied
+        default_identity = (
+            "<identity>\n"
+            "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n"
+            "You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.\n"
+            "The USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n"
+            "</identity>"
+        )
+        system_parts_text = system_instruction_text.strip() if system_instruction_text.strip() else default_identity
+
+        is_claude = "claude" in target_model.lower()
+        is_gpt = "gpt" in target_model.lower()
+
+        labels = {
+            "cascade_id": conv_id,
+            "last_step_index": str(max(0, step - 1)),
+            "model_enum": "MODEL_PLACEHOLDER_M318",
+            "request_id": f"{traj_id}-{max(0, step - 1)}",
+            "root_cascade_id": conv_id,
+            "trajectory_id": traj_id,
+            "used_claude": "true" if is_claude else "false",
+            "used_claude_conservative": "false",
+            "used_non_gemini_model": "true" if (is_claude or is_gpt) else "false",
+        }
+
+        inner_request: Dict[str, Any] = {
+            "contents": contents,
+            "systemInstruction": {
+                "role": "user",
+                "parts": [{"text": system_parts_text}],
+            },
+            "generationConfig": generation_config,
+            "labels": labels,
+            "sessionId": session_id_str,
+        }
 
         body: Dict[str, Any] = {
             "project": project_id,
-            "modelConfigId": target_model,
-            "userMessage": user_message,
-            "metadata": {
-                "ideType": "ANTIGRAVITY",
-            },
+            "requestId": request_id,
+            "request": inner_request,
+            "model": target_model,
+            "userAgent": "antigravity",
+            "requestType": "agent",
         }
-        if history:
-            body["history"] = history
 
-        # Sanitize against disallowed fields
-        cleaned_body = self.sanitize_payload(body)
-
-        url = f"{base_url}/v1internal:generateChat"
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, headers=headers, json=cleaned_body)
-
-            # Handle 401 unauthenticated by refreshing and retrying once
-            if resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
-                refreshed = await antigravity_oauth.refresh_account_token(account)
-                if refreshed:
-                    headers = self.build_headers(account=account)
-                    resp = await client.post(url, headers=headers, json=cleaned_body)
-
-            if resp.status_code >= 400:
-                raise httpx.HTTPStatusError(
-                    f"Google Antigravity upstream error ({resp.status_code}): {resp.text}",
-                    request=resp.request,
-                    response=resp,
-                )
-
-            return resp.json()
+        return headers, body
 
     async def chat_completion(
         self,
@@ -449,35 +479,22 @@ class AntigravityPlugin(BasePlugin):
         ).rstrip("/")
         timeout = float(variables.get("timeout", 60.0))
 
-        # Check for simulated test mode
         if self._is_test_mode(api_key):
             if request.stream:
                 return self._mock_stream(request, model_config, account=account)
             return self._mock_response(request, model_config, account=account)
 
-        # 100% Authentic Google Antigravity Execution
+        await self._ensure_token_freshness(account)
+        headers, body = self._build_upstream_request(request, model_config, account)
         target_model = model_config.id
-        call_result = await self._execute_google_antigravity(
-            request=request,
-            model_config=model_config,
-            account=account,
-            base_url=base_url,
-            timeout=timeout,
-        )
 
-        content = call_result.get("markdown", "")
-        usage_info = call_result.get("usageMetadata", {})
-        prompt_tokens = int(usage_info.get("promptTokenCount", 0))
-        completion_tokens = int(usage_info.get("candidatesTokenCount", 0))
-        total_tokens = int(usage_info.get("totalTokenCount", 0)) or (prompt_tokens + completion_tokens)
+        url = f"{base_url}/v1internal:streamGenerateContent?alt=sse"
 
-        # If streaming requested, chunk the authentic response into SSE events
         if request.stream:
-            async def stream_chunks() -> AsyncIterator[ChatCompletionChunk]:
+            async def sse_stream_generator() -> AsyncIterator[ChatCompletionChunk]:
                 chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
 
-                # Initial empty delta with role
                 yield ChatCompletionChunk(
                     id=chunk_id,
                     created=created,
@@ -485,23 +502,50 @@ class AntigravityPlugin(BasePlugin):
                     choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
                 )
 
-                # Stream content in realistic word/token batches
-                words = content.split(" ")
-                for i, word in enumerate(words):
-                    yield ChatCompletionChunk(
-                        id=chunk_id,
-                        created=created,
-                        model=target_model,
-                        choices=[
-                            ChatChoiceDelta(
-                                index=0,
-                                delta={"content": word + (" " if i < len(words) - 1 else "")},
-                            )
-                        ],
-                    )
-                    await asyncio.sleep(0.015)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
+                        if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                            refreshed = await antigravity_oauth.refresh_account_token(account)
+                            if refreshed:
+                                new_headers = self.build_headers(account=account)
+                                async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
+                                    stream_resp = retry_resp
 
-                # Final finish chunk
+                        if stream_resp.status_code >= 400:
+                            err_bytes = await stream_resp.aread()
+                            raise httpx.HTTPStatusError(
+                                f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                request=stream_resp.request,
+                                response=stream_resp,
+                            )
+
+                        async for line in stream_resp.aiter_lines():
+                            if not line or not line.startswith("data: "):
+                                continue
+                            raw_data = line[6:].strip()
+                            if raw_data == "[DONE]":
+                                break
+                            try:
+                                payload = json.loads(raw_data)
+                                candidates = payload.get("response", {}).get("candidates", [])
+                                for cand in candidates:
+                                    parts = cand.get("content", {}).get("parts", [])
+                                    for part in parts:
+                                        if "text" in part and part["text"]:
+                                            yield ChatCompletionChunk(
+                                                id=chunk_id,
+                                                created=created,
+                                                model=target_model,
+                                                choices=[
+                                                    ChatChoiceDelta(
+                                                        index=0,
+                                                        delta={"content": part["text"]},
+                                                    )
+                                                ],
+                                            )
+                            except Exception:
+                                continue
+
                 yield ChatCompletionChunk(
                     id=chunk_id,
                     created=created,
@@ -509,9 +553,56 @@ class AntigravityPlugin(BasePlugin):
                     choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
                 )
 
-            return stream_chunks()
+            return sse_stream_generator()
 
-        # Non-streaming OpenAI response
+        # Non-streaming: accumulate response parts
+        full_text = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
+                if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                    refreshed = await antigravity_oauth.refresh_account_token(account)
+                    if refreshed:
+                        new_headers = self.build_headers(account=account)
+                        async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
+                            stream_resp = retry_resp
+
+                if stream_resp.status_code >= 400:
+                    err_bytes = await stream_resp.aread()
+                    raise httpx.HTTPStatusError(
+                        f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                        request=stream_resp.request,
+                        response=stream_resp,
+                    )
+
+                async for line in stream_resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    raw_data = line[6:].strip()
+                    if raw_data == "[DONE]":
+                        break
+                    try:
+                        payload = json.loads(raw_data)
+                        resp_obj = payload.get("response", {})
+                        usage = resp_obj.get("usageMetadata", {})
+                        if usage:
+                            prompt_tokens = int(usage.get("promptTokenCount", prompt_tokens))
+                            completion_tokens = int(usage.get("candidatesTokenCount", completion_tokens))
+                            total_tokens = int(usage.get("totalTokenCount", total_tokens))
+
+                        candidates = resp_obj.get("candidates", [])
+                        for cand in candidates:
+                            parts = cand.get("content", {}).get("parts", [])
+                            for part in parts:
+                                if "text" in part and part["text"]:
+                                    full_text.append(part["text"])
+                    except Exception:
+                        continue
+
+        assembled_text = "".join(full_text)
         return ChatCompletionResponse(
             id=f"chatcmpl-ag-{uuid.uuid4().hex[:12]}",
             created=int(time.time()),
@@ -519,14 +610,14 @@ class AntigravityPlugin(BasePlugin):
             choices=[
                 ChatChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=content),
+                    message=ChatMessage(role="assistant", content=assembled_text),
                     finish_reason="stop",
                 )
             ],
             usage=CompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
+                prompt_tokens=prompt_tokens or 15,
+                completion_tokens=completion_tokens or max(1, len(assembled_text) // 4),
+                total_tokens=total_tokens or (prompt_tokens + completion_tokens),
             ),
         )
 

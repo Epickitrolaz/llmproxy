@@ -38,10 +38,12 @@ ANTIGRAVITY_TOKEN_URI = "https://oauth2.googleapis.com/token"
 ANTIGRAVITY_USERINFO_URI = "https://www.googleapis.com/oauth2/v2/userinfo"
 ANTIGRAVITY_DEFAULT_PROJECT = "aicode-consumers"
 CLOUDCODE_PA_ENDPOINTS = [
-    "https://cloudcode-pa.googleapis.com",
     "https://daily-cloudcode-pa.googleapis.com",
+    "https://cloudcode-pa.googleapis.com",
 ]
-ANTIGRAVITY_USER_AGENT = "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)"
+ANTIGRAVITY_USER_AGENT = (
+    "antigravity/cli/1.5.3 (aidev_client; os_type=linux; arch=amd64; cl=1016078699; auth_method=consumer)"
+)
 
 
 class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
