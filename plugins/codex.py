@@ -143,7 +143,51 @@ class CodexPlugin(BasePlugin):
     ) -> ChatCompletionResponse:
         model_name = model_config.id
         acc_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(m.role == "tool" for m in request.messages[-2:]):
+            fn = request.tools[0].get("function", {}) if "function" in request.tools[0] else request.tools[0]
+            call_id = f"call_codex_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {})
+            if props:
+                first_k = next(iter(props.keys()))
+                mock_args = json.dumps({first_k: "test_value"})
+            return ChatCompletionResponse(
+                id=f"chatcmpl-codex-{uuid.uuid4().hex[:12]}",
+                created=int(time.time()),
+                model=model_name,
+                choices=[
+                    ChatChoice(
+                        index=0,
+                        message=ChatMessage(
+                            role="assistant",
+                            content=None,
+                            tool_calls=[
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": mock_args,
+                                    },
+                                }
+                            ],
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=12,
+                    completion_tokens=22,
+                    total_tokens=34,
+                ),
+            )
+
         content = f"Simulated response from Codex ({model_name}){acc_label}."
+        if any(m.role == "tool" for m in request.messages):
+            content = f"Simulated response from Codex ({model_name}){acc_label} with tool output processed."
+
         return ChatCompletionResponse(
             id=f"chatcmpl-codex-{uuid.uuid4().hex[:12]}",
             created=int(time.time()),
@@ -172,6 +216,78 @@ class CodexPlugin(BasePlugin):
         chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         acc_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(m.role == "tool" for m in request.messages[-2:]):
+            fn = request.tools[0].get("function", {}) if "function" in request.tools[0] else request.tools[0]
+            call_id = f"call_codex_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {})
+            if props:
+                first_k = next(iter(props.keys()))
+                mock_args = json.dumps({first_k: "test_value"})
+
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": "",
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason=None,
+                    )
+                ],
+            )
+            arg_chunks = [mock_args[: len(mock_args) // 2], mock_args[len(mock_args) // 2 :]]
+            for arg_piece in arg_chunks:
+                if arg_piece:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatChoiceDelta(
+                                index=0,
+                                delta={
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": arg_piece},
+                                        }
+                                    ]
+                                },
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={},
+                        finish_reason="tool_calls",
+                    )
+                ],
+            )
+            return
 
         yield ChatCompletionChunk(
             id=chunk_id,
@@ -286,10 +402,21 @@ class CodexPlugin(BasePlugin):
         elif request.temperature is not None:
             body["temperature"] = request.temperature
 
-        if request.max_tokens is not None:
-            body["max_tokens"] = request.max_tokens
+        max_tokens = request.max_tokens if request.max_tokens is not None else request.max_completion_tokens
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         if request.top_p is not None and not target_model.startswith("o"):
             body["top_p"] = request.top_p
+        if request.tools is not None:
+            body["tools"] = request.tools
+        if request.tool_choice is not None:
+            body["tool_choice"] = request.tool_choice
+        if request.parallel_tool_calls is not None:
+            body["parallel_tool_calls"] = request.parallel_tool_calls
+        if request.response_format is not None:
+            body["response_format"] = request.response_format
+        if request.stop is not None:
+            body["stop"] = request.stop
 
         url = f"{base_url}/chat/completions"
 

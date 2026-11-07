@@ -27,6 +27,8 @@ router = APIRouter(prefix="/v1")
 
 def _estimate_tokens(content: Any) -> int:
     """Simple token estimation based on character count / standard ratio."""
+    if not content:
+        return 0
     if isinstance(content, str):
         return max(1, len(content) // 4)
     if isinstance(content, list):
@@ -37,11 +39,21 @@ def _estimate_tokens(content: Any) -> int:
             else:
                 total += _estimate_tokens(str(item))
         return max(1, total)
+    if isinstance(content, dict):
+        return max(1, len(json.dumps(content)) // 4)
     return 1
 
 
-def _calc_prompt_tokens(messages: list) -> int:
-    return sum(_estimate_tokens(m.content) for m in messages)
+def _calc_prompt_tokens(messages: list, tools: Optional[list] = None) -> int:
+    total = 0
+    for m in messages:
+        if m.content:
+            total += _estimate_tokens(m.content)
+        if getattr(m, "tool_calls", None):
+            total += _estimate_tokens(m.tool_calls)
+    if tools:
+        total += _estimate_tokens(tools)
+    return max(1, total)
 
 
 def _safe_float(val: Any, default: float) -> float:
@@ -81,7 +93,7 @@ async def _invoke_plugin_completion(plugin, request, model_config, variables, ac
 @router.post("/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     start_time = time.time()
-    prompt_tokens = _calc_prompt_tokens(request.messages)
+    prompt_tokens = _calc_prompt_tokens(request.messages, tools=request.tools)
 
     # 1. Resolve model to plugin, model config, and variables
     resolved = plugin_manager.resolve_model(request.model)
@@ -205,6 +217,8 @@ async def chat_completions(request: ChatCompletionRequest):
                         for choice in chunk.choices:
                             if choice.delta.get("content"):
                                 completion_tokens += _estimate_tokens(choice.delta["content"])
+                            if choice.delta.get("tool_calls"):
+                                completion_tokens += _estimate_tokens(choice.delta["tool_calls"])
                         yield f"data: {chunk.model_dump_json()}\n\n"
                     elif isinstance(chunk, str):
                         yield f"data: {chunk}\n\n"
@@ -280,8 +294,12 @@ async def chat_completions(request: ChatCompletionRequest):
                     prompt_tokens = response.usage.prompt_tokens
                 if response.usage and response.usage.completion_tokens:
                     completion_tokens = response.usage.completion_tokens
-                elif response.choices and response.choices[0].message.content:
-                    completion_tokens = _estimate_tokens(response.choices[0].message.content)
+                elif response.choices:
+                    msg = response.choices[0].message
+                    if msg.content:
+                        completion_tokens += _estimate_tokens(msg.content)
+                    if getattr(msg, "tool_calls", None):
+                        completion_tokens += _estimate_tokens(msg.tool_calls)
                     response.usage = CompletionUsage(
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,

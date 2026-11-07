@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ==========================================
@@ -11,12 +11,19 @@ from pydantic import BaseModel, Field
 # ==========================================
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     role: Literal["system", "user", "assistant", "function", "tool"] = "user"
-    content: Union[str, List[Dict[str, Any]]] = ""
+    content: Optional[Union[str, List[Dict[str, Any]]]] = ""
     name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    function_call: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: List[ChatMessage]
     temperature: Optional[float] = 1.0
@@ -25,45 +32,66 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     user: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    parallel_tool_calls: Optional[bool] = None
+    functions: Optional[List[Dict[str, Any]]] = None
+    function_call: Optional[Union[str, Dict[str, Any]]] = None
+    response_format: Optional[Dict[str, Any]] = None
     extra_body: Optional[Dict[str, Any]] = None
 
 
 class ChatChoice(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     index: int = 0
     message: ChatMessage
     finish_reason: Optional[str] = "stop"
+    logprobs: Optional[Any] = None
 
 
 class ChatChoiceDelta(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     index: int = 0
     delta: Dict[str, Any]
     finish_reason: Optional[str] = None
+    logprobs: Optional[Any] = None
 
 
 class CompletionUsage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
 
 class ChatCompletionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     id: str
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatChoice]
     usage: Optional[CompletionUsage] = None
+    system_fingerprint: Optional[str] = None
 
 
 class ChatCompletionChunk(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     id: str
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatChoiceDelta]
+    usage: Optional[CompletionUsage] = None
 
 
 class ModelCard(BaseModel):
