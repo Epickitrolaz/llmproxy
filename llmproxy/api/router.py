@@ -111,38 +111,47 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     # 0. Local API Key Authentication & Verification
     matched_api_key = None
     all_keys = plugin_manager.get_api_keys()
-    active_keys = [k for k in all_keys if k.enabled]
+    active_keys = [k for k in all_keys if k.enabled and k.is_valid()]
     token = _extract_api_key(http_request)
 
-    if active_keys:
-        if not token:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "message": "Missing API key. Pass 'Authorization: Bearer <key>' or 'x-api-key'.",
-                        "type": "invalid_request_error",
-                        "code": "missing_api_key",
-                    }
-                },
-            )
-        matched = next((k for k in active_keys if k.key == token), None)
-        if not matched:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "message": "Invalid API key or key is disabled.",
-                        "type": "invalid_request_error",
-                        "code": "invalid_api_key",
-                    }
-                },
-            )
-        matched_api_key = matched
-    elif token:
+    if token:
         matched = next((k for k in all_keys if k.key == token), None)
-        if matched and matched.enabled:
+        if not matched:
+            if active_keys:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": {
+                            "message": "Invalid API key or key is disabled.",
+                            "type": "invalid_request_error",
+                            "code": "invalid_api_key",
+                        }
+                    },
+                )
+        else:
+            if not matched.is_valid():
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": {
+                            "message": "API key has expired or reached its maximum request limit.",
+                            "type": "invalid_request_error",
+                            "code": "api_key_expired",
+                        }
+                    },
+                )
             matched_api_key = matched
+    elif active_keys:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": {
+                    "message": "Missing API key. Pass 'Authorization: Bearer <key>' or 'x-api-key'.",
+                    "type": "invalid_request_error",
+                    "code": "missing_api_key",
+                }
+            },
+        )
 
     # 1. Resolve model to plugin, model config, and variables
     resolved = plugin_manager.resolve_model(request.model)

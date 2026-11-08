@@ -383,6 +383,12 @@ async def list_api_keys():
     return plugin_manager.get_api_keys()
 
 
+@router.get("/keys/temporary", response_model=APIKey)
+async def get_temporary_api_key():
+    """Get or create an active temporary test API key (expires in 30 min or 10 requests)."""
+    return plugin_manager.get_or_create_temporary_key()
+
+
 @router.post("/keys", response_model=APIKey)
 async def create_api_key(body: APIKeyCreate):
     """Create a new local API key with usage tracking."""
@@ -667,6 +673,18 @@ async def reset_account_cooldown(account_id: str):
     }
 
 
+@router.post("/accounts/{account_id}/pin")
+async def toggle_account_pin(account_id: str):
+    """Toggle or set pinned status for an account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    new_pinned = not getattr(account, "pinned", False)
+    account.pinned = new_pinned
+    plugin_manager._save_accounts()
+    return {"status": "ok", "pinned": new_pinned, "account_id": account_id}
+
+
 class AntigravityCallbackRequest(BaseModel):
     callback_url: Optional[str] = None
     code: Optional[str] = None
@@ -868,9 +886,10 @@ async def get_stats():
     active_plugins = [p for p in plugin_manager.plugins.values() if p.metadata.enabled]
     active_plugins_count = len(active_plugins)
 
+    active_rules_count = sum(1 for r in plugin_manager.get_load_balancing_rules() if r.enabled)
     active_models_count = sum(
         sum(1 for m in p.metadata.models if m.enabled) for p in active_plugins
-    )
+    ) + active_rules_count
 
     avg_latency = (
         round(sum(log.latency_ms for log in logs) / total_requests, 1)

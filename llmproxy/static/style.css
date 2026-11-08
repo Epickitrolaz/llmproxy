@@ -724,12 +724,55 @@ input:checked + .slider:before {
   user-select: none;
   overflow: hidden;
   border-right: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.editor-code-container {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
+}
+
+.highlight-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  tab-size: 4;
+  color: var(--ink-primary);
+  background: transparent;
+  box-sizing: border-box;
+}
+
+.highlight-layer code {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre;
+  tab-size: 4;
 }
 
 .code-textarea {
-  flex: 1;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   background: transparent;
-  color: #f4f4f5;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--accent-white);
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 20px;
@@ -739,9 +782,28 @@ input:checked + .slider:before {
   resize: none;
   white-space: pre;
   overflow-wrap: normal;
-  overflow-x: auto;
+  overflow: auto;
   tab-size: 4;
+  box-sizing: border-box;
+  z-index: 2;
 }
+
+.code-textarea::selection {
+  background: rgba(255, 255, 255, 0.2);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Python Syntax Highlighting Tokens */
+.tok-kw { color: #c084fc; font-weight: 600; }
+.tok-builtin { color: #38bdf8; }
+.tok-str { color: #34d399; }
+.tok-comment { color: #71717a; font-style: italic; }
+.tok-fn { color: #60a5fa; }
+.tok-class { color: #fbbf24; font-weight: 600; }
+.tok-num { color: #fbbf24; }
+.tok-dec { color: #f97316; }
+.tok-op { color: #94a3b8; }
 
 .feedback-banner {
   padding: 10px 16px;
@@ -972,6 +1034,12 @@ input:checked + .slider:before {
 
 .modal-overlay.active {
   display: flex;
+  animation: overlayFadeIn 0.18s ease-out;
+}
+
+.modal-overlay.closing {
+  display: flex;
+  animation: overlayFadeOut 0.18s ease-in forwards;
 }
 
 .modal-dialog {
@@ -984,12 +1052,31 @@ input:checked + .slider:before {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: modalScale 0.15s ease-out;
+  animation: modalScaleIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-@keyframes modalScale {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
+.modal-overlay.closing .modal-dialog {
+  animation: modalScaleOut 0.18s ease-in forwards;
+}
+
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes overlayFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes modalScaleIn {
+  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes modalScaleOut {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.96) translateY(6px); }
 }
 
 .modal-header {
@@ -1537,6 +1624,11 @@ input:checked + .slider:before {
   gap: 10px;
   position: relative;
   transition: all 0.15s ease;
+}
+
+.account-square-card.is-pinned {
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.05);
 }
 
 .account-square-card:hover {

@@ -353,6 +353,14 @@ class AntigravityPlugin(BasePlugin):
                     options=["think", "thought", "thinking"],
                     description="Tag name used to mark reasoning blocks",
                 ),
+                PluginVariable(
+                    name="reasoning_effort",
+                    label="Reasoning Effort",
+                    type="select",
+                    default="default",
+                    options=["default", "high", "medium", "low", "none"],
+                    description="Reasoning effort level mapped to model name suffix (e.g. -high, -medium, -low, or none)",
+                ),
             ],
             models=[
                 PluginModelConfig(
@@ -481,6 +489,70 @@ class AntigravityPlugin(BasePlugin):
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
         return any(key.startswith(p) for p in prefixes) or key in ("test-key", "test_key", "secret123")
 
+    def _parse_reasoning_level(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Dict[str, Any],
+    ) -> Tuple[str, str, bool]:
+        """
+        Parse and resolve reasoning level for Antigravity provider.
+        Antigravity sets reasoning level directly in the actual upstream model name:
+        e.g. 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low',
+        or stripped to base name without reasoning suffix when disabled (e.g. 'gemini-3.8-flash'),
+        and 'claude-opus-4-6-thinking' vs 'claude-opus-4-6'.
+
+        Returns:
+            (actual_model_name, reasoning_level, enable_reasoning)
+        """
+        raw = None
+        if hasattr(request, "reasoning_effort") and request.reasoning_effort:
+            raw = str(request.reasoning_effort).strip().lower()
+        elif request.extra_body and ("reasoning_effort" in request.extra_body or "reasoning" in request.extra_body):
+            raw = str(request.extra_body.get("reasoning_effort") or request.extra_body.get("reasoning") or "").strip().lower()
+
+        # Check model name suffix on the requested model ID (e.g. gemini-3.8-flash:high, gemini-3.8-flash:none)
+        if not raw and request.model:
+            m_lower = request.model.lower()
+            for suffix, level in [
+                (":none", "none"), ("-none", "none"), (":off", "none"), ("-off", "none"),
+                (":low", "low"), ("-low", "low"),
+                (":medium", "medium"), ("-medium", "medium"),
+                (":high", "high"), ("-high", "high"),
+            ]:
+                if m_lower.endswith(suffix):
+                    raw = level
+                    break
+
+        if not raw:
+            var_val = str(variables.get("reasoning_effort") or "").strip().lower()
+            if var_val and var_val != "default":
+                raw = var_val
+
+        base_upstream = model_config.upstream_model or model_config.id
+
+        # Normalize base_upstream by stripping any existing suffix
+        cleaned_base = base_upstream
+        for sfx in ["-high", "-medium", "-low", "-thinking"]:
+            if cleaned_base.endswith(sfx):
+                cleaned_base = cleaned_base[:-len(sfx)]
+                break
+
+        if raw in ("none", "off", "disabled", "false", "0"):
+            # Disabled altogether: strip suffix from model name
+            return cleaned_base, "none", False
+
+        if raw in ("low", "medium", "high"):
+            if "claude" in cleaned_base:
+                actual_model = f"{cleaned_base}-thinking" if raw != "none" else cleaned_base
+            else:
+                actual_model = f"{cleaned_base}-{raw}"
+            return actual_model, raw, True
+
+        # Default: keep configured upstream model name as is
+        enable_reasoning = any(sfx in base_upstream for sfx in ["-high", "-medium", "-low", "-thinking"])
+        return base_upstream, "default", enable_reasoning
+
     def _mock_response(
         self,
         request: ChatCompletionRequest,
@@ -488,13 +560,18 @@ class AntigravityPlugin(BasePlugin):
         account: Optional[Account] = None,
         enable_reasoning_tags: bool = True,
         tag_name: str = "think",
+        actual_model: Optional[str] = None,
+        enable_reasoning: bool = True,
     ) -> ChatCompletionResponse:
         model_name = model_config.id
         acc_label = f" via account '{account.name}'" if account else ""
 
         mock_thought = bool(
-            (request.extra_body and request.extra_body.get("mock_thought"))
-            or getattr(request, "mock_thought", False)
+            enable_reasoning
+            and (
+                (request.extra_body and request.extra_body.get("mock_thought"))
+                or getattr(request, "mock_thought", False)
+            )
         )
         reasoning_content = None
         thought_prefix = ""
@@ -591,6 +668,8 @@ class AntigravityPlugin(BasePlugin):
         account: Optional[Account] = None,
         enable_reasoning_tags: bool = True,
         tag_name: str = "think",
+        actual_model: Optional[str] = None,
+        enable_reasoning: bool = True,
     ) -> AsyncIterator[ChatCompletionChunk]:
         model_name = model_config.id
         chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
@@ -598,8 +677,11 @@ class AntigravityPlugin(BasePlugin):
         acc_label = f" via account '{account.name}'" if account else ""
 
         mock_thought = bool(
-            (request.extra_body and request.extra_body.get("mock_thought"))
-            or getattr(request, "mock_thought", False)
+            enable_reasoning
+            and (
+                (request.extra_body and request.extra_body.get("mock_thought"))
+                or getattr(request, "mock_thought", False)
+            )
         )
 
         if request.tools and not any(m.role in ("tool", "function") for m in request.messages[-2:]):
@@ -779,11 +861,14 @@ class AntigravityPlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account],
+        actual_model: Optional[str] = None,
+        enable_reasoning: bool = True,
+        reasoning_level: str = "default",
     ) -> Tuple[Dict[str, str], Dict[str, Any]]:
         """Constructs headers and request body matching agy CLI 1:1."""
         headers = self.build_headers(account=account)
         project_id = (account.extra_config.get("project_id") if account else None) or ANTIGRAVITY_DEFAULT_PROJECT
-        target_model = model_config.upstream_model or model_config.id
+        target_model = actual_model or model_config.upstream_model or model_config.id
 
         # Generate trajectory and conversation seeds
         acc_id = account.id if account else "default"
@@ -894,11 +979,17 @@ class AntigravityPlugin(BasePlugin):
         max_tokens = request.max_tokens or model_config.max_tokens or 65536
         generation_config: Dict[str, Any] = {
             "maxOutputTokens": max_tokens,
-            "thinkingConfig": {
-                "includeThoughts": True,
-                "thinkingLevel": "HIGH",
-            },
         }
+        if enable_reasoning:
+            thinking_level = "HIGH" if reasoning_level in ("high", "default") else ("LOW" if reasoning_level == "low" else "MEDIUM")
+            generation_config["thinkingConfig"] = {
+                "includeThoughts": True,
+                "thinkingLevel": thinking_level,
+            }
+        else:
+            generation_config["thinkingConfig"] = {
+                "includeThoughts": False,
+            }
         if request.temperature is not None and request.temperature != 1.0:
             generation_config["temperature"] = request.temperature
         if request.top_p is not None and request.top_p != 1.0:
@@ -948,9 +1039,16 @@ class AntigravityPlugin(BasePlugin):
         ).rstrip("/")
         timeout = float(variables.get("timeout") or 60.0)
 
+        # Resolve reasoning level and actual model name
+        actual_model, reasoning_level, enable_reasoning = self._parse_reasoning_level(
+            request, model_config, variables
+        )
+
         # Resolve reasoning tags configuration
-        enable_reasoning_tags = True
-        if "reasoning_tags" in variables:
+        enable_reasoning_tags = enable_reasoning
+        if not enable_reasoning:
+            enable_reasoning_tags = False
+        elif "reasoning_tags" in variables:
             enable_reasoning_tags = bool(variables.get("reasoning_tags"))
         if hasattr(request, "reasoning_tags") and getattr(request, "reasoning_tags") is not None:
             enable_reasoning_tags = bool(getattr(request, "reasoning_tags"))
@@ -976,6 +1074,8 @@ class AntigravityPlugin(BasePlugin):
                     account=account,
                     enable_reasoning_tags=enable_reasoning_tags,
                     tag_name=tag_name,
+                    actual_model=actual_model,
+                    enable_reasoning=enable_reasoning,
                 )
             return self._mock_response(
                 request,
@@ -983,10 +1083,19 @@ class AntigravityPlugin(BasePlugin):
                 account=account,
                 enable_reasoning_tags=enable_reasoning_tags,
                 tag_name=tag_name,
+                actual_model=actual_model,
+                enable_reasoning=enable_reasoning,
             )
 
         await self._ensure_token_freshness(account)
-        headers, body = self._build_upstream_request(request, model_config, account)
+        headers, body = self._build_upstream_request(
+            request,
+            model_config,
+            account,
+            actual_model=actual_model,
+            enable_reasoning=enable_reasoning,
+            reasoning_level=reasoning_level,
+        )
         target_model = model_config.id
 
         url = f"{base_url}/v1internal:streamGenerateContent?alt=sse"

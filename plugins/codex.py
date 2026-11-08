@@ -94,8 +94,8 @@ class CodexPlugin(BasePlugin):
                     name="reasoning_effort",
                     label="Reasoning Effort",
                     type="select",
-                    default="medium",
-                    options=["low", "medium", "high"],
+                    default="default",
+                    options=["default", "low", "medium", "high", "none"],
                     description="Reasoning effort level for supported models",
                 ),
             ],
@@ -360,6 +360,52 @@ class CodexPlugin(BasePlugin):
             async for chunk in self._mock_stream(request, model_config, account=account):
                 yield chunk
 
+    def _parse_reasoning_effort(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Parse and resolve reasoning effort for Codex.
+        Supported levels: 'low', 'medium', 'high', 'default', 'none' / 'off' (disabled).
+        Checks request.reasoning_effort, request.extra_body, model name suffix, or variables.
+        """
+        raw = None
+        if hasattr(request, "reasoning_effort") and request.reasoning_effort:
+            raw = str(request.reasoning_effort).strip().lower()
+        elif request.extra_body and ("reasoning_effort" in request.extra_body or "reasoning" in request.extra_body):
+            raw = str(request.extra_body.get("reasoning_effort") or request.extra_body.get("reasoning") or "").strip().lower()
+
+        # Check model name suffix (e.g. gpt-6-luna:high, gpt-6-luna-high, gpt-6-luna:none)
+        if not raw and request.model:
+            m_lower = request.model.lower()
+            for suffix, level in [
+                (":none", "none"), ("-none", "none"), (":off", "none"), ("-off", "none"),
+                (":low", "low"), ("-low", "low"),
+                (":medium", "medium"), ("-medium", "medium"),
+                (":high", "high"), ("-high", "high"),
+            ]:
+                if m_lower.endswith(suffix):
+                    raw = level
+                    break
+
+        if not raw:
+            var_val = str(variables.get("reasoning_effort") or "").strip().lower()
+            if var_val and var_val != "default":
+                raw = var_val
+
+        if not raw or raw in ("default", ""):
+            return "default"
+
+        if raw in ("none", "off", "disabled", "false", "0"):
+            return "none"
+
+        if raw in ("low", "medium", "high"):
+            return raw
+
+        return "default"
+
     async def chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -377,7 +423,7 @@ class CodexPlugin(BasePlugin):
             (account.extra_config.get("organization_id") if account else None)
             or str(variables.get("organization_id") or "")
         ).strip()
-        reasoning_effort = str(variables.get("reasoning_effort") or "medium").strip()
+        parsed_effort = self._parse_reasoning_effort(request, model_config, variables)
         target_model = model_config.upstream_model or model_config.id
 
         if self._is_test_mode(api_key):
@@ -397,8 +443,13 @@ class CodexPlugin(BasePlugin):
             "messages": [m.model_dump(exclude_none=True) for m in request.messages],
             "stream": bool(request.stream),
         }
-        if target_model.startswith("o") or "gpt-6" in target_model:
-            body["reasoning_effort"] = reasoning_effort
+        if parsed_effort == "none":
+            # Explicitly disabled reasoning altogether
+            pass
+        elif parsed_effort in ("low", "medium", "high"):
+            body["reasoning_effort"] = parsed_effort
+        elif parsed_effort == "default" and (target_model.startswith("o") or "gpt-6" in target_model):
+            body["reasoning_effort"] = "medium"
         elif request.temperature is not None:
             body["temperature"] = request.temperature
 

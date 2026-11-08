@@ -19,6 +19,10 @@
     statusProviderFilter: "",
     activeSnippetLang: "python",
     selectedSnippetModel: "gemini-3.8-flash-high",
+    temporaryApiKey: null,
+    rulesSearchQuery: "",
+    fullscreenOriginalCode: "",
+    fullscreenCodeDirty: false,
     currentFullscreenPluginId: null,
     currentFullscreenTab: "code",
     selectedPlaygroundModel: null,
@@ -105,8 +109,120 @@
     modalAccount: document.getElementById("modal-account"),
     modalModel: document.getElementById("modal-model"),
     modalProviderFullscreen: document.getElementById("modal-provider-fullscreen"),
+    modalConfirm: document.getElementById("modal-confirm"),
     toastContainer: document.getElementById("toast-container"),
+    // Rules search
+    rulesSearchInput: document.getElementById("rules-search-input"),
+    ruleTargetsSearchInput: document.getElementById("rule-targets-search-input"),
+    // Code editor layers
+    fsEditorHighlight: document.getElementById("fs-editor-highlight"),
+    fsEditorHighlightCode: document.getElementById("fs-editor-highlight-code"),
   };
+
+  // Modal Animation Helpers (Opening and Closing Animations)
+  function openModal(modalEl) {
+    if (!modalEl) return;
+    modalEl.classList.remove("closing");
+    modalEl.classList.add("active");
+  }
+
+  function closeModal(modalEl) {
+    if (!modalEl || !modalEl.classList.contains("active")) return;
+    modalEl.classList.add("closing");
+    setTimeout(() => {
+      modalEl.classList.remove("active");
+      modalEl.classList.remove("closing");
+    }, 180);
+  }
+
+  // Themed Custom Confirmation Dialog System
+  let confirmResolve = null;
+
+  function customConfirm(message, { title = "Are you sure?", confirmText = "Confirm", cancelText = "Cancel", danger = true } = {}) {
+    return new Promise((resolve) => {
+      confirmResolve = resolve;
+      const modal = document.getElementById("modal-confirm");
+      const titleEl = document.getElementById("confirm-dialog-title");
+      const msgEl = document.getElementById("confirm-dialog-message");
+      const confirmBtn = document.getElementById("confirm-dialog-confirm");
+      const cancelBtn = document.getElementById("confirm-dialog-cancel");
+      const closeBtn = document.getElementById("confirm-dialog-close");
+
+      if (titleEl) titleEl.textContent = title;
+      if (msgEl) msgEl.textContent = message;
+      if (confirmBtn) {
+        confirmBtn.textContent = confirmText;
+        confirmBtn.className = danger ? "btn btn-danger" : "btn btn-primary";
+      }
+      if (cancelBtn) cancelBtn.textContent = cancelText;
+
+      openModal(modal);
+
+      function handleAction(result) {
+        closeModal(modal);
+        if (confirmResolve) {
+          const r = confirmResolve;
+          confirmResolve = null;
+          r(result);
+        }
+      }
+
+      if (confirmBtn) {
+        confirmBtn.onclick = () => handleAction(true);
+      }
+      if (cancelBtn) {
+        cancelBtn.onclick = () => handleAction(false);
+      }
+      if (closeBtn) {
+        closeBtn.onclick = () => handleAction(false);
+      }
+    });
+  }
+
+  // Python Code Color Coding Highlighter
+  function highlightPython(code) {
+    if (!code) return "";
+    const tokenRegex = /(#.*$)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(@\w+)|(\b(?:def|class|return|if|elif|else|while|for|in|try|except|finally|raise|import|from|as|with|async|await|yield|lambda|pass|break|continue|global|nonlocal|assert|del|is|not|and|or)\b)|(\b(?:True|False|None|self|cls|super|int|str|float|bool|list|dict|set|tuple|len|range|print|isinstance|type|Exception|BaseException)\b)|(\b\d+(?:\.\d+)?\b)|(\b[a-zA-Z_]\w*(?=\s*\())|([+\-*/%&|^~<>=!:]+)/gm;
+
+    let result = "";
+    let lastIndex = 0;
+    let match;
+
+    while ((match = tokenRegex.exec(code)) !== null) {
+      if (match.index > lastIndex) {
+        result += escapeHtml(code.slice(lastIndex, match.index));
+      }
+
+      const [full, comment, str, dec, kw, builtin, num, fn, op] = match;
+      if (comment) {
+        result += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
+      } else if (str) {
+        result += `<span class="tok-str">${escapeHtml(str)}</span>`;
+      } else if (dec) {
+        result += `<span class="tok-dec">${escapeHtml(dec)}</span>`;
+      } else if (kw) {
+        result += `<span class="tok-kw">${escapeHtml(kw)}</span>`;
+      } else if (builtin) {
+        result += `<span class="tok-builtin">${escapeHtml(builtin)}</span>`;
+      } else if (num) {
+        result += `<span class="tok-num">${escapeHtml(num)}</span>`;
+      } else if (fn) {
+        result += `<span class="tok-fn">${escapeHtml(fn)}</span>`;
+      } else if (op) {
+        result += `<span class="tok-op">${escapeHtml(op)}</span>`;
+      } else {
+        result += escapeHtml(full);
+      }
+
+      lastIndex = tokenRegex.lastIndex;
+    }
+
+    if (lastIndex < code.length) {
+      result += escapeHtml(code.slice(lastIndex));
+    }
+
+    return result;
+  }
 
   // Toast Notifications
   function showToast(message, type = "info") {
@@ -553,7 +669,12 @@
       });
 
       tr.querySelector(".btn-delete-key").addEventListener("click", async () => {
-        if (confirm(`Delete local API key '${k.name}'?`)) {
+        const ok = await customConfirm(`Delete local API key '${k.name}'?`, {
+          title: "Delete API Key",
+          confirmText: "Delete",
+          danger: true,
+        });
+        if (ok) {
           try {
             await api(`/api/keys/${k.id}`, { method: "DELETE" });
             showToast(`API key '${k.name}' deleted`);
@@ -591,7 +712,7 @@
       if (secretGroup) secretGroup.style.display = "block";
     }
 
-    el.modalApiKey.classList.add("active");
+    openModal(el.modalApiKey);
   }
 
   if (el.btnCreateApiKey) {
@@ -629,7 +750,7 @@
           });
           showToast(`API key '${name}' created`);
         }
-        el.modalApiKey.classList.remove("active");
+        closeModal(el.modalApiKey);
         fetchApiKeys();
         updateSnippet();
       } catch (err) {
@@ -638,14 +759,26 @@
     });
   }
 
-  // Snippets Generator
+  // Snippets Generator (Default to temporary testing key)
+  async function fetchTemporaryApiKey() {
+    try {
+      const data = await api("/api/keys/temporary");
+      if (data && data.key) {
+        state.temporaryApiKey = data.key;
+      }
+    } catch (err) {
+      console.warn("Could not fetch temporary key:", err);
+    }
+  }
+
   function updateSnippet() {
     if (!el.snippetCode) return;
     const model = state.selectedSnippetModel || "gemini-3.8-flash-high";
-    const apiKey = (state.apiKeys && state.apiKeys.length > 0) ? state.apiKeys[0].key : "sk-proxy-demo";
+    const apiKey = state.temporaryApiKey || (state.apiKeys && state.apiKeys.length > 0 ? state.apiKeys[0].key : "sk-proxy-demo");
 
     if (state.activeSnippetLang === "python") {
-      el.snippetCode.textContent = `from openai import OpenAI
+      el.snippetCode.textContent = `# Note: Using temporary testing key (expires in 30 min or 10 requests)
+from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
@@ -662,7 +795,8 @@ for chunk in response:
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 print()`;
     } else if (state.activeSnippetLang === "curl") {
-      el.snippetCode.textContent = `curl -X POST http://localhost:8000/v1/chat/completions \\
+      el.snippetCode.textContent = `# Note: Using temporary testing key (expires in 30 min or 10 requests)
+curl -X POST http://localhost:8000/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{
@@ -671,7 +805,7 @@ print()`;
     "stream": true
   }'`;
     } else if (state.activeSnippetLang === "cursor") {
-      el.snippetCode.textContent = `// OpenCode / Cursor / Cline Settings
+      el.snippetCode.textContent = `// OpenCode / Cursor / Cline Settings (Testing key: valid for 30 min or 10 requests)
 {
   "openai.baseURL": "http://localhost:8000/v1",
   "openai.apiKey": "${apiKey}",
@@ -859,7 +993,12 @@ print()`;
 
       // Action 3: Delete -> Removes plugin
       card.querySelector(".btn-provider-delete").addEventListener("click", async () => {
-        if (confirm(`Are you sure you want to delete plugin '${p.name}' and remove its Python file?`)) {
+        const ok = await customConfirm(`Are you sure you want to delete plugin '${p.name}' and remove its Python file?`, {
+          title: "Delete Provider Plugin",
+          confirmText: "Delete Plugin",
+          danger: true,
+        });
+        if (ok) {
           try {
             await api(`/api/plugins/${p.id}`, { method: "DELETE" });
             showToast(`Plugin '${p.id}' deleted`);
@@ -960,7 +1099,26 @@ print()`;
     renderFullscreenModels(plugin);
 
     switchFullscreenTab("code");
-    el.modalProviderFullscreen.classList.add("active");
+    openModal(el.modalProviderFullscreen);
+  }
+
+  async function requestCloseFullscreen() {
+    const textarea = document.getElementById("fs-editor-code");
+    const isDirty = state.fullscreenCodeDirty ||
+      (textarea && textarea.value !== (state.fullscreenOriginalCode || ""));
+    const msg = isDirty
+      ? "You have unsaved changes in this provider configuration. Are you sure you want to discard your edits and exit?"
+      : "Are you sure you want to exit editing provider configuration?";
+    const ok = await customConfirm(msg, {
+      title: "Exit Configuration",
+      confirmText: "Discard & Exit",
+      cancelText: "Keep Editing",
+      danger: true,
+    });
+    if (ok) {
+      state.fullscreenCodeDirty = false;
+      closeModal(el.modalProviderFullscreen);
+    }
   }
 
   function switchFullscreenTab(tabKey) {
@@ -979,14 +1137,15 @@ print()`;
 
   async function loadFullscreenPluginCode(pluginId) {
     const textarea = document.getElementById("fs-editor-code");
-    const lineNumbers = document.getElementById("fs-editor-line-numbers");
     const feedback = document.getElementById("fs-editor-feedback");
     if (feedback) feedback.className = "feedback-banner";
 
     try {
       const data = await api(`/api/plugins/${pluginId}/code`);
-      if (textarea) textarea.value = data.code || "";
-      updateFsLineNumbers();
+      state.fullscreenOriginalCode = data.code || "";
+      state.fullscreenCodeDirty = false;
+      if (textarea) textarea.value = state.fullscreenOriginalCode;
+      updateFsEditor();
     } catch (err) {
       if (feedback) {
         feedback.className = "feedback-banner error";
@@ -995,17 +1154,42 @@ print()`;
     }
   }
 
-  function updateFsLineNumbers() {
+  function updateFsEditor() {
     const textarea = document.getElementById("fs-editor-code");
     const lineNumbers = document.getElementById("fs-editor-line-numbers");
-    if (!textarea || !lineNumbers) return;
-    const lines = (textarea.value || "").split("\n").length;
-    lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
+    const highlightCode = document.getElementById("fs-editor-highlight-code");
+    if (!textarea) return;
+
+    const val = textarea.value || "";
+    if (highlightCode) {
+      highlightCode.innerHTML = highlightPython(val) + "\n";
+    }
+    if (lineNumbers) {
+      const lines = val.split("\n").length;
+      lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
+      lineNumbers.scrollTop = textarea.scrollTop;
+    }
   }
 
   const fsEditorTextarea = document.getElementById("fs-editor-code");
   if (fsEditorTextarea) {
-    fsEditorTextarea.addEventListener("input", updateFsLineNumbers);
+    fsEditorTextarea.addEventListener("input", () => {
+      state.fullscreenCodeDirty = (fsEditorTextarea.value !== (state.fullscreenOriginalCode || ""));
+      updateFsEditor();
+    });
+
+    fsEditorTextarea.addEventListener("scroll", () => {
+      const lineNumbers = document.getElementById("fs-editor-line-numbers");
+      const highlight = document.getElementById("fs-editor-highlight");
+      if (lineNumbers) {
+        lineNumbers.scrollTop = fsEditorTextarea.scrollTop;
+      }
+      if (highlight) {
+        highlight.scrollTop = fsEditorTextarea.scrollTop;
+        highlight.scrollLeft = fsEditorTextarea.scrollLeft;
+      }
+    });
+
     fsEditorTextarea.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
@@ -1013,7 +1197,7 @@ print()`;
         const end = fsEditorTextarea.selectionEnd;
         fsEditorTextarea.value = fsEditorTextarea.value.substring(0, start) + "    " + fsEditorTextarea.value.substring(end);
         fsEditorTextarea.selectionStart = fsEditorTextarea.selectionEnd = start + 4;
-        updateFsLineNumbers();
+        updateFsEditor();
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
@@ -1038,6 +1222,8 @@ print()`;
         method: "PUT",
         body: JSON.stringify({ code: textarea.value }),
       });
+      state.fullscreenOriginalCode = textarea.value;
+      state.fullscreenCodeDirty = false;
       if (feedback) {
         feedback.className = "feedback-banner success";
         feedback.textContent = "Code updated and hot-reloaded successfully!";
@@ -1069,7 +1255,8 @@ print()`;
       reader.onload = (evt) => {
         if (fsEditorTextarea) {
           fsEditorTextarea.value = evt.target.result;
-          updateFsLineNumbers();
+          state.fullscreenCodeDirty = true;
+          updateFsEditor();
           showToast(`Loaded ${file.name}. Click Save & Hot-Reload to apply.`);
         }
       };
@@ -1140,7 +1327,12 @@ print()`;
 
       tr.querySelector(".btn-edit-acc").addEventListener("click", () => openAccountModal(acc, pluginId));
       tr.querySelector(".btn-del-acc").addEventListener("click", async () => {
-        if (confirm(`Delete account '${acc.name}'?`)) {
+        const ok = await customConfirm(`Delete account '${acc.name}'?`, {
+          title: "Delete Account",
+          confirmText: "Delete",
+          danger: true,
+        });
+        if (ok) {
           try {
             await api(`/api/accounts/${acc.id}`, { method: "DELETE" });
             showToast("Account deleted");
@@ -1320,7 +1512,12 @@ print()`;
       });
 
       tr.querySelector(".btn-fs-del-model").addEventListener("click", async () => {
-        if (confirm(`Remove model '${m.id}' from plugin?`)) {
+        const ok = await customConfirm(`Remove model '${m.id}' from plugin?`, {
+          title: "Remove Model",
+          confirmText: "Remove Model",
+          danger: true,
+        });
+        if (ok) {
           try {
             await api(`/api/plugins/${plugin.id}/models/${m.id}`, { method: "DELETE" });
             showToast(`Model '${m.id}' removed`);
@@ -1344,7 +1541,7 @@ print()`;
       document.getElementById("model-form-id").value = "";
       document.getElementById("model-form-name").value = "";
       document.getElementById("model-form-upstream").value = "";
-      el.modalModel.classList.add("active");
+      openModal(el.modalModel);
     });
   }
 
@@ -1377,7 +1574,7 @@ print()`;
           }),
         });
         showToast(`Model '${mId}' added`);
-        el.modalModel.classList.remove("active");
+        closeModal(el.modalModel);
         await fetchPlugins();
         const updatedP = state.plugins.find((p) => p.id === pId);
         if (updatedP) renderFullscreenModels(updatedP);
@@ -1406,18 +1603,35 @@ print()`;
     if (!el.rulesTableBody) return;
     el.rulesTableBody.innerHTML = "";
 
-    if (state.rules.length === 0) {
+    let rulesToDisplay = state.rules;
+    if (state.rulesSearchQuery) {
+      const q = state.rulesSearchQuery.toLowerCase().trim();
+      rulesToDisplay = state.rules.filter((r) => {
+        return (
+          (r.model_id && r.model_id.toLowerCase().includes(q)) ||
+          (r.name && r.name.toLowerCase().includes(q)) ||
+          (r.strategy && r.strategy.toLowerCase().includes(q)) ||
+          (r.targets && r.targets.some((t) => t.toLowerCase().includes(q))) ||
+          (r.description && r.description.toLowerCase().includes(q))
+        );
+      });
+    }
+
+    if (rulesToDisplay.length === 0) {
+      const msg = state.rulesSearchQuery
+        ? `No custom rules matching '${escapeHtml(state.rulesSearchQuery)}'.`
+        : `No custom load balancing rules created yet. Click "+ Create Custom Rule" to expose a virtual model routing across multiple providers.`;
       el.rulesTableBody.innerHTML = `
         <tr>
           <td colspan="6" style="text-align: center; color: var(--ink-muted); padding: 32px;">
-            No custom load balancing rules created yet. Click "+ Create Custom Rule" to expose a virtual model routing across multiple providers.
+            ${msg}
           </td>
         </tr>
       `;
       return;
     }
 
-    state.rules.forEach((r) => {
+    rulesToDisplay.forEach((r) => {
       const tr = document.createElement("tr");
       const targetsBadges = (r.targets || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ");
 
@@ -1457,7 +1671,12 @@ print()`;
 
       tr.querySelector(".btn-edit-rule").addEventListener("click", () => openRuleModal(r));
       tr.querySelector(".btn-del-rule").addEventListener("click", async () => {
-        if (confirm(`Delete load balancing rule for '${r.model_id}'?`)) {
+        const ok = await customConfirm(`Delete load balancing rule for '${r.model_id}'?`, {
+          title: "Delete Load Balancing Rule",
+          confirmText: "Delete Rule",
+          danger: true,
+        });
+        if (ok) {
           try {
             await api(`/api/load-balancing-rules/${r.id}`, { method: "DELETE" });
             showToast("Rule deleted");
@@ -1472,6 +1691,14 @@ print()`;
     });
   }
 
+  const rulesSearchInput = document.getElementById("rules-search-input");
+  if (rulesSearchInput) {
+    rulesSearchInput.addEventListener("input", (e) => {
+      state.rulesSearchQuery = e.target.value;
+      renderRulesTable();
+    });
+  }
+
   function openRuleModal(rule = null) {
     const idInput = document.getElementById("rule-form-id");
     const mIdInput = document.getElementById("rule-form-model-id");
@@ -1480,7 +1707,19 @@ print()`;
     const descInput = document.getElementById("rule-form-desc");
     const enabledInput = document.getElementById("rule-form-enabled");
     const targetsContainer = document.getElementById("rule-targets-container");
+    const targetsSearchInput = document.getElementById("rule-targets-search-input");
     const title = document.getElementById("modal-rule-title");
+
+    if (targetsSearchInput) {
+      targetsSearchInput.value = "";
+      targetsSearchInput.oninput = (e) => {
+        const q = e.target.value.toLowerCase().trim();
+        targetsContainer.querySelectorAll("label").forEach((lbl) => {
+          const txt = lbl.textContent.toLowerCase();
+          lbl.style.display = !q || txt.includes(q) ? "flex" : "none";
+        });
+      };
+    }
 
     // Gather all active models across all providers
     const allModels = [];
@@ -1537,7 +1776,7 @@ print()`;
     }
 
     enhanceSelect(stratSelect);
-    el.modalRule.classList.add("active");
+    openModal(el.modalRule);
   }
 
   if (el.btnCreateRule) {
@@ -1597,7 +1836,7 @@ print()`;
           showToast(`Rule '${modelId}' created and exposed to /v1`);
         }
 
-        el.modalRule.classList.remove("active");
+        closeModal(el.modalRule);
         fetchRules();
       } catch (err) {
         showToast(`Failed to save rule: ${err.message}`, "error");
@@ -1755,6 +1994,19 @@ print()`;
     }
   }
 
+  async function toggleAccountPin(account) {
+    try {
+      const res = await api(`/api/accounts/${account.id}/pin`, { method: "POST" });
+      account.pinned = res.pinned;
+      const accInState = state.accounts.find((a) => a.id === account.id);
+      if (accInState) accInState.pinned = res.pinned;
+      showToast(`Account '${account.name}' ${res.pinned ? "pinned to top" : "unpinned"}`);
+      renderStatusAccountsGrid(false);
+    } catch (err) {
+      showToast(`Pin failed: ${err.message}`, "error");
+    }
+  }
+
   function renderStatusProviderTabs() {
     if (!el.statusProviderTabs) return;
     el.statusProviderTabs.innerHTML = "";
@@ -1865,13 +2117,25 @@ print()`;
     accountsToDisplay.sort((a, b) => {
       const pA = providerMap[a.provider_id];
       const pB = providerMap[b.provider_id];
-      const pinA = pA ? !!pA.pinned : false;
-      const pinB = pB ? !!pB.pinned : false;
+      const pinA = !!a.pinned;
+      const pinB = !!b.pinned;
+      const provPinA = pA ? !!pA.pinned : false;
+      const provPinB = pB ? !!pB.pinned : false;
+
+      // 1. Specifically pinned account comes first
       if (pinA && !pinB) return -1;
       if (!pinA && pinB) return 1;
+
+      // 2. Accounts from specifically pinned providers next
+      if (provPinA && !provPinB) return -1;
+      if (!provPinA && provPinB) return 1;
+
+      // 3. Provider name alphabetical
       const nameA = pA ? pA.name.toLowerCase() : "";
       const nameB = pB ? pB.name.toLowerCase() : "";
       if (nameA !== nameB) return nameA.localeCompare(nameB);
+
+      // 4. Account name alphabetical
       return a.name.localeCompare(b.name);
     });
 
@@ -1965,6 +2229,17 @@ print()`;
 
       const hasHidden = hiddenSet.size > 0;
 
+      const isAccountPinned = !!acc.pinned;
+      const isProviderPinned = !!provider.pinned;
+      const isCardPinned = isAccountPinned || isProviderPinned;
+      const pinTitle = isAccountPinned
+        ? "Unpin account"
+        : isProviderPinned
+          ? "Provider is pinned (Click to pin this account specifically)"
+          : "Pin account to top";
+
+      card.className = `account-square-card ${isCardPinned ? 'is-pinned' : ''}`;
+
       card.innerHTML = `
         <div class="account-square-header">
           <div style="min-width: 0; flex: 1;">
@@ -1972,8 +2247,8 @@ print()`;
             <span style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(provider.name)}</span>
           </div>
           <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-            <button class="btn-pin ${provider.pinned ? 'pinned' : ''} btn-toggle-card-pin" data-provider-id="${provider.id}" title="${provider.pinned ? 'Unpin provider' : 'Pin provider to top'}">
-              ${renderPinSvg(provider.pinned, 12)}
+            <button class="btn-pin ${isCardPinned ? 'pinned' : ''} btn-toggle-card-pin" data-acc-id="${acc.id}" title="${pinTitle}">
+              ${renderPinSvg(isCardPinned, 12)}
             </button>
             ${statusPill}
           </div>
@@ -1988,12 +2263,12 @@ print()`;
         ` : ''}
       `;
 
-      // Event: Pin toggle on account card
+      // Event: Pin toggle on account card (pins only this account)
       const pinBtn = card.querySelector(".btn-toggle-card-pin");
       if (pinBtn) {
         pinBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          togglePluginPin(provider);
+          toggleAccountPin(acc);
         });
       }
 
@@ -2110,7 +2385,7 @@ print()`;
     const codeInput = document.getElementById("new-provider-code");
     if (fnInput) fnInput.value = "";
     if (codeInput) codeInput.value = "";
-    el.modalNewProvider.classList.add("active");
+    openModal(el.modalNewProvider);
   }
 
   if (el.btnNewProvider) {
@@ -2140,7 +2415,7 @@ print()`;
           body: JSON.stringify({ filename: fn, code }),
         });
         showToast(`Plugin '${fn}' created and loaded`);
-        el.modalNewProvider.classList.remove("active");
+        closeModal(el.modalNewProvider);
         fetchPlugins();
       } catch (err) {
         showToast(`Failed to create plugin: ${err.message}`, "error");
@@ -2191,7 +2466,7 @@ print()`;
       enabledInput.checked = true;
     }
 
-    el.modalAccount.classList.add("active");
+    openModal(el.modalAccount);
   }
 
   const btnSaveAccount = document.getElementById("btn-save-account");
@@ -2245,7 +2520,7 @@ print()`;
           showToast(`Account '${name}' connected`);
         }
 
-        el.modalAccount.classList.remove("active");
+        closeModal(el.modalAccount);
         await fetchAccounts();
         if (state.currentFullscreenPluginId) {
           renderFullscreenAccounts(state.currentFullscreenPluginId);
@@ -2269,17 +2544,48 @@ print()`;
     });
   }
 
-  // Close modals on click of .modal-close or clicking backdrop
+  // Close modals on click of .modal-close or clicking backdrop with animations & exit confirmation
   document.querySelectorAll(".modal-close").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".modal-overlay").forEach((m) => m.classList.remove("active"));
+      const modal = btn.closest(".modal-overlay");
+      if (modal === el.modalProviderFullscreen) {
+        requestCloseFullscreen();
+      } else if (modal) {
+        closeModal(modal);
+      }
     });
   });
 
   document.querySelectorAll(".modal-overlay").forEach((m) => {
     m.addEventListener("click", (e) => {
-      if (e.target === m) m.classList.remove("active");
+      if (e.target === m) {
+        if (m === el.modalProviderFullscreen) {
+          requestCloseFullscreen();
+        } else {
+          closeModal(m);
+        }
+      }
     });
+  });
+
+  // ESC key handler for closing modals with confirmation when editing
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const confirmModal = document.getElementById("modal-confirm");
+      if (confirmModal && confirmModal.classList.contains("active")) {
+        const cancelBtn = document.getElementById("confirm-dialog-cancel");
+        if (cancelBtn) cancelBtn.click();
+        return;
+      }
+      if (el.modalProviderFullscreen && el.modalProviderFullscreen.classList.contains("active")) {
+        requestCloseFullscreen();
+        return;
+      }
+      const activeModals = Array.from(document.querySelectorAll(".modal-overlay.active"));
+      if (activeModals.length > 0) {
+        closeModal(activeModals[activeModals.length - 1]);
+      }
+    }
   });
 
   // Global initial boot
@@ -2289,6 +2595,7 @@ print()`;
     await fetchPlugins();
     await fetchAccounts();
     await fetchApiKeys();
+    await fetchTemporaryApiKey();
     await fetchRules();
     updateSnippet();
   }

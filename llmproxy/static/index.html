@@ -116,12 +116,13 @@
       <!-- Quickstart Code Snippet Generator -->
       <div class="card">
         <div class="card-header">
-          <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
             <h3>Quickstart Integration</h3>
             <span style="font-size: 12px; color: var(--ink-muted);">Select model:</span>
             <div style="min-width: 200px;">
               <select class="select-input" id="snippet-model-select"></select>
             </div>
+            <span class="badge" style="background: rgba(245, 158, 11, 0.12); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); font-size: 11px;" title="Cuts off access after 30min or 10 requests. For testing only.">⚡ Test Key (Cutoff: 30m / 10 reqs)</span>
           </div>
           <button class="btn btn-primary btn-sm" id="copy-snippet-btn">Copy Snippet</button>
         </div>
@@ -188,6 +189,7 @@
           <p>Create custom models exposed to the local API that route dynamically across models from all providers.</p>
         </div>
         <div class="section-actions">
+          <input type="text" class="form-input" id="rules-search-input" placeholder="Search rules & models..." style="width: 220px; font-size: 12.5px;">
           <button class="btn btn-primary" id="btn-create-rule">+ Create Custom Rule</button>
         </div>
       </div>
@@ -272,9 +274,9 @@
           </div>
 
           <div class="chat-input-area">
-            <textarea class="chat-textarea" id="playground-prompt" placeholder="Send a message to test this model (Cmd+Enter to send)..."></textarea>
+            <textarea class="chat-textarea" id="playground-prompt" placeholder="Send a message to test this model (Ctrl+Enter to send)..."></textarea>
             <div class="chat-input-footer">
-              <span class="input-hint">Press ⌘ + Enter to send</span>
+              <span class="input-hint">Press Ctrl + Enter to send</span>
               <button class="btn btn-primary" id="playground-send-btn">Send Message</button>
             </div>
           </div>
@@ -400,13 +402,16 @@
             <div class="editor-actions-group">
               <button class="btn btn-secondary" id="fs-editor-swap-btn" title="Upload a local Python file">Swap File</button>
               <input type="file" id="fs-editor-file-input" accept=".py" style="display: none;">
-              <button class="btn btn-primary" id="fs-editor-save-btn">Save & Hot-Reload (⌘S)</button>
+              <button class="btn btn-primary" id="fs-editor-save-btn">Save & Hot-Reload (Ctrl+S)</button>
             </div>
           </div>
           <div id="fs-editor-feedback" class="feedback-banner"></div>
           <div class="editor-wrapper" style="flex: 1; min-height: 400px;">
             <div class="line-numbers" id="fs-editor-line-numbers">1</div>
-            <textarea class="code-textarea" id="fs-editor-code" spellcheck="false" placeholder="# Python plugin source code here..."></textarea>
+            <div class="editor-code-container">
+              <pre class="highlight-layer" id="fs-editor-highlight" aria-hidden="true"><code id="fs-editor-highlight-code"></code></pre>
+              <textarea class="code-textarea" id="fs-editor-code" spellcheck="false" placeholder="# Python plugin source code here..."></textarea>
+            </div>
           </div>
         </div>
 
@@ -579,6 +584,7 @@
         </div>
         <div class="form-group">
           <label class="form-label">Target Models across all Providers <span style="color: var(--accent-red);">*</span></label>
+          <input type="text" class="form-input" id="rule-targets-search-input" placeholder="Search target models..." style="margin-bottom: 6px; font-size: 12px;">
           <div id="rule-targets-container" style="max-height: 200px; overflow-y: auto; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--radius-btn); padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
             <!-- Populated dynamically with checkboxes -->
           </div>
@@ -791,6 +797,23 @@
         <button class="btn btn-secondary btn-sm modal-close">✕</button>
       </div>
       <div class="modal-body" id="modal-status-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Themed Confirmation Dialog -->
+  <div class="modal-overlay" id="modal-confirm" style="z-index: 1000;">
+    <div class="modal-dialog" style="max-width: 440px;">
+      <div class="modal-header">
+        <h3 id="confirm-dialog-title">Are you sure?</h3>
+        <button class="btn btn-secondary btn-sm" id="confirm-dialog-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-dialog-message" style="color: var(--ink-secondary); font-size: 13.5px; line-height: 1.6;"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="confirm-dialog-cancel">Cancel</button>
+        <button class="btn btn-danger" id="confirm-dialog-confirm">Confirm</button>
+      </div>
     </div>
   </div>
 
