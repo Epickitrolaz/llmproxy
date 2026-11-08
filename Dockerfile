@@ -10,14 +10,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files and built-in plugins
+# Copy application files and built-in templates
 COPY llmproxy/ /app/llmproxy/
+COPY templates/ /app/templates/
 COPY plugins/ /app/plugins/
 COPY assets/ /app/assets/
 COPY README.md /app/README.md
 
 # Ensure runtime directories exist
-RUN mkdir -p /app/data /app/plugins
+RUN mkdir -p /app/data /app/plugins /app/templates
 
 EXPOSE 8000
 

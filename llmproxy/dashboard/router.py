@@ -26,7 +26,7 @@ from llmproxy.dashboard.loader import (
     validate_python_syntax,
     write_persisted_configs,
 )
-from llmproxy.dashboard.templates import STARTER_TEMPLATES
+from llmproxy.dashboard.templates import STARTER_TEMPLATES, get_starter_templates
 from llmproxy.schemas import (
     Account,
     AccountCreate,
@@ -378,9 +378,12 @@ async def toggle_plugin_pin(plugin_id: str):
 # =========================================================================
 
 @router.get("/keys", response_model=List[APIKey])
-async def list_api_keys():
+async def list_api_keys(include_temporary: bool = False):
     """List all local API keys and their usage metrics."""
-    return plugin_manager.get_api_keys()
+    keys = plugin_manager.get_api_keys()
+    if not include_temporary:
+        keys = [k for k in keys if not k.is_temporary]
+    return keys
 
 
 @router.get("/keys/temporary", response_model=APIKey)
@@ -1100,4 +1103,20 @@ async def test_chat(req: TestChatRequest):
 @router.get("/templates")
 async def get_templates():
     """Return starter provider plugin templates for quick creation and swapping."""
-    return STARTER_TEMPLATES
+    return get_starter_templates()
+
+
+@router.post("/templates/{template_id}/add", response_model=PluginMetadata)
+async def add_provider_template(template_id: str):
+    """Install and hot-reload a provider template into the runtime plugins directory."""
+    templates = get_starter_templates()
+    matched = next((t for t in templates if t["id"] == template_id or t["filename"] == f"{template_id}.py" or t["filename"] == template_id), None)
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
+
+    target_file = plugin_manager.plugins_dir / matched["filename"]
+    target_file.write_text(matched["code"], encoding="utf-8")
+    loaded = plugin_manager.load_plugin_file(target_file)
+    if not loaded:
+        raise HTTPException(status_code=400, detail="Failed to instantiate plugin from template")
+    return loaded.metadata
