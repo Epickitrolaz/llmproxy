@@ -23,6 +23,8 @@
     rulesSearchQuery: "",
     fullscreenOriginalCode: "",
     fullscreenCodeDirty: false,
+    fullscreenOriginalStrategy: null,
+    fullscreenOriginalVariables: null,
     currentFullscreenPluginId: null,
     currentFullscreenTab: "code",
     selectedPlaygroundModel: null,
@@ -1055,6 +1057,9 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
 
   async function openFullscreenProviderModal(pluginId) {
     state.currentFullscreenPluginId = pluginId;
+    state.fullscreenCodeDirty = false;
+    state.fullscreenOriginalStrategy = null;
+    state.fullscreenOriginalVariables = null;
     const plugin = state.plugins.find((p) => p.id === pluginId);
     if (!plugin) return;
 
@@ -1102,23 +1107,67 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     openModal(el.modalProviderFullscreen);
   }
 
-  async function requestCloseFullscreen() {
-    const textarea = document.getElementById("fs-editor-code");
-    const isDirty = state.fullscreenCodeDirty ||
-      (textarea && textarea.value !== (state.fullscreenOriginalCode || ""));
-    const msg = isDirty
-      ? "You have unsaved changes in this provider configuration. Are you sure you want to discard your edits and exit?"
-      : "Are you sure you want to exit editing provider configuration?";
-    const ok = await customConfirm(msg, {
-      title: "Exit Configuration",
-      confirmText: "Discard & Exit",
-      cancelText: "Keep Editing",
-      danger: true,
+  function getFullscreenVariablesSnapshot() {
+    const vars = {};
+    document.querySelectorAll(".fs-var-input").forEach((inp) => {
+      const vName = inp.dataset.var;
+      if (vName) {
+        vars[vName] = inp.type === "checkbox" ? inp.checked : inp.value;
+      }
     });
-    if (ok) {
-      state.fullscreenCodeDirty = false;
-      closeModal(el.modalProviderFullscreen);
+    return vars;
+  }
+
+  function isFullscreenStrategyDirty() {
+    if (!state.fullscreenOriginalStrategy) return false;
+    const select = document.getElementById("fs-strategy-select");
+    const cdInput = document.getElementById("fs-cooldown-input");
+    const retriesInput = document.getElementById("fs-retries-input");
+    if (!select || !cdInput || !retriesInput) return false;
+    const orig = state.fullscreenOriginalStrategy;
+    if (select.value !== orig.strategy) return true;
+    if (String(cdInput.value) !== String(orig.cooldown)) return true;
+    if (String(retriesInput.value) !== String(orig.retries)) return true;
+    return false;
+  }
+
+  function isFullscreenVariablesDirty() {
+    if (!state.fullscreenOriginalVariables) return false;
+    const current = getFullscreenVariablesSnapshot();
+    const orig = state.fullscreenOriginalVariables;
+    const keys = Object.keys(orig);
+    const currentKeys = Object.keys(current);
+    if (keys.length !== currentKeys.length) return true;
+    for (const k of keys) {
+      if (orig[k] !== current[k]) return true;
     }
+    return false;
+  }
+
+  function isFullscreenDirty() {
+    const textarea = document.getElementById("fs-editor-code");
+    const codeDirty = state.fullscreenCodeDirty ||
+      (textarea && textarea.value !== (state.fullscreenOriginalCode || ""));
+    return Boolean(codeDirty || isFullscreenStrategyDirty() || isFullscreenVariablesDirty());
+  }
+
+  async function requestCloseFullscreen() {
+    if (isFullscreenDirty()) {
+      const ok = await customConfirm(
+        "You have unsaved changes in this provider configuration. Are you sure you want to discard your edits and exit?",
+        {
+          title: "Exit Configuration",
+          confirmText: "Discard & Exit",
+          cancelText: "Keep Editing",
+          danger: true,
+        }
+      );
+      if (!ok) return;
+    }
+    state.fullscreenCodeDirty = false;
+    state.fullscreenOriginalStrategy = null;
+    state.fullscreenOriginalVariables = null;
+    closeModal(el.modalProviderFullscreen);
   }
 
   function switchFullscreenTab(tabKey) {
@@ -1370,6 +1419,12 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     }
     if (cdInput) cdInput.value = vars.account_switch_cooldown || 60;
     if (retriesInput) retriesInput.value = vars.max_retries || 2;
+
+    state.fullscreenOriginalStrategy = {
+      strategy: select ? select.value : (vars.load_balancing_strategy || "round_robin"),
+      cooldown: cdInput ? String(cdInput.value) : String(vars.account_switch_cooldown || 60),
+      retries: retriesInput ? String(retriesInput.value) : String(vars.max_retries || 2),
+    };
   }
 
   const fsBtnSaveStrategy = document.getElementById("fs-btn-save-strategy");
@@ -1392,6 +1447,11 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
             },
           }),
         });
+        state.fullscreenOriginalStrategy = {
+          strategy: strategy,
+          cooldown: String(cd),
+          retries: String(retries),
+        };
         showToast("Load balancing strategy saved");
         fetchPlugins();
       } catch (err) {
@@ -1409,6 +1469,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     const declaredVars = plugin.variables || [];
     if (declaredVars.length === 0) {
       container.innerHTML = `<div style="color: var(--ink-muted); font-size: 13px;">This plugin does not declare custom variables.</div>`;
+      state.fullscreenOriginalVariables = {};
       return;
     }
 
@@ -1439,6 +1500,8 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       }
       container.appendChild(grp);
     });
+
+    state.fullscreenOriginalVariables = getFullscreenVariablesSnapshot();
   }
 
   const fsBtnSaveVariables = document.getElementById("fs-btn-save-variables");
@@ -1458,6 +1521,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
           method: "PUT",
           body: JSON.stringify({ variables: vars }),
         });
+        state.fullscreenOriginalVariables = getFullscreenVariablesSnapshot();
         showToast("Variables updated successfully");
         fetchPlugins();
       } catch (err) {
