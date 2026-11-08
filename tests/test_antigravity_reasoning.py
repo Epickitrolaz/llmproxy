@@ -22,6 +22,8 @@ from plugins.antigravity import AntigravityPlugin
 @pytest.fixture(autouse=True)
 def setup_antigravity():
     plugin_manager.discover_and_load_all()
+    orig_accounts = dict(plugin_manager.accounts)
+    plugin_manager.accounts.clear()
     plugin_manager.update_plugin_config(
         "antigravity",
         enabled=True,
@@ -32,6 +34,8 @@ def setup_antigravity():
             "reasoning_tag_name": "think",
         },
     )
+    yield
+    plugin_manager.accounts = orig_accounts
 
 
 def test_antigravity_metadata_has_reasoning_variables():
