@@ -18,6 +18,31 @@ from plugins.antigravity import AntigravityPlugin
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def clean_state():
+    """Ensure clean isolated state around tests."""
+    original_keys = dict(plugin_manager.api_keys)
+    original_rules = dict(plugin_manager.rules)
+    original_accounts = dict(plugin_manager.accounts)
+    original_logs = list(plugin_manager.logs)
+
+    plugin_manager.api_keys.clear()
+    plugin_manager.rules.clear()
+    plugin_manager._save_api_keys()
+    plugin_manager._save_rules()
+
+    yield
+
+    plugin_manager.api_keys = original_keys
+    plugin_manager.rules = original_rules
+    plugin_manager.accounts = original_accounts
+    plugin_manager.logs = original_logs
+    plugin_manager._save_api_keys()
+    plugin_manager._save_rules()
+    plugin_manager._save_accounts()
+    plugin_manager._save_logs()
+
+
 def test_account_pin_toggle():
     """Verify POST /api/accounts/{account_id}/pin toggles account pinned status."""
     acc = plugin_manager.add_account(

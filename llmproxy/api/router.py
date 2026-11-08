@@ -111,13 +111,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     # 0. Local API Key Authentication & Verification
     matched_api_key = None
     all_keys = plugin_manager.get_api_keys()
-    active_keys = [k for k in all_keys if k.enabled and k.is_valid()]
+    permanent_active_keys = [k for k in all_keys if k.enabled and k.is_valid() and not k.is_temporary]
     token = _extract_api_key(http_request)
 
     if token:
         matched = next((k for k in all_keys if k.key == token), None)
         if not matched:
-            if active_keys:
+            if permanent_active_keys:
                 raise HTTPException(
                     status_code=401,
                     detail={
@@ -141,7 +141,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     },
                 )
             matched_api_key = matched
-    elif active_keys:
+    elif permanent_active_keys:
         raise HTTPException(
             status_code=401,
             detail={
