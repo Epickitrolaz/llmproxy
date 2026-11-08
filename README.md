@@ -22,18 +22,32 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/codex.py`: OpenAI Codex provider (GPT-6 Luna, GPT-4o, GPT-4o Mini, reasoning effort control).
     - `plugins/claude_code.py`: Anthropic Claude Code provider (Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3.5 Haiku).
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
-- **Full Provider Customization**:
-  - Add, edit, or remove custom model aliases and parameter mappings.
-  - Custom variables per plugin (API keys, base URLs, options).
-  - In-browser code editor with AST syntax checking and instant hot-reload.
-- **OpenAI-Compatible Local API**:
-  - `POST /v1/chat/completions`: Supports standard JSON, real-time streaming Server-Sent Events (`stream: true`), and tool / function calling (`tools`, `tool_choice`, `tool_calls`).
-  - `GET /v1/models` and `GET /v1/models/{model_id}`: Dynamic catalog of all enabled models.
-- **Minimalist Black & White Dashboard**:
-  - Obsidian/monochrome high-contrast design.
-  - Zero external CDN dependencies (works completely offline).
-  - Integrated playground for testing chat models with streaming output.
-  - Real-time telemetry, latency metrics, and request logs.
+- **Provider Management & Fullscreen Configuration**:
+  - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
+  - **Pin to Top**: Pin favorite providers to prioritize them across the dashboard and status overview.
+  - **Fullscreen Configuration Window**: Fits the entire screen with dedicated tabs for:
+    - **Python Code**: Live syntax validation, template insertion, local file swap, and hot-reload.
+    - **Accounts & Pool**: Multi-account credentials, failovers, and priority weights.
+    - **Load Balancing Strategy**: Round Robin, Least Used, Random, and Fallback with rate-limit cooldown settings.
+    - **Variables**: Dynamically declared plugin variables (keys, base URLs, options).
+    - **Models**: Add, edit, or remove custom model aliases and parameter mappings.
+- **Local API Keys & Per-Key Usage Tracking**:
+  - Create, edit, and delete local API keys directly from the **Overview** tab or via `/api/keys`.
+  - Detailed per-key usage analytics: request counts, prompt tokens, completion tokens, total tokens, and last-used timestamps.
+  - When local keys are created, clients authenticate using `Authorization: Bearer <key>` or `x-api-key: <key>`. (When no keys are configured, requests are allowed without authentication).
+- **Custom Load Balancing Rules (Virtual Models)**:
+  - Create custom virtual models exposed on the `/v1` endpoint (e.g. `smart-router`, `hybrid-coder`).
+  - Select target models from any installed provider.
+  - Select a routing strategy: Round Robin, Least Used, Random, or Fallback.
+  - Transparently exposed in `GET /v1/models` and routed dynamically during completions.
+- **Unified Status & Limits Dashboard**:
+  - Multi-provider tabbed view designed to scale cleanly across 50+ providers.
+  - Two-row layout of rounded square account cards sorted by provider name (pinned providers first).
+  - Clean limit progress bars with an option to hide specific limits that do not apply to a given account.
+  - **Persistent Request Audit Logs**: All requests, latency metrics, token estimations, and errors are saved to disk (`data/request_logs.json`) and preserved across server restarts.
+- **Interactive Chat Playground**:
+  - Balanced 1:1 split between model parameters and the chat thread.
+  - Test custom rules and provider models with real-time streaming feedback.
 
 ---
 
@@ -87,17 +101,24 @@ pytest
 
 ## API Usage Examples
 
+### 1. Local API Key Authentication
+
+> **Important**:
+> If you have configured local API keys in the **Overview** tab of the dashboard, you must provide your key in the `Authorization: Bearer <key>` header or `x-api-key` header. If no local keys are created, requests are permitted without authentication.
+
 ### Using `curl`
 
-#### List Models
+#### List Models (Includes Provider Models & Custom Rules)
 ```bash
-curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/models \
+  -H "Authorization: Bearer sk-proxy-your-key"
 ```
 
 #### Chat Completion (Non-Streaming)
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-proxy-your-key" \
   -d '{
     "model": "gemini-3.8-flash",
     "messages": [
@@ -106,10 +127,25 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+#### Chat Completion via Custom Load Balancing Rule
+If you created a custom rule named `smart-router` in the **Load Balancing Rules** tab:
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-proxy-your-key" \
+  -d '{
+    "model": "smart-router",
+    "messages": [
+      {"role": "user", "content": "Route to the best available provider."}
+    ]
+  }'
+```
+
 #### Chat Completion (Streaming SSE)
 ```bash
 curl -N -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-proxy-your-key" \
   -d '{
     "model": "gpt-6-luna",
     "messages": [
@@ -124,13 +160,15 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
 ```python
 from openai import OpenAI
 
+# If you configured local API keys, pass your key here.
+# If no local keys exist, any string can be passed.
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="not-needed-locally"  # Provider API keys are configured in LLMProxy dashboard
+    api_key="sk-proxy-your-key"
 )
 
 response = client.chat.completions.create(
-    model="claude-3-7-sonnet",
+    model="gemini-3.8-flash-high",
     messages=[{"role": "user", "content": "Hello from OpenAI Python SDK!"}],
     stream=True
 )
@@ -152,7 +190,7 @@ To route OpenCode requests through LLMProxy, configure a provider in your `openc
       "name": "LLMProxy",
       "settings": {
         "baseURL": "http://localhost:8000/v1",
-        "apiKey": "llmproxy"
+        "apiKey": "sk-proxy-your-key"
       },
       "models": {
         "gemini-3.8-flash-high": {
@@ -171,3 +209,22 @@ Then run OpenCode with:
 ```bash
 opencode run -m llmproxy/gemini-3.8-flash-high "Explain quantum computing briefly."
 ```
+
+---
+
+## Troubleshooting & Common User Pitfalls
+
+1. **HTTP 401 Unauthorized (`missing_api_key` or `invalid_api_key`)**:
+   - Cause: You have created one or more local API keys in LLMProxy, but your client is sending requests without the `Authorization: Bearer <key>` header or with an invalid key.
+   - Fix: Check the **Overview** tab in LLMProxy to copy your active key secret, or pass `x-api-key: <key>`. If you delete all keys, the endpoint reverts to open mode.
+
+2. **HTTP 429 Rate Limit Cooldown (`accounts_rate_limited`)**:
+   - Cause: All connected accounts for an upstream provider have hit their rate limits and are in cooldown quarantine.
+   - Fix: Click **Edit** on the provider card, go to the **Accounts & Pool** tab, and click **Reset** on any account in cooldown, or add additional accounts to the pool.
+
+3. **HTTP 404 Model Not Found**:
+   - Cause: The requested model ID does not exist in any active provider or custom load balancing rule.
+   - Fix: Check `GET /v1/models` to verify available models. Ensure the corresponding provider plugin is toggled on, or configure a virtual model in the **Load Balancing Rules** tab.
+
+4. **Dropdown Menus & Search**:
+   - Every select menu in the dashboard is an accessible searchable dropdown. Type to filter options and press Enter or click to select.

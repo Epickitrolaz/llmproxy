@@ -31,9 +31,15 @@ from llmproxy.schemas import (
     Account,
     AccountCreate,
     AccountUpdate,
+    APIKey,
+    APIKeyCreate,
+    APIKeyUpdate,
     ChatMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    LoadBalancingRule,
+    LoadBalancingRuleCreate,
+    LoadBalancingRuleUpdate,
     PluginConfigUpdate,
     PluginMetadata,
     PluginModelConfig,
@@ -331,6 +337,13 @@ async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
     if body.enabled is not None:
         meta.enabled = body.enabled
 
+    if body.pinned is not None:
+        meta.pinned = body.pinned
+        try:
+            plugin_manager.update_plugin_config(plugin_id, pinned=body.pinned)
+        except Exception:
+            pass
+
     if body.variables is not None:
         for var in meta.variables:
             if var.name in body.variables:
@@ -343,6 +356,111 @@ async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
         "message": f"Configuration for plugin '{plugin_id}' updated",
         "plugin": meta,
     }
+
+
+@router.post("/plugins/{plugin_id}/pin")
+async def toggle_plugin_pin(plugin_id: str):
+    """Toggle or set pinned status for a provider plugin."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+    cfg = plugin_manager.configs.setdefault(plugin_id, {})
+    current_pinned = cfg.get("pinned", getattr(plugin.metadata, "pinned", False))
+    new_pinned = not current_pinned
+    plugin_manager.update_plugin_config(plugin_id, pinned=new_pinned)
+    plugin.metadata.pinned = new_pinned
+    return {"status": "ok", "pinned": new_pinned, "plugin_id": plugin_id}
+
+
+# =========================================================================
+# Local API Keys Management & Usage Tracking
+# =========================================================================
+
+@router.get("/keys", response_model=List[APIKey])
+async def list_api_keys():
+    """List all local API keys and their usage metrics."""
+    return plugin_manager.get_api_keys()
+
+
+@router.post("/keys", response_model=APIKey)
+async def create_api_key(body: APIKeyCreate):
+    """Create a new local API key with usage tracking."""
+    return plugin_manager.add_api_key(body)
+
+
+@router.get("/keys/{key_id}", response_model=APIKey)
+async def get_api_key(key_id: str):
+    """Get details and usage for a specific API key."""
+    key = plugin_manager.get_api_key(key_id)
+    if not key:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return key
+
+
+@router.put("/keys/{key_id}", response_model=APIKey)
+async def update_api_key(key_id: str, body: APIKeyUpdate):
+    """Update name or enabled status of an API key."""
+    updated = plugin_manager.update_api_key(key_id, body)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return updated
+
+
+@router.delete("/keys/{key_id}")
+async def delete_api_key(key_id: str):
+    """Delete a local API key."""
+    success = plugin_manager.delete_api_key(key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return {"status": "ok", "message": f"API key '{key_id}' deleted successfully"}
+
+
+# =========================================================================
+# Custom Load Balancing Rules Management
+# =========================================================================
+
+@router.get("/load-balancing-rules", response_model=List[LoadBalancingRule])
+async def list_load_balancing_rules():
+    """List all custom load balancing rules."""
+    return plugin_manager.get_load_balancing_rules()
+
+
+@router.post("/load-balancing-rules", response_model=LoadBalancingRule)
+async def create_load_balancing_rule(body: LoadBalancingRuleCreate):
+    """Create a new custom load balancing rule model exposed to /v1."""
+    if not body.model_id or not body.model_id.strip():
+        raise HTTPException(status_code=400, detail="Custom model ID is required")
+    if not body.targets:
+        raise HTTPException(status_code=400, detail="At least one target model must be selected")
+    return plugin_manager.add_load_balancing_rule(body)
+
+
+@router.get("/load-balancing-rules/{rule_id}", response_model=LoadBalancingRule)
+async def get_load_balancing_rule(rule_id: str):
+    """Get a custom load balancing rule by ID."""
+    rule = plugin_manager.get_load_balancing_rule(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail=f"Load balancing rule '{rule_id}' not found")
+    return rule
+
+
+@router.put("/load-balancing-rules/{rule_id}", response_model=LoadBalancingRule)
+async def update_load_balancing_rule(rule_id: str, body: LoadBalancingRuleUpdate):
+    """Update a custom load balancing rule."""
+    updated = plugin_manager.update_load_balancing_rule(rule_id, body)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Load balancing rule '{rule_id}' not found")
+    return updated
+
+
+@router.delete("/load-balancing-rules/{rule_id}")
+async def delete_load_balancing_rule(rule_id: str):
+    """Delete a custom load balancing rule."""
+    success = plugin_manager.delete_load_balancing_rule(rule_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Load balancing rule '{rule_id}' not found")
+    return {"status": "ok", "message": f"Load balancing rule '{rule_id}' deleted successfully"}
 
 
 # =========================================================================
