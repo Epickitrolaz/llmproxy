@@ -124,10 +124,10 @@ class PluginManager:
             self.api_keys = {}
 
     def _save_api_keys(self) -> None:
-        """Persist API keys to disk."""
+        """Persist API keys to disk (excluding temporary test keys)."""
         try:
             self.api_keys_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [k.model_dump() for k in self.api_keys.values()]
+            serialized = [k.model_dump() for k in self.api_keys.values() if not k.is_temporary]
             self.api_keys_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
         except Exception as e:
             logger.error("Failed to save API keys to %s: %s", self.api_keys_file, e)

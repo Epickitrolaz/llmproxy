@@ -15,6 +15,7 @@ services:
       - ./plugins:/app/plugins
       - ./data:/app/data
       - ./llmproxy:/app/llmproxy
+      - ./templates:/app/templates
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]

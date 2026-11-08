@@ -723,6 +723,7 @@ input:checked + .slider:before {
   text-align: right;
   user-select: none;
   overflow: hidden;
+  white-space: pre;
   border-right: 1px solid var(--border-subtle);
   flex-shrink: 0;
   box-sizing: border-box;

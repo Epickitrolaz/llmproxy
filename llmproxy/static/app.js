@@ -85,6 +85,7 @@
     statCooldownAccounts: document.getElementById("stat-cooldown-accounts"),
     providersGrid: document.getElementById("providers-grid"),
     btnNewProvider: document.getElementById("btn-new-provider"),
+    btnTemplatesGallery: document.getElementById("btn-templates-gallery"),
     // Rules
     rulesTableBody: document.getElementById("rules-table-body"),
     btnCreateRule: document.getElementById("btn-create-rule"),
@@ -106,6 +107,8 @@
     logsAutoToggle: document.getElementById("logs-auto-toggle"),
     // Modals
     modalNewProvider: document.getElementById("modal-new-provider"),
+    modalTemplates: document.getElementById("modal-templates"),
+    templatesGalleryList: document.getElementById("templates-gallery-list"),
     modalRule: document.getElementById("modal-rule"),
     modalApiKey: document.getElementById("modal-api-key"),
     modalAccount: document.getElementById("modal-account"),
@@ -119,6 +122,9 @@
     // Code editor layers
     fsEditorHighlight: document.getElementById("fs-editor-highlight"),
     fsEditorHighlightCode: document.getElementById("fs-editor-highlight-code"),
+    // Config panel
+    fsBtnSaveConfig: document.getElementById("fs-btn-save-config"),
+    fsSwitchWaitInput: document.getElementById("fs-switch-wait-input"),
   };
 
   // Modal Animation Helpers (Opening and Closing Animations)
@@ -599,7 +605,7 @@
   async function fetchApiKeys() {
     try {
       const data = await api("/api/keys");
-      state.apiKeys = data || [];
+      state.apiKeys = (data || []).filter((k) => !k.is_temporary);
       renderApiKeysTable();
     } catch (err) {
       console.error("Failed to load API keys", err);
@@ -878,11 +884,89 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     try {
       const data = await api("/api/plugins");
       state.plugins = data || [];
+      if (el.statProvidersCount) el.statProvidersCount.textContent = state.plugins.length;
       renderProvidersGrid();
       populateSnippetModels();
     } catch (err) {
       console.error("Failed to fetch plugins", err);
     }
+  }
+
+  async function loadTemplates() {
+    try {
+      const data = await api("/api/templates");
+      state.templates = data || [];
+      renderTemplateDropdowns();
+      renderTemplatesGallery();
+    } catch (err) {
+      console.error("Failed to load templates", err);
+    }
+  }
+
+  function renderTemplateDropdowns() {
+    const fsSelect = document.getElementById("fs-editor-template-select");
+    const newSelect = document.getElementById("new-provider-template-select");
+
+    [fsSelect, newSelect].forEach((sel) => {
+      if (!sel) return;
+      const currentVal = sel.value;
+      sel.innerHTML = '<option value="">-- Choose Starter Template --</option>';
+      state.templates.forEach((t) => {
+        const opt = document.createElement("option");
+        opt.value = t.id;
+        opt.textContent = `${t.name} (${t.filename})`;
+        sel.appendChild(opt);
+      });
+      if (currentVal) sel.value = currentVal;
+      enhanceSelect(sel);
+    });
+  }
+
+  function renderTemplatesGallery() {
+    const list = document.getElementById("templates-gallery-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    if (state.templates.length === 0) {
+      list.innerHTML = `<div style="text-align: center; color: var(--ink-muted); padding: 24px;">No templates available.</div>`;
+      return;
+    }
+
+    state.templates.forEach((t) => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.style.padding = "16px";
+      card.style.display = "flex";
+      card.style.justifyContent = "space-between";
+      card.style.alignItems = "center";
+      card.style.gap = "16px";
+
+      card.innerHTML = `
+        <div style="flex: 1;">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+            <strong style="font-size: 14px; color: var(--ink-primary);">${escapeHtml(t.name)}</strong>
+            <code style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted);">${escapeHtml(t.filename)}</code>
+          </div>
+          <p style="font-size: 12px; color: var(--ink-secondary); margin: 0; line-height: 1.4;">${escapeHtml(t.description)}</p>
+        </div>
+        <button class="btn btn-primary btn-sm btn-install-template" data-id="${t.id}" style="white-space: nowrap;">
+          + Add Provider
+        </button>
+      `;
+
+      card.querySelector(".btn-install-template").addEventListener("click", async () => {
+        try {
+          await api(`/api/templates/${t.id}/add`, { method: "POST" });
+          showToast(`Provider '${t.name}' added successfully`);
+          closeModal(el.modalTemplates);
+          fetchPlugins();
+        } catch (err) {
+          showToast(`Failed to add template: ${err.message}`, "error");
+        }
+      });
+
+      list.appendChild(card);
+    });
   }
 
   async function fetchAccounts() {
@@ -909,11 +993,16 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     if (state.plugins.length === 0) {
       el.providersGrid.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 48px 24px; text-align: center; background: var(--bg-card); border: 1px dashed var(--border-solid); border-radius: var(--radius-card);">
-          <h3 style="font-size: 16px; margin-bottom: 8px;">No Provider Plugins Loaded</h3>
-          <p style="color: var(--ink-secondary); margin-bottom: 20px;">Add your first Python plugin or load an offline mock provider.</p>
-          <button class="btn btn-primary" id="btn-quick-starter">+ Load Starter Plugin</button>
+          <h3 style="font-size: 16px; margin-bottom: 8px;">No Provider Plugins Configured</h3>
+          <p style="color: var(--ink-secondary); margin-bottom: 20px;">By default no providers are pre-configured. You can add one of the built-in templates below or create a custom one.</p>
+          <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+            <button class="btn btn-primary" id="btn-empty-add-template">+ Add from Template</button>
+            <button class="btn btn-secondary" id="btn-quick-starter">+ Create Custom Provider</button>
+          </div>
         </div>
       `;
+      const tplBtn = document.getElementById("btn-empty-add-template");
+      if (tplBtn) tplBtn.addEventListener("click", () => openModal(el.modalTemplates));
       const quickBtn = document.getElementById("btn-quick-starter");
       if (quickBtn) quickBtn.addEventListener("click", () => openNewProviderModal());
       return;
@@ -1099,8 +1188,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     await loadFullscreenPluginCode(pluginId);
     // Render sub-tabs content
     renderFullscreenAccounts(pluginId);
-    renderFullscreenStrategy(plugin);
-    renderFullscreenVariables(plugin);
+    renderFullscreenConfig(plugin);
     renderFullscreenModels(plugin);
 
     switchFullscreenTab("code");
@@ -1122,11 +1210,13 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     if (!state.fullscreenOriginalStrategy) return false;
     const select = document.getElementById("fs-strategy-select");
     const cdInput = document.getElementById("fs-cooldown-input");
+    const swInput = document.getElementById("fs-switch-wait-input");
     const retriesInput = document.getElementById("fs-retries-input");
     if (!select || !cdInput || !retriesInput) return false;
     const orig = state.fullscreenOriginalStrategy;
     if (select.value !== orig.strategy) return true;
     if (String(cdInput.value) !== String(orig.cooldown)) return true;
+    if (swInput && String(swInput.value) !== String(orig.switchWait)) return true;
     if (String(retriesInput.value) !== String(orig.retries)) return true;
     return false;
   }
@@ -1194,7 +1284,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       state.fullscreenOriginalCode = data.code || "";
       state.fullscreenCodeDirty = false;
       if (textarea) textarea.value = state.fullscreenOriginalCode;
-      updateFsEditor();
+      updateFsEditor(true);
     } catch (err) {
       if (feedback) {
         feedback.className = "feedback-banner error";
@@ -1203,24 +1293,52 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     }
   }
 
-  function updateFsEditor() {
+  let highlightTimer = null;
+  let cachedLineCount = 0;
+
+  function updateFsEditor(immediate = false) {
     const textarea = document.getElementById("fs-editor-code");
     const lineNumbers = document.getElementById("fs-editor-line-numbers");
     const highlightCode = document.getElementById("fs-editor-highlight-code");
     if (!textarea) return;
 
     const val = textarea.value || "";
-    if (highlightCode) {
+
+    // Fast line-number update: only if line count changed, using pre-wrap string with textContent
+    const lines = (val.match(/\n/g) || []).length + 1;
+    if (lineNumbers && lines !== cachedLineCount) {
+      cachedLineCount = lines;
+      let numStr = "";
+      for (let i = 1; i <= lines; i++) {
+        numStr += i + "\n";
+      }
+      lineNumbers.textContent = numStr;
+    }
+
+    if (!highlightCode) return;
+
+    if (immediate) {
+      if (highlightTimer) {
+        clearTimeout(highlightTimer);
+        highlightTimer = null;
+      }
       highlightCode.innerHTML = highlightPython(val) + "\n";
+      return;
     }
-    if (lineNumbers) {
-      const lines = val.split("\n").length;
-      lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
-      lineNumbers.scrollTop = textarea.scrollTop;
-    }
+
+    // Instantly update text content to prevent visual lag while typing
+    highlightCode.textContent = val + "\n";
+
+    // Debounce expensive syntax highlighting
+    if (highlightTimer) clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => {
+      highlightTimer = null;
+      highlightCode.innerHTML = highlightPython(val) + "\n";
+    }, 60);
   }
 
   const fsEditorTextarea = document.getElementById("fs-editor-code");
+  let scrollRaf = null;
   if (fsEditorTextarea) {
     fsEditorTextarea.addEventListener("input", () => {
       state.fullscreenCodeDirty = (fsEditorTextarea.value !== (state.fullscreenOriginalCode || ""));
@@ -1228,16 +1346,20 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
 
     fsEditorTextarea.addEventListener("scroll", () => {
-      const lineNumbers = document.getElementById("fs-editor-line-numbers");
-      const highlight = document.getElementById("fs-editor-highlight");
-      if (lineNumbers) {
-        lineNumbers.scrollTop = fsEditorTextarea.scrollTop;
-      }
-      if (highlight) {
-        highlight.scrollTop = fsEditorTextarea.scrollTop;
-        highlight.scrollLeft = fsEditorTextarea.scrollLeft;
-      }
-    });
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = null;
+        const lineNumbers = document.getElementById("fs-editor-line-numbers");
+        const highlight = document.getElementById("fs-editor-highlight");
+        const top = fsEditorTextarea.scrollTop;
+        const left = fsEditorTextarea.scrollLeft;
+        if (lineNumbers) lineNumbers.scrollTop = top;
+        if (highlight) {
+          highlight.scrollTop = top;
+          highlight.scrollLeft = left;
+        }
+      });
+    }, { passive: true });
 
     fsEditorTextarea.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
@@ -1246,7 +1368,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
         const end = fsEditorTextarea.selectionEnd;
         fsEditorTextarea.value = fsEditorTextarea.value.substring(0, start) + "    " + fsEditorTextarea.value.substring(end);
         fsEditorTextarea.selectionStart = fsEditorTextarea.selectionEnd = start + 4;
-        updateFsEditor();
+        updateFsEditor(true);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
@@ -1404,71 +1526,49 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
   }
 
-  // Fullscreen: Strategy
-  function renderFullscreenStrategy(plugin) {
+  // Combined Fullscreen Configuration (Load Balancing on Left, Variables on Right)
+  const LOAD_BALANCING_VAR_NAMES = new Set([
+    "load_balancing_strategy",
+    "account_switch_cooldown",
+    "account_switch_wait",
+    "max_retries",
+  ]);
+
+  function renderFullscreenConfig(plugin) {
     const select = document.getElementById("fs-strategy-select");
     const cdInput = document.getElementById("fs-cooldown-input");
+    const swInput = document.getElementById("fs-switch-wait-input");
     const retriesInput = document.getElementById("fs-retries-input");
 
     const vars = {};
     (plugin.variables || []).forEach((v) => { vars[v.name] = v.value !== undefined ? v.value : v.default; });
 
+    const defaultStrat = (plugin.id === "antigravity") ? "fallback" : "round_robin";
+    const currentStrat = vars.load_balancing_strategy || defaultStrat;
+
     if (select) {
-      select.value = vars.load_balancing_strategy || "round_robin";
+      select.value = currentStrat;
       enhanceSelect(select);
     }
-    if (cdInput) cdInput.value = vars.account_switch_cooldown || 60;
-    if (retriesInput) retriesInput.value = vars.max_retries || 2;
+    if (cdInput) cdInput.value = vars.account_switch_cooldown !== undefined ? vars.account_switch_cooldown : 60;
+    if (swInput) swInput.value = vars.account_switch_wait !== undefined ? vars.account_switch_wait : 60;
+    if (retriesInput) retriesInput.value = vars.max_retries !== undefined ? vars.max_retries : 2;
 
     state.fullscreenOriginalStrategy = {
-      strategy: select ? select.value : (vars.load_balancing_strategy || "round_robin"),
-      cooldown: cdInput ? String(cdInput.value) : String(vars.account_switch_cooldown || 60),
-      retries: retriesInput ? String(retriesInput.value) : String(vars.max_retries || 2),
+      strategy: select ? select.value : currentStrat,
+      cooldown: cdInput ? String(cdInput.value) : "60",
+      switchWait: swInput ? String(swInput.value) : "60",
+      retries: retriesInput ? String(retriesInput.value) : "2",
     };
-  }
 
-  const fsBtnSaveStrategy = document.getElementById("fs-btn-save-strategy");
-  if (fsBtnSaveStrategy) {
-    fsBtnSaveStrategy.addEventListener("click", async () => {
-      const pluginId = state.currentFullscreenPluginId;
-      if (!pluginId) return;
-      const strategy = document.getElementById("fs-strategy-select").value;
-      const cd = parseFloat(document.getElementById("fs-cooldown-input").value) || 60;
-      const retries = parseInt(document.getElementById("fs-retries-input").value, 10) || 2;
-
-      try {
-        await api(`/api/plugins/${pluginId}/config`, {
-          method: "PUT",
-          body: JSON.stringify({
-            variables: {
-              load_balancing_strategy: strategy,
-              account_switch_cooldown: cd,
-              max_retries: retries,
-            },
-          }),
-        });
-        state.fullscreenOriginalStrategy = {
-          strategy: strategy,
-          cooldown: String(cd),
-          retries: String(retries),
-        };
-        showToast("Load balancing strategy saved");
-        fetchPlugins();
-      } catch (err) {
-        showToast(`Save failed: ${err.message}`, "error");
-      }
-    });
-  }
-
-  // Fullscreen: Variables
-  function renderFullscreenVariables(plugin) {
+    // Render variables on the right, excluding load balancing settings so Failover Retries is not duplicated!
     const container = document.getElementById("fs-variables-container");
     if (!container) return;
     container.innerHTML = "";
 
-    const declaredVars = plugin.variables || [];
+    const declaredVars = (plugin.variables || []).filter((v) => !LOAD_BALANCING_VAR_NAMES.has(v.name));
     if (declaredVars.length === 0) {
-      container.innerHTML = `<div style="color: var(--ink-muted); font-size: 13px;">This plugin does not declare custom variables.</div>`;
+      container.innerHTML = `<div style="color: var(--ink-muted); font-size: 13px;">This plugin does not declare custom variables beyond load balancing.</div>`;
       state.fullscreenOriginalVariables = {};
       return;
     }
@@ -1491,6 +1591,16 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
             </label>
           </div>
         `;
+      } else if (v.type === "select" && v.options && v.options.length) {
+        let optHtml = "";
+        v.options.forEach((opt) => {
+          optHtml += `<option value="${escapeHtml(opt)}" ${String(val) === String(opt) ? "selected" : ""}>${escapeHtml(opt)}</option>`;
+        });
+        grp.innerHTML = `
+          <label class="form-label">${escapeHtml(v.label || v.name)} ${v.required ? '<span style="color: var(--accent-red);">*</span>' : ''}</label>
+          <select class="select-input fs-var-input" data-var="${escapeHtml(v.name)}">${optHtml}</select>
+          ${v.description ? `<span class="form-hint">${escapeHtml(v.description)}</span>` : ""}
+        `;
       } else {
         grp.innerHTML = `
           <label class="form-label">${escapeHtml(v.label || v.name)} ${v.required ? '<span style="color: var(--accent-red);">*</span>' : ''}</label>
@@ -1504,13 +1614,24 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     state.fullscreenOriginalVariables = getFullscreenVariablesSnapshot();
   }
 
-  const fsBtnSaveVariables = document.getElementById("fs-btn-save-variables");
-  if (fsBtnSaveVariables) {
-    fsBtnSaveVariables.addEventListener("click", async () => {
+  const fsBtnSaveConfig = document.getElementById("fs-btn-save-config");
+  if (fsBtnSaveConfig) {
+    fsBtnSaveConfig.addEventListener("click", async () => {
       const pluginId = state.currentFullscreenPluginId;
       if (!pluginId) return;
 
-      const vars = {};
+      const strategy = document.getElementById("fs-strategy-select").value;
+      const cd = parseFloat(document.getElementById("fs-cooldown-input").value) || 60;
+      const sw = parseFloat(document.getElementById("fs-switch-wait-input").value) || 60;
+      const retries = parseInt(document.getElementById("fs-retries-input").value, 10) || 2;
+
+      const vars = {
+        load_balancing_strategy: strategy,
+        account_switch_cooldown: cd,
+        account_switch_wait: sw,
+        max_retries: retries,
+      };
+
       document.querySelectorAll(".fs-var-input").forEach((inp) => {
         const vName = inp.dataset.var;
         vars[vName] = inp.type === "checkbox" ? inp.checked : inp.value;
@@ -1521,11 +1642,17 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
           method: "PUT",
           body: JSON.stringify({ variables: vars }),
         });
+        state.fullscreenOriginalStrategy = {
+          strategy: strategy,
+          cooldown: String(cd),
+          switchWait: String(sw),
+          retries: String(retries),
+        };
         state.fullscreenOriginalVariables = getFullscreenVariablesSnapshot();
-        showToast("Variables updated successfully");
+        showToast("Configuration saved");
         fetchPlugins();
       } catch (err) {
-        showToast(`Failed to update variables: ${err.message}`, "error");
+        showToast(`Save failed: ${err.message}`, "error");
       }
     });
   }
@@ -2447,13 +2574,54 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
   function openNewProviderModal() {
     const fnInput = document.getElementById("new-provider-filename");
     const codeInput = document.getElementById("new-provider-code");
+    const tplSelect = document.getElementById("new-provider-template-select");
     if (fnInput) fnInput.value = "";
     if (codeInput) codeInput.value = "";
+    if (tplSelect) {
+      tplSelect.value = "";
+      enhanceSelect(tplSelect);
+    }
     openModal(el.modalNewProvider);
   }
 
   if (el.btnNewProvider) {
     el.btnNewProvider.addEventListener("click", openNewProviderModal);
+  }
+
+  if (el.btnTemplatesGallery) {
+    el.btnTemplatesGallery.addEventListener("click", () => {
+      openModal(el.modalTemplates);
+    });
+  }
+
+  const newProviderTemplateSelect = document.getElementById("new-provider-template-select");
+  if (newProviderTemplateSelect) {
+    newProviderTemplateSelect.addEventListener("change", (e) => {
+      const selectedId = e.target.value;
+      const t = state.templates.find((tpl) => tpl.id === selectedId);
+      if (t) {
+        const fnInput = document.getElementById("new-provider-filename");
+        const codeInput = document.getElementById("new-provider-code");
+        if (fnInput) fnInput.value = t.filename;
+        if (codeInput) codeInput.value = t.code;
+      }
+    });
+  }
+
+  const fsEditorTemplateSelect = document.getElementById("fs-editor-template-select");
+  if (fsEditorTemplateSelect) {
+    fsEditorTemplateSelect.addEventListener("change", (e) => {
+      const selectedId = e.target.value;
+      const t = state.templates.find((tpl) => tpl.id === selectedId);
+      if (t) {
+        const textarea = document.getElementById("fs-editor-code");
+        if (textarea) {
+          textarea.value = t.code;
+          state.fullscreenCodeDirty = true;
+          updateFsEditor(true);
+        }
+      }
+    });
   }
 
   const btnSubmitNewProvider = document.getElementById("btn-submit-new-provider");
@@ -2656,6 +2824,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
   async function init() {
     enhanceAllSelects();
     await fetchStats();
+    await loadTemplates();
     await fetchPlugins();
     await fetchAccounts();
     await fetchApiKeys();

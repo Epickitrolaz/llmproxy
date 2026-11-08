@@ -147,6 +147,7 @@
           <p>Modular Python plugins dynamically loaded from the <code style="font-family: var(--font-mono); color: var(--ink-primary);">plugins/</code> directory.</p>
         </div>
         <div class="section-actions">
+          <button class="btn btn-secondary" id="btn-templates-gallery">+ Add from Template</button>
           <button class="btn btn-primary" id="btn-new-provider">+ New Provider</button>
         </div>
       </div>
@@ -382,8 +383,7 @@
       <div class="modal-fullscreen-nav">
         <button class="modal-fullscreen-tab active" data-fs-tab="code">Python Code</button>
         <button class="modal-fullscreen-tab" data-fs-tab="accounts">Accounts & Pool</button>
-        <button class="modal-fullscreen-tab" data-fs-tab="strategy">Load Balancing Strategy</button>
-        <button class="modal-fullscreen-tab" data-fs-tab="variables">Variables</button>
+        <button class="modal-fullscreen-tab" data-fs-tab="config">Configuration</button>
         <button class="modal-fullscreen-tab" data-fs-tab="models">Models</button>
       </div>
 
@@ -445,48 +445,58 @@
           </div>
         </div>
 
-        <!-- FS Panel: Strategy -->
-        <div class="modal-fullscreen-panel" id="fs-panel-strategy">
-          <div class="card" style="max-width: 600px;">
-            <div class="card-header">
-              <h3>Multi-Account Routing & Fallback</h3>
+        <!-- FS Panel: Unified Configuration (Load Balancing on Left, Variables on Right) -->
+        <div class="modal-fullscreen-panel" id="fs-panel-config">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start;">
+            <!-- Left: Load Balancing & Strategy -->
+            <div class="card">
+              <div class="card-header">
+                <h3>Multi-Account Routing & Fallback</h3>
+              </div>
+              <div class="card-body" style="display: flex; flex-direction: column; gap: 16px;">
+                <div class="form-group">
+                  <label class="form-label">Load Balancing Strategy</label>
+                  <select class="select-input" id="fs-strategy-select">
+                    <option value="fallback">Fallback / Priority (Use highest priority first)</option>
+                    <option value="round_robin">Round Robin (Cyclic fair traffic split)</option>
+                    <option value="least_used">Least Used (Prioritize account with fewest requests)</option>
+                    <option value="random">Random (Uniform distribution)</option>
+                  </select>
+                  <span class="form-hint">Controls how requests are distributed among active accounts for this provider.</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Rate-Limit Cooldown Duration (seconds)</label>
+                  <input type="number" class="form-input" id="fs-cooldown-input" value="60" min="1" max="86400">
+                  <span class="form-hint">Time to quarantine an account when it returns HTTP 429 quota exhaustion.</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Switch Wait Delay (seconds)</label>
+                  <input type="number" class="form-input" id="fs-switch-wait-input" value="60" min="0" max="3600" step="0.1">
+                  <span class="form-hint">Wait delay before switching to another account on failover.</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Failover Retries</label>
+                  <input type="number" class="form-input" id="fs-retries-input" value="2" min="1" max="10">
+                  <span class="form-hint">Maximum number of alternate accounts to attempt on upstream failure.</span>
+                </div>
+              </div>
             </div>
-            <div class="card-body" style="display: flex; flex-direction: column; gap: 16px;">
-              <div class="form-group">
-                <label class="form-label">Load Balancing Strategy</label>
-                <select class="select-input" id="fs-strategy-select">
-                  <option value="round_robin">Round Robin (Cyclic fair traffic split)</option>
-                  <option value="least_used">Least Used (Prioritize account with fewest requests)</option>
-                  <option value="random">Random (Uniform distribution)</option>
-                  <option value="fallback">Fallback / Priority (Use highest priority first)</option>
-                </select>
-                <span class="form-hint">Controls how requests are distributed among active accounts for this provider.</span>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Rate-Limit Cooldown Duration (seconds)</label>
-                <input type="number" class="form-input" id="fs-cooldown-input" value="60" min="1" max="86400">
-                <span class="form-hint">Time to quarantine an account when it returns HTTP 429 quota exhaustion.</span>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Failover Retries</label>
-                <input type="number" class="form-input" id="fs-retries-input" value="2" min="1" max="10">
-                <span class="form-hint">Maximum number of alternate accounts to attempt on upstream failure.</span>
-              </div>
-              <button class="btn btn-primary" id="fs-btn-save-strategy" style="align-self: flex-start;">Save Strategy</button>
-            </div>
-          </div>
-        </div>
 
-        <!-- FS Panel: Variables -->
-        <div class="modal-fullscreen-panel" id="fs-panel-variables">
-          <div style="margin-bottom: 16px;">
-            <h4 style="font-size: 14px; color: var(--ink-primary);">Provider Configuration Variables</h4>
-            <p style="font-size: 12px; color: var(--ink-secondary);">Configured parameters, keys, endpoints, and flags declared by this plugin.</p>
+            <!-- Right: Provider Variables -->
+            <div class="card">
+              <div class="card-header">
+                <h3>Provider Variables</h3>
+              </div>
+              <div class="card-body" style="display: flex; flex-direction: column; gap: 16px;">
+                <div id="fs-variables-container" style="display: flex; flex-direction: column; gap: 14px;">
+                  <!-- Rendered dynamically -->
+                </div>
+              </div>
+            </div>
           </div>
-          <div id="fs-variables-container" style="max-width: 700px; display: flex; flex-direction: column; gap: 14px;">
-            <!-- Rendered dynamically -->
+          <div style="margin-top: 20px;">
+            <button class="btn btn-primary" id="fs-btn-save-config">Save Configuration</button>
           </div>
-          <button class="btn btn-primary" id="fs-btn-save-variables" style="align-self: flex-start; margin-top: 16px;">Save Variables</button>
         </div>
 
         <!-- FS Panel: Models -->
@@ -516,6 +526,27 @@
             </table>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Templates Gallery -->
+  <div class="modal-overlay" id="modal-templates">
+    <div class="modal-dialog" style="max-width: 680px;">
+      <div class="modal-header">
+        <h3>Add Provider from Template</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body" style="max-height: 520px; overflow-y: auto;">
+        <p style="font-size: 13px; color: var(--ink-secondary); margin-bottom: 16px;">
+          Choose a pre-built provider template to add to your router. Templates will be installed into your runtime <code style="color: var(--ink-primary);">plugins/</code> directory.
+        </p>
+        <div id="templates-gallery-list" style="display: flex; flex-direction: column; gap: 12px;">
+          <!-- Loaded dynamically from /api/templates -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
       </div>
     </div>
   </div>
