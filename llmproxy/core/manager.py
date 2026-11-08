@@ -205,6 +205,7 @@ class PluginManager:
                 priority=account_data.priority,
                 weight=account_data.weight,
                 enabled=account_data.enabled,
+                pinned=account_data.pinned,
                 extra_config=account_data.extra_config,
             )
         else:
@@ -246,6 +247,9 @@ class PluginManager:
                 name=key_data.name,
                 key=secret,
                 enabled=key_data.enabled,
+                expires_at=key_data.expires_at,
+                max_requests=key_data.max_requests,
+                is_temporary=key_data.is_temporary,
             )
         else:
             k_dict = dict(key_data)
@@ -253,6 +257,26 @@ class PluginManager:
                 k_dict["key"] = f"sk-proxy-{uuid.uuid4().hex}"
             key = APIKey.model_validate(k_dict)
 
+        self.api_keys[key.id] = key
+        self._save_api_keys()
+        return key
+
+    def get_or_create_temporary_key(self) -> APIKey:
+        """Get an active temporary test API key or create a new one valid for 30 min / 10 requests."""
+        now = time.time()
+        for k in self.api_keys.values():
+            if k.is_temporary and k.is_valid(now):
+                return k
+
+        temp_secret = f"sk-proxy-test-{uuid.uuid4().hex[:16]}"
+        key = APIKey(
+            name="Temporary Test Key",
+            key=temp_secret,
+            enabled=True,
+            expires_at=now + 1800,  # 30 minutes
+            max_requests=10,
+            is_temporary=True,
+        )
         self.api_keys[key.id] = key
         self._save_api_keys()
         return key
@@ -293,6 +317,8 @@ class PluginManager:
         key.completion_tokens += completion_tokens
         key.total_tokens += (prompt_tokens + completion_tokens)
         key.last_used_at = time.time()
+        if key.max_requests is not None and key.total_requests >= key.max_requests:
+            key.enabled = False
         self._save_api_keys()
 
     # ==========================================

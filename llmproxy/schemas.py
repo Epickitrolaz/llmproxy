@@ -42,6 +42,7 @@ class ChatCompletionRequest(BaseModel):
     functions: Optional[List[Dict[str, Any]]] = None
     function_call: Optional[Union[str, Dict[str, Any]]] = None
     response_format: Optional[Dict[str, Any]] = None
+    reasoning_effort: Optional[str] = None
     extra_body: Optional[Dict[str, Any]] = None
 
 
@@ -120,6 +121,7 @@ class Account(BaseModel):
     priority: int = 1
     weight: int = 1
     enabled: bool = True
+    pinned: bool = False
     rate_limited_until: Optional[float] = None
     error_count: int = 0
     success_count: int = 0
@@ -143,6 +145,7 @@ class AccountCreate(BaseModel):
     priority: int = 1
     weight: int = 1
     enabled: bool = True
+    pinned: bool = False
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -153,6 +156,7 @@ class AccountUpdate(BaseModel):
     priority: Optional[int] = None
     weight: Optional[int] = None
     enabled: Optional[bool] = None
+    pinned: Optional[bool] = None
     extra_config: Optional[Dict[str, Any]] = None
 
 
@@ -215,17 +219,36 @@ class APIKey(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    expires_at: Optional[float] = None
+    max_requests: Optional[int] = None
+    is_temporary: bool = False
+
+    def is_valid(self, now: Optional[float] = None) -> bool:
+        if not self.enabled:
+            return False
+        current_time = now if now is not None else time.time()
+        if self.expires_at is not None and current_time > self.expires_at:
+            return False
+        if self.max_requests is not None and self.total_requests >= self.max_requests:
+            return False
+        return True
 
 
 class APIKeyCreate(BaseModel):
     name: str
     key: Optional[str] = None
     enabled: bool = True
+    expires_at: Optional[float] = None
+    max_requests: Optional[int] = None
+    is_temporary: bool = False
 
 
 class APIKeyUpdate(BaseModel):
     name: Optional[str] = None
     enabled: Optional[bool] = None
+    expires_at: Optional[float] = None
+    max_requests: Optional[int] = None
+    is_temporary: Optional[bool] = None
 
 
 # ==========================================
