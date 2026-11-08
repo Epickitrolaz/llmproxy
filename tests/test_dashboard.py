@@ -444,3 +444,21 @@ def test_model_deletion_persistence(client):
     assert "persist-model" not in model_ids
 
 
+def test_dashboard_emoji_and_exit_clean_modal(client):
+    """Test that lightning emoji is removed and exit confirmation checks dirty state."""
+    res_root = client.get("/")
+    assert res_root.status_code == 200
+    assert "⚡" not in res_root.text
+
+    res_static = client.get("/static/index.html")
+    assert res_static.status_code == 200
+    assert "⚡" not in res_static.text
+    assert "Test Key (Cutoff: 30m / 10 reqs)" in res_static.text
+
+    res_js = client.get("/static/app.js")
+    assert res_js.status_code == 200
+    assert "isFullscreenDirty" in res_js.text
+    assert "if (isFullscreenDirty()) {" in res_js.text
+
+
+
