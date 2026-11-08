@@ -32,6 +32,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
@@ -553,6 +554,26 @@ class AntigravityPlugin(BasePlugin):
         enable_reasoning = any(sfx in base_upstream for sfx in ["-high", "-medium", "-low", "-thinking"])
         return base_upstream, "default", enable_reasoning
 
+    def _is_thought_part(self, part: Dict[str, Any]) -> bool:
+        """Safely determine if an upstream content part is an internal thought/reasoning part."""
+        th = part.get("thought")
+        if th is not None:
+            if isinstance(th, bool):
+                return th
+            if isinstance(th, str):
+                return th.strip().lower() in ("true", "1", "yes")
+            return bool(th)
+        if "isThought" in part:
+            it = part["isThought"]
+            if isinstance(it, bool):
+                return it
+            if isinstance(it, str):
+                return it.strip().lower() in ("true", "1", "yes")
+            return bool(it)
+        if part.get("type") == "thought":
+            return True
+        return False
+
     def _mock_response(
         self,
         request: ChatCompletionRequest,
@@ -935,8 +956,16 @@ class AntigravityPlugin(BasePlugin):
                 parts = []
                 if m.content:
                     text_val = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
-                    if text_val:
-                        parts.append({"text": text_val})
+                    # Strip reasoning tags (e.g. <think>...</think>, <thought>...</thought>, <thinking>...</thinking>)
+                    # including unclosed trailing tags to prevent upstream model prompt poisoning.
+                    cleaned_text = re.sub(
+                        r"<(think|thought|thinking)>[\s\S]*?(?:</\1>|$)",
+                        "",
+                        text_val,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    if cleaned_text:
+                        parts.append({"text": cleaned_text})
                 if getattr(m, "tool_calls", None):
                     for tc in m.tool_calls:
                         call_id = tc.get("id")
@@ -1211,7 +1240,7 @@ class AntigravityPlugin(BasePlugin):
                                         )
                                         tool_call_idx += 1
                                     elif "text" in part and part["text"]:
-                                        is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
+                                        is_thought = self._is_thought_part(part)
                                         if enable_reasoning_tags and is_thought:
                                             if not in_thought:
                                                 in_thought = True
@@ -1227,7 +1256,13 @@ class AntigravityPlugin(BasePlugin):
                                                         )
                                                     ],
                                                 )
-                                            thought_ended_with_newline = part["text"].endswith("\n")
+                                            raw_text = part["text"]
+                                            if in_thought:
+                                                if raw_text.startswith(f"<{tag_name}>"):
+                                                    raw_text = raw_text[len(f"<{tag_name}>"):].lstrip("\n")
+                                                if raw_text.endswith(f"</{tag_name}>"):
+                                                    raw_text = raw_text[:-len(f"</{tag_name}>")].rstrip("\n")
+                                            thought_ended_with_newline = raw_text.endswith("\n")
                                             yield ChatCompletionChunk(
                                                 id=chunk_id,
                                                 created=created,
@@ -1236,8 +1271,8 @@ class AntigravityPlugin(BasePlugin):
                                                     ChatChoiceDelta(
                                                         index=0,
                                                         delta={
-                                                            "content": part["text"],
-                                                            "reasoning_content": part["text"],
+                                                            "content": raw_text,
+                                                            "reasoning_content": raw_text,
                                                         },
                                                     )
                                                 ],
@@ -1245,6 +1280,26 @@ class AntigravityPlugin(BasePlugin):
                                         else:
                                             # Non-thought text part
                                             if in_thought:
+                                                # If part is purely whitespace/newline and thought was ongoing,
+                                                # retain it as part of thought instead of prematurely closing tags.
+                                                if not part["text"].strip():
+                                                    thought_ended_with_newline = part["text"].endswith("\n")
+                                                    yield ChatCompletionChunk(
+                                                        id=chunk_id,
+                                                        created=created,
+                                                        model=target_model,
+                                                        choices=[
+                                                            ChatChoiceDelta(
+                                                                index=0,
+                                                                delta={
+                                                                    "content": part["text"],
+                                                                    "reasoning_content": part["text"],
+                                                                },
+                                                            )
+                                                        ],
+                                                    )
+                                                    continue
+
                                                 in_thought = False
                                                 closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
                                                 yield ChatCompletionChunk(
@@ -1372,7 +1427,7 @@ class AntigravityPlugin(BasePlugin):
                                     },
                                 })
                             elif "text" in part and part["text"]:
-                                is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
+                                is_thought = self._is_thought_part(part)
                                 if is_thought:
                                     thought_parts.append(part["text"])
                                 else:
@@ -1385,6 +1440,12 @@ class AntigravityPlugin(BasePlugin):
 
         if thought_text and enable_reasoning_tags:
             clean_thought = thought_text
+            clean_thought = re.sub(
+                rf"</?{re.escape(tag_name)}>",
+                "",
+                clean_thought,
+                flags=re.IGNORECASE,
+            ).strip("\n")
             if not clean_thought.endswith("\n"):
                 tagged_thought = f"<{tag_name}>\n{clean_thought}\n</{tag_name}>\n"
             else:

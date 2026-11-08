@@ -375,3 +375,172 @@ async def test_upstream_disabled_reasoning_tags():
         assert "<think>" not in content
         assert "</think>" not in content
         assert "Raw thought text.Final answer." == content
+
+
+def test_build_upstream_request_sanitizes_prior_reasoning_tags():
+    """Verify _build_upstream_request strips reasoning tags from previous assistant messages to avoid context poisoning."""
+    plugin = AntigravityPlugin()
+    model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
+
+    messages = [
+        ChatMessage(role="user", content="First question"),
+        ChatMessage(
+            role="assistant",
+            content="<think>\nAnalyzing first question step-by-step.\n</think>\nFirst answer text.",
+        ),
+        ChatMessage(role="user", content="Second question"),
+        ChatMessage(
+            role="assistant",
+            content="<thought>\nThinking before tool invocation.\n</thought>\n",
+            tool_calls=[{"id": "call_abc", "type": "function", "function": {"name": "test_tool", "arguments": "{}"}}],
+        ),
+        ChatMessage(role="tool", tool_call_id="call_abc", content="result"),
+        ChatMessage(role="user", content="Third question"),
+        ChatMessage(
+            role="assistant",
+            content="<think>\nUnclosed thought block without end tag",
+        ),
+    ]
+
+    req = ChatCompletionRequest(model="gemini-3.8-flash-high", messages=messages)
+    headers, body = plugin._build_upstream_request(req, model_cfg, account=None)
+
+    contents = body["request"]["contents"]
+    model_turns = [c for c in contents if c.get("role") == "model"]
+    assert len(model_turns) == 3
+
+    # Turn 1: Should only have "First answer text."
+    turn1_texts = [p["text"] for p in model_turns[0]["parts"] if "text" in p]
+    assert len(turn1_texts) == 1
+    assert turn1_texts[0] == "First answer text."
+    assert "<think>" not in turn1_texts[0]
+
+    # Turn 2: Thought before tool call was stripped; only functionCall remains
+    turn2_parts = model_turns[1]["parts"]
+    assert any("functionCall" in p for p in turn2_parts)
+    assert not any("<thought>" in p.get("text", "") for p in turn2_parts)
+
+    # Turn 3: Unclosed think block was completely stripped, falling back to empty string
+    turn3_texts = [p["text"] for p in model_turns[2]["parts"] if "text" in p]
+    assert len(turn3_texts) == 1
+    assert turn3_texts[0] == ""
+
+
+@pytest.mark.anyio
+async def test_upstream_streaming_preserves_thought_across_whitespace_chunks():
+    """Verify that whitespace/newline chunks between thought parts do not cause premature closing and reopening."""
+    plugin = AntigravityPlugin()
+    model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
+
+    sse_lines = [
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "Thought step 1."}]}}]}}\r\n',
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "\\n\\n"}]}}]}}\r\n',
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "Thought step 2."}]}}]}}\r\n',
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "Final visible answer."}]}}]}}\r\n',
+        b'data: [DONE]\r\n',
+    ]
+
+    class FakeStreamResponse:
+        status_code = 200
+        async def aiter_lines(self):
+            for l in sse_lines:
+                yield l.decode("utf-8").strip()
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        def stream(self, method, url, **kwargs):
+            class FakeStreamContext:
+                async def __aenter__(self):
+                    return FakeStreamResponse()
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+            return FakeStreamContext()
+
+    req = ChatCompletionRequest(
+        model="gemini-3.8-flash-high",
+        messages=[ChatMessage(role="user", content="solve")],
+        stream=True,
+    )
+
+    with patch("plugins.antigravity.httpx.AsyncClient", return_value=FakeClient()):
+        stream_gen = await plugin.chat_completion(
+            req,
+            model_cfg,
+            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+        )
+
+        chunks = []
+        async for chunk in stream_gen:
+            chunks.append(chunk)
+
+        content_deltas = [c.choices[0].delta.get("content", "") for c in chunks if "content" in c.choices[0].delta]
+        full_streamed = "".join(content_deltas)
+
+        # There should be exactly ONE <think> and ONE </think> tag
+        assert full_streamed.count("<think>") == 1
+        assert full_streamed.count("</think>") == 1
+        assert "Thought step 1." in full_streamed
+        assert "Thought step 2." in full_streamed
+        assert "Final visible answer." in full_streamed
+
+
+@pytest.mark.anyio
+async def test_upstream_streaming_handles_raw_tag_leakage():
+    """Verify that if upstream thought text already has raw think tags, they are not duplicated."""
+    plugin = AntigravityPlugin()
+    model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
+
+    sse_lines = [
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"thought": true, "text": "<think>\\nInner thought\\n</think>"}]}}]}}\r\n',
+        b'data: {"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "Answer."}]}}]}}\r\n',
+        b'data: [DONE]\r\n',
+    ]
+
+    class FakeStreamResponse:
+        status_code = 200
+        async def aiter_lines(self):
+            for l in sse_lines:
+                yield l.decode("utf-8").strip()
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        def stream(self, method, url, **kwargs):
+            class FakeStreamContext:
+                async def __aenter__(self):
+                    return FakeStreamResponse()
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+            return FakeStreamContext()
+
+    req = ChatCompletionRequest(
+        model="gemini-3.8-flash-high",
+        messages=[ChatMessage(role="user", content="solve")],
+        stream=True,
+    )
+
+    with patch("plugins.antigravity.httpx.AsyncClient", return_value=FakeClient()):
+        stream_gen = await plugin.chat_completion(
+            req,
+            model_cfg,
+            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+        )
+
+        chunks = []
+        async for chunk in stream_gen:
+            chunks.append(chunk)
+
+        content_deltas = [c.choices[0].delta.get("content", "") for c in chunks if "content" in c.choices[0].delta]
+        full_streamed = "".join(content_deltas)
+
+        # No double <think><think> tags
+        assert full_streamed.count("<think>") == 1
+        assert full_streamed.count("</think>") == 1
+        assert "Inner thought" in full_streamed
+        assert "Answer." in full_streamed
+
