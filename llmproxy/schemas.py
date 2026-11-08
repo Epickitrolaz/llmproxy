@@ -184,6 +184,7 @@ class PluginMetadata(BaseModel):
     version: str = "1.0.0"
     author: str = "custom"
     enabled: bool = True
+    pinned: bool = False
     filename: Optional[str] = None
     variables: List[PluginVariable] = Field(default_factory=list)
     models: List[PluginModelConfig] = Field(default_factory=list)
@@ -195,7 +196,69 @@ class PluginSourceUpdate(BaseModel):
 
 class PluginConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
+    pinned: Optional[bool] = None
     variables: Optional[Dict[str, Any]] = None
+
+
+# ==========================================
+# Local API Key & Usage Tracking Schemas
+# ==========================================
+
+class APIKey(BaseModel):
+    id: str = Field(default_factory=lambda: f"key_{uuid.uuid4().hex[:8]}")
+    key: str
+    name: str
+    enabled: bool = True
+    created_at: float = Field(default_factory=time.time)
+    last_used_at: Optional[float] = None
+    total_requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class APIKeyCreate(BaseModel):
+    name: str
+    key: Optional[str] = None
+    enabled: bool = True
+
+
+class APIKeyUpdate(BaseModel):
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+# ==========================================
+# Custom Load Balancing Rules Schemas
+# ==========================================
+
+class LoadBalancingRule(BaseModel):
+    id: str = Field(default_factory=lambda: f"rule_{uuid.uuid4().hex[:8]}")
+    model_id: str  # Custom model ID exposed to /v1
+    name: str
+    enabled: bool = True
+    strategy: Literal["round_robin", "least_used", "random", "fallback", "priority"] = "round_robin"
+    targets: List[str] = Field(default_factory=list)  # Target model IDs
+    created_at: float = Field(default_factory=time.time)
+    description: Optional[str] = ""
+
+
+class LoadBalancingRuleCreate(BaseModel):
+    model_id: str
+    name: str
+    enabled: bool = True
+    strategy: str = "round_robin"
+    targets: List[str] = Field(default_factory=list)
+    description: Optional[str] = ""
+
+
+class LoadBalancingRuleUpdate(BaseModel):
+    model_id: Optional[str] = None
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    strategy: Optional[str] = None
+    targets: Optional[List[str]] = None
+    description: Optional[str] = None
 
 
 class RequestLogEntry(BaseModel):
@@ -203,6 +266,7 @@ class RequestLogEntry(BaseModel):
     timestamp: float = Field(default_factory=time.time)
     model: str
     plugin_id: Optional[str] = None
+    api_key_id: Optional[str] = None
     status: Literal["success", "error"] = "success"
     status_code: int = 200
     latency_ms: float = 0.0

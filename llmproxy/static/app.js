@@ -12,18 +12,45 @@
     plugins: [],
     templates: [],
     accounts: [],
-    accountProviderFilter: "",
-    selectedAccountId: null,
+    apiKeys: [],
+    rules: [],
     stats: {},
     logs: [],
+    statusProviderFilter: "",
     activeSnippetLang: "python",
-    selectedSnippetModel: "gpt-4o",
-    selectedEditorPluginId: null,
+    selectedSnippetModel: "gemini-3.8-flash-high",
+    currentFullscreenPluginId: null,
+    currentFullscreenTab: "code",
     selectedPlaygroundModel: null,
     chatMessages: [],
     autoRefreshLogs: false,
     autoRefreshInterval: null,
+    hiddenLimits: {}, // { [accountId]: Set of bucketIds/limitNames }
   };
+
+  // Load hidden limits from localStorage
+  try {
+    const savedHidden = localStorage.getItem("llmproxy_hidden_limits");
+    if (savedHidden) {
+      const parsed = JSON.parse(savedHidden);
+      state.hiddenLimits = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        state.hiddenLimits[k] = new Set(v);
+      }
+    }
+  } catch (_) {
+    state.hiddenLimits = {};
+  }
+
+  function saveHiddenLimits() {
+    try {
+      const serializable = {};
+      for (const [k, v] of Object.entries(state.hiddenLimits)) {
+        serializable[k] = Array.from(v);
+      }
+      localStorage.setItem("llmproxy_hidden_limits", JSON.stringify(serializable));
+    } catch (_) {}
+  }
 
   // DOM Elements Cache
   const el = {
@@ -33,87 +60,61 @@
     statRequests: document.getElementById("stat-total-requests"),
     statSuccessRate: document.getElementById("stat-success-rate"),
     statActiveModels: document.getElementById("stat-active-models"),
-    statActivePlugins: document.getElementById("stat-active-plugins"),
     statAvgLatency: document.getElementById("stat-avg-latency"),
-    // Overview Snippet
+    // Overview
+    apiKeysCountBadge: document.getElementById("api-keys-count-badge"),
+    apiKeysTableBody: document.getElementById("api-keys-table-body"),
+    btnCreateApiKey: document.getElementById("btn-create-api-key"),
     snippetCode: document.getElementById("snippet-code"),
     snippetModelSelect: document.getElementById("snippet-model-select"),
     copySnippetBtn: document.getElementById("copy-snippet-btn"),
     copyEndpointBtn: document.getElementById("copy-endpoint-btn"),
     // Providers
-    providersGrid: document.getElementById("providers-grid"),
-    btnNewProvider: document.getElementById("btn-new-provider"),
-    // Accounts
+    statProvidersCount: document.getElementById("stat-providers-count"),
     statTotalAccounts: document.getElementById("stat-total-accounts"),
     statActiveAccounts: document.getElementById("stat-active-accounts"),
     statCooldownAccounts: document.getElementById("stat-cooldown-accounts"),
-    statRoutingStrategy: document.getElementById("stat-routing-strategy"),
-    accountsTableBody: document.getElementById("accounts-table-body"),
-    accountsProviderFilter: document.getElementById("accounts-provider-filter"),
-    btnConnectAccount: document.getElementById("btn-connect-account"),
-    modalAccount: document.getElementById("modal-account"),
-    modalAccountTitle: document.getElementById("modal-account-title"),
-    accountFormId: document.getElementById("account-form-id"),
-    accountProviderSelect: document.getElementById("account-provider-select"),
-    accountName: document.getElementById("account-name"),
-    accountApiKey: document.getElementById("account-api-key"),
-    btnToggleAccountKey: document.getElementById("btn-toggle-account-key"),
-    accountBaseUrl: document.getElementById("account-base-url"),
-    accountPriority: document.getElementById("account-priority"),
-    accountWeight: document.getElementById("account-weight"),
-    accountEnabledToggle: document.getElementById("account-enabled-toggle"),
-    btnSaveAccount: document.getElementById("btn-save-account"),
-    // Editor
-    editorPluginSelect: document.getElementById("editor-plugin-select"),
-    editorTemplateSelect: document.getElementById("editor-template-select"),
-    editorTextarea: document.getElementById("editor-code"),
-    editorLineNumbers: document.getElementById("editor-line-numbers"),
-    editorSaveBtn: document.getElementById("editor-save-btn"),
-    editorSwapBtn: document.getElementById("editor-swap-btn"),
-    editorFileInput: document.getElementById("editor-file-input"),
-    editorFeedback: document.getElementById("editor-feedback"),
-    editorFilenameBadge: document.getElementById("editor-filename-badge"),
-    // Models
-    modelsTableBody: document.getElementById("models-table-body"),
-    modelsSearchInput: document.getElementById("models-search-input"),
-    btnAddModel: document.getElementById("btn-add-model"),
+    providersGrid: document.getElementById("providers-grid"),
+    btnNewProvider: document.getElementById("btn-new-provider"),
+    // Rules
+    rulesTableBody: document.getElementById("rules-table-body"),
+    btnCreateRule: document.getElementById("btn-create-rule"),
     // Playground
     playgroundModelSelect: document.getElementById("playground-model-select"),
     playgroundTempInput: document.getElementById("playground-temp-input"),
     playgroundTempDisplay: document.getElementById("playground-temp-display"),
-    playgroundMaxTokensInput: document.getElementById("playground-tokens-input"),
+    playgroundTokensInput: document.getElementById("playground-tokens-input"),
     playgroundSystemInput: document.getElementById("playground-system-input"),
     playgroundHistory: document.getElementById("playground-history"),
     playgroundPrompt: document.getElementById("playground-prompt"),
     playgroundSendBtn: document.getElementById("playground-send-btn"),
     playgroundClearBtn: document.getElementById("playground-clear-btn"),
-    // Logs
+    // Status
+    statusProviderTabs: document.getElementById("status-provider-tabs"),
+    statusAccountsGrid: document.getElementById("status-accounts-grid"),
     logsTableBody: document.getElementById("logs-table-body"),
     logsRefreshBtn: document.getElementById("logs-refresh-btn"),
     logsAutoToggle: document.getElementById("logs-auto-toggle"),
-    btnLogsStatus: document.getElementById("btn-logs-status"),
-    statusTrackerCard: document.getElementById("status-tracker-card"),
-    statusTrackerBody: document.getElementById("status-tracker-body"),
     // Modals
     modalNewProvider: document.getElementById("modal-new-provider"),
-    modalVariables: document.getElementById("modal-variables"),
+    modalRule: document.getElementById("modal-rule"),
+    modalApiKey: document.getElementById("modal-api-key"),
+    modalAccount: document.getElementById("modal-account"),
     modalModel: document.getElementById("modal-model"),
-    modalStatus: document.getElementById("modal-status"),
+    modalProviderFullscreen: document.getElementById("modal-provider-fullscreen"),
     toastContainer: document.getElementById("toast-container"),
   };
 
-  // =========================================================================
   // Toast Notifications
-  // =========================================================================
-
   function showToast(message, type = "info") {
+    if (!el.toastContainer) return;
     const toast = document.createElement("div");
     toast.className = "toast";
     let icon = "✓";
     if (type === "error") icon = "✕";
     if (type === "warning") icon = "⚠";
 
-    toast.innerHTML = `<span style="color: ${type === 'error' ? '#f43f5e' : '#10b981'}; font-weight: bold;">${icon}</span> <span>${message}</span>`;
+    toast.innerHTML = `<span style="color: ${type === 'error' ? '#f43f5e' : '#10b981'}; font-weight: bold;">${icon}</span> <span>${escapeHtml(message)}</span>`;
     el.toastContainer.appendChild(toast);
 
     setTimeout(() => {
@@ -124,10 +125,17 @@
     }, 3200);
   }
 
-  // =========================================================================
-  // API Calls
-  // =========================================================================
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
 
+  // API Client
   async function api(path, options = {}) {
     try {
       const res = await fetch(path, {
@@ -142,7 +150,11 @@
         let errorDetail = `HTTP ${res.status}`;
         try {
           const errData = await res.json();
-          errorDetail = errData.detail || errorDetail;
+          if (errData.detail) {
+            errorDetail = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail);
+          } else if (errData.error && errData.error.message) {
+            errorDetail = errData.error.message;
+          }
         } catch (_) {}
         throw new Error(errorDetail);
       }
@@ -153,80 +165,499 @@
       }
       return await res.text();
     } catch (err) {
-      console.error(`API Error on ${path}:`, err);
+      console.error(`API Request Failed: ${path}`, err);
       throw err;
     }
   }
 
   // =========================================================================
-  // Navigation & Tab Management
+  // CUSTOM DROPDOWNS COMPONENT WITH SEARCH BAR
+  // =========================================================================
+
+  function enhanceSelect(selectEl) {
+    if (!selectEl || selectEl.dataset.customEnhanced === "true") {
+      updateCustomDropdown(selectEl);
+      return;
+    }
+
+    selectEl.dataset.customEnhanced = "true";
+    selectEl.style.display = "none";
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "custom-dropdown";
+
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "custom-dropdown-trigger";
+
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "custom-dropdown-trigger-label";
+
+    const arrowSpan = document.createElement("span");
+    arrowSpan.className = "custom-dropdown-arrow";
+    arrowSpan.innerHTML = "▼";
+
+    trigger.appendChild(labelSpan);
+    trigger.appendChild(arrowSpan);
+
+    const menu = document.createElement("div");
+    menu.className = "custom-dropdown-menu";
+
+    const searchBox = document.createElement("div");
+    searchBox.className = "custom-dropdown-search-box";
+
+    const searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.className = "custom-dropdown-search-input";
+    searchInput.placeholder = "Search options...";
+    searchBox.appendChild(searchInput);
+
+    const optionsList = document.createElement("div");
+    optionsList.className = "custom-dropdown-options";
+
+    const emptyMsg = document.createElement("div");
+    emptyMsg.className = "custom-dropdown-empty";
+    emptyMsg.textContent = "No matches found";
+    emptyMsg.style.display = "none";
+
+    menu.appendChild(searchBox);
+    menu.appendChild(optionsList);
+    menu.appendChild(emptyMsg);
+
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(menu);
+    selectEl.parentNode.insertBefore(wrapper, selectEl.nextSibling);
+
+    wrapper._selectEl = selectEl;
+    wrapper._trigger = trigger;
+    wrapper._labelSpan = labelSpan;
+    wrapper._menu = menu;
+    wrapper._searchInput = searchInput;
+    wrapper._optionsList = optionsList;
+    wrapper._emptyMsg = emptyMsg;
+    selectEl._customDropdown = wrapper;
+
+    function populateOptions() {
+      optionsList.innerHTML = "";
+      const selectedIndex = selectEl.selectedIndex;
+      let selectedText = "Select...";
+
+      Array.from(selectEl.options).forEach((opt, idx) => {
+        const item = document.createElement("div");
+        item.className = "custom-dropdown-option";
+        item.dataset.value = opt.value;
+        item.textContent = opt.text || opt.value;
+        if (idx === selectedIndex) {
+          item.classList.add("selected");
+          selectedText = opt.text || opt.value;
+        }
+
+        item.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectEl.value = opt.value;
+          wrapper.querySelectorAll(".custom-dropdown-option").forEach((o) => o.classList.remove("selected"));
+          item.classList.add("selected");
+          labelSpan.textContent = opt.text || opt.value;
+          closeDropdown();
+          selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+
+        optionsList.appendChild(item);
+      });
+
+      if (selectEl.options.length > 0 && selectedIndex >= 0) {
+        selectedText = selectEl.options[selectedIndex].text || selectEl.options[selectedIndex].value;
+      }
+      labelSpan.textContent = selectedText;
+    }
+
+    populateOptions();
+
+    function filterOptions(query) {
+      const q = (query || "").toLowerCase().trim();
+      let visibleCount = 0;
+      wrapper.querySelectorAll(".custom-dropdown-option").forEach((opt) => {
+        const text = (opt.textContent || "").toLowerCase();
+        if (!q || text.includes(q)) {
+          opt.classList.remove("hidden");
+          visibleCount++;
+        } else {
+          opt.classList.add("hidden");
+        }
+      });
+      emptyMsg.style.display = visibleCount === 0 ? "block" : "none";
+    }
+
+    searchInput.addEventListener("input", (e) => {
+      filterOptions(e.target.value);
+    });
+
+    function openDropdown() {
+      // Close other custom dropdowns
+      document.querySelectorAll(".custom-dropdown.active").forEach((d) => {
+        if (d !== wrapper) d.classList.remove("active");
+      });
+      wrapper.classList.add("active");
+      searchInput.value = "";
+      filterOptions("");
+      setTimeout(() => searchInput.focus(), 50);
+    }
+
+    function closeDropdown() {
+      wrapper.classList.remove("active");
+    }
+
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (wrapper.classList.contains("active")) {
+        closeDropdown();
+      } else {
+        openDropdown();
+      }
+    });
+
+    // Close on outside click
+    document.addEventListener("click", (e) => {
+      if (!wrapper.contains(e.target)) {
+        closeDropdown();
+      }
+    });
+
+    // Close on ESC
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && wrapper.classList.contains("active")) {
+        closeDropdown();
+      }
+    });
+  }
+
+  function updateCustomDropdown(selectEl) {
+    if (!selectEl || !selectEl._customDropdown) return;
+    const wrapper = selectEl._customDropdown;
+    const optionsList = wrapper._optionsList;
+    const labelSpan = wrapper._labelSpan;
+    if (!optionsList || !labelSpan) return;
+
+    optionsList.innerHTML = "";
+    const selectedIndex = selectEl.selectedIndex;
+    let selectedText = "Select...";
+
+    Array.from(selectEl.options).forEach((opt, idx) => {
+      const item = document.createElement("div");
+      item.className = "custom-dropdown-option";
+      item.dataset.value = opt.value;
+      item.textContent = opt.text || opt.value;
+      if (idx === selectedIndex) {
+        item.classList.add("selected");
+        selectedText = opt.text || opt.value;
+      }
+
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selectEl.value = opt.value;
+        wrapper.querySelectorAll(".custom-dropdown-option").forEach((o) => o.classList.remove("selected"));
+        item.classList.add("selected");
+        labelSpan.textContent = opt.text || opt.value;
+        wrapper.classList.remove("active");
+        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      optionsList.appendChild(item);
+    });
+
+    if (selectEl.options.length > 0 && selectedIndex >= 0) {
+      selectedText = selectEl.options[selectedIndex].text || selectEl.options[selectedIndex].value;
+    }
+    labelSpan.textContent = selectedText;
+  }
+
+  function enhanceAllSelects(root = document) {
+    root.querySelectorAll("select").forEach((s) => enhanceSelect(s));
+  }
+
+  // =========================================================================
+  // TAB NAVIGATION
   // =========================================================================
 
   function switchTab(tabId) {
     state.currentTab = tabId;
-
-    el.navTabs.forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.tab === tabId);
+    el.navTabs.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tab === tabId);
+    });
+    el.tabPanels.forEach((p) => {
+      p.classList.toggle("active", p.id === `tab-${tabId}`);
     });
 
-    el.tabPanels.forEach((panel) => {
-      panel.classList.toggle("active", panel.id === `tab-${tabId}`);
-    });
-
-    // Tab specific refresh actions
     if (tabId === "overview") {
       fetchStats();
-      fetchPlugins();
-      fetchAccounts();
+      fetchApiKeys();
     } else if (tabId === "providers") {
       fetchPlugins();
       fetchAccounts();
-    } else if (tabId === "accounts") {
-      fetchPlugins();
-      fetchAccounts();
-    } else if (tabId === "editor") {
-      if (state.plugins.length > 0 && !state.selectedEditorPluginId) {
-        selectEditorPlugin(state.plugins[0].id);
-      }
-    } else if (tabId === "models") {
-      renderModelsTable();
+    } else if (tabId === "rules") {
+      fetchRules();
     } else if (tabId === "playground") {
-      syncPlaygroundModels();
-    } else if (tabId === "logs") {
-      fetchLogs();
-      fetchAntigravityStatus();
+      populatePlaygroundModels();
+    } else if (tabId === "status" || tabId === "logs") {
+      fetchStatusData();
     }
   }
 
-  el.navTabs.forEach((tab) => {
-    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+  el.navTabs.forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
   // =========================================================================
-  // Data Fetching & Sync
+  // TAB 1: OVERVIEW & LOCAL API KEYS
   // =========================================================================
 
   async function fetchStats() {
     try {
       const data = await api("/api/stats");
       state.stats = data;
-      renderStats();
+      if (el.statRequests) el.statRequests.textContent = data.total_requests || 0;
+      if (el.statSuccessRate) el.statSuccessRate.textContent = `${data.success_rate || 100}%`;
+      if (el.statActiveModels) el.statActiveModels.textContent = data.active_models_count || 0;
+      if (el.statAvgLatency) el.statAvgLatency.textContent = `${data.avg_latency_ms || 0} ms`;
+      if (el.statProvidersCount) el.statProvidersCount.textContent = data.active_plugins_count || 0;
+      if (el.statTotalAccounts) el.statTotalAccounts.textContent = data.total_accounts || 0;
+      if (el.statActiveAccounts) el.statActiveAccounts.textContent = data.active_accounts || 0;
+    } catch (_) {}
+  }
+
+  async function fetchApiKeys() {
+    try {
+      const data = await api("/api/keys");
+      state.apiKeys = data || [];
+      renderApiKeysTable();
     } catch (err) {
-      console.error("Failed to fetch stats", err);
+      console.error("Failed to load API keys", err);
     }
   }
+
+  function renderApiKeysTable() {
+    if (!el.apiKeysTableBody) return;
+    if (el.apiKeysCountBadge) el.apiKeysCountBadge.textContent = `${state.apiKeys.length} keys`;
+    el.apiKeysTableBody.innerHTML = "";
+
+    if (state.apiKeys.length === 0) {
+      el.apiKeysTableBody.innerHTML = `
+        <tr>
+          <td colspan="9" style="text-align: center; color: var(--ink-muted); padding: 24px;">
+            No local API keys created yet. When created, incoming requests to <code>/v1</code> must supply <code>Authorization: Bearer &lt;key&gt;</code>.
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    state.apiKeys.forEach((k) => {
+      const tr = document.createElement("tr");
+      const maskedSecret = k.key.length > 14
+        ? `${k.key.slice(0, 7)}...${k.key.slice(-4)}`
+        : k.key;
+      const lastUsed = k.last_used_at
+        ? new Date(k.last_used_at * 1000).toLocaleString()
+        : "Never";
+
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(k.name)}</strong></td>
+        <td>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <code style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-secondary);">${escapeHtml(maskedSecret)}</code>
+            <button class="btn btn-secondary btn-sm btn-copy-key" data-key="${escapeHtml(k.key)}" style="padding: 2px 6px; font-size: 11px;">Copy</button>
+          </div>
+        </td>
+        <td>
+          <span class="badge ${k.enabled ? 'badge-active' : 'badge-muted'}">
+            ${k.enabled ? "Active" : "Disabled"}
+          </span>
+        </td>
+        <td style="font-family: var(--font-mono);">${k.total_requests || 0}</td>
+        <td style="font-family: var(--font-mono);">${k.prompt_tokens || 0}</td>
+        <td style="font-family: var(--font-mono);">${k.completion_tokens || 0}</td>
+        <td style="font-family: var(--font-mono); font-weight: 600;">${k.total_tokens || 0}</td>
+        <td style="font-size: 11.5px; color: var(--ink-muted);">${escapeHtml(lastUsed)}</td>
+        <td>
+          <div style="display: flex; gap: 6px;">
+            <button class="btn btn-secondary btn-sm btn-edit-key" data-id="${k.id}">Edit</button>
+            <button class="btn btn-danger btn-sm btn-delete-key" data-id="${k.id}">Delete</button>
+          </div>
+        </td>
+      `;
+
+      tr.querySelector(".btn-copy-key").addEventListener("click", () => {
+        navigator.clipboard.writeText(k.key);
+        showToast("API key copied to clipboard");
+      });
+
+      tr.querySelector(".btn-edit-key").addEventListener("click", () => {
+        openApiKeyModal(k);
+      });
+
+      tr.querySelector(".btn-delete-key").addEventListener("click", async () => {
+        if (confirm(`Delete local API key '${k.name}'?`)) {
+          try {
+            await api(`/api/keys/${k.id}`, { method: "DELETE" });
+            showToast(`API key '${k.name}' deleted`);
+            fetchApiKeys();
+          } catch (err) {
+            showToast(`Failed to delete: ${err.message}`, "error");
+          }
+        }
+      });
+
+      el.apiKeysTableBody.appendChild(tr);
+    });
+  }
+
+  function openApiKeyModal(key = null) {
+    const idInput = document.getElementById("api-key-form-id");
+    const nameInput = document.getElementById("api-key-form-name");
+    const secretInput = document.getElementById("api-key-form-secret");
+    const enabledInput = document.getElementById("api-key-form-enabled");
+    const secretGroup = document.getElementById("api-key-secret-group");
+    const title = document.getElementById("modal-api-key-title");
+
+    if (key) {
+      title.textContent = "Edit Local API Key";
+      idInput.value = key.id;
+      nameInput.value = key.name;
+      enabledInput.checked = !!key.enabled;
+      if (secretGroup) secretGroup.style.display = "none";
+    } else {
+      title.textContent = "Create Local API Key";
+      idInput.value = "";
+      nameInput.value = "";
+      if (secretInput) secretInput.value = "";
+      enabledInput.checked = true;
+      if (secretGroup) secretGroup.style.display = "block";
+    }
+
+    el.modalApiKey.classList.add("active");
+  }
+
+  if (el.btnCreateApiKey) {
+    el.btnCreateApiKey.addEventListener("click", () => openApiKeyModal(null));
+  }
+
+  const btnSubmitApiKey = document.getElementById("btn-submit-api-key");
+  if (btnSubmitApiKey) {
+    btnSubmitApiKey.addEventListener("click", async () => {
+      const idInput = document.getElementById("api-key-form-id");
+      const nameInput = document.getElementById("api-key-form-name");
+      const secretInput = document.getElementById("api-key-form-secret");
+      const enabledInput = document.getElementById("api-key-form-enabled");
+
+      const name = nameInput.value.trim();
+      if (!name) {
+        showToast("Key name is required", "error");
+        return;
+      }
+
+      try {
+        if (idInput.value) {
+          // Edit
+          await api(`/api/keys/${idInput.value}`, {
+            method: "PUT",
+            body: JSON.stringify({ name, enabled: enabledInput.checked }),
+          });
+          showToast(`API key '${name}' updated`);
+        } else {
+          // Create
+          const keySecret = secretInput ? secretInput.value.trim() : "";
+          await api("/api/keys", {
+            method: "POST",
+            body: JSON.stringify({ name, key: keySecret || undefined, enabled: enabledInput.checked }),
+          });
+          showToast(`API key '${name}' created`);
+        }
+        el.modalApiKey.classList.remove("active");
+        fetchApiKeys();
+        updateSnippet();
+      } catch (err) {
+        showToast(`Failed to save key: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Snippets Generator
+  function updateSnippet() {
+    if (!el.snippetCode) return;
+    const model = state.selectedSnippetModel || "gemini-3.8-flash-high";
+    const apiKey = (state.apiKeys && state.apiKeys.length > 0) ? state.apiKeys[0].key : "sk-proxy-demo";
+
+    if (state.activeSnippetLang === "python") {
+      el.snippetCode.textContent = `from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="${apiKey}"
+)
+
+response = client.chat.completions.create(
+    model="${model}",
+    messages=[{"role": "user", "content": "Hello LLMProxy!"}],
+    stream=True
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+print()`;
+    } else if (state.activeSnippetLang === "curl") {
+      el.snippetCode.textContent = `curl -X POST http://localhost:8000/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{
+    "model": "${model}",
+    "messages": [{"role": "user", "content": "Hello LLMProxy!"}],
+    "stream": true
+  }'`;
+    } else if (state.activeSnippetLang === "cursor") {
+      el.snippetCode.textContent = `// OpenCode / Cursor / Cline Settings
+{
+  "openai.baseURL": "http://localhost:8000/v1",
+  "openai.apiKey": "${apiKey}",
+  "model": "${model}"
+}`;
+    }
+  }
+
+  document.querySelectorAll(".snippet-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".snippet-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      state.activeSnippetLang = tab.dataset.lang;
+      updateSnippet();
+    });
+  });
+
+  if (el.copySnippetBtn) {
+    el.copySnippetBtn.addEventListener("click", () => {
+      if (el.snippetCode) {
+        navigator.clipboard.writeText(el.snippetCode.textContent);
+        showToast("Integration snippet copied to clipboard");
+      }
+    });
+  }
+
+  if (el.copyEndpointBtn) {
+    el.copyEndpointBtn.addEventListener("click", () => {
+      navigator.clipboard.writeText("http://localhost:8000/v1");
+      showToast("Base URL endpoint copied");
+    });
+  }
+
+  // =========================================================================
+  // TAB 2: PROVIDERS & PLUGINS
+  // =========================================================================
 
   async function fetchPlugins() {
     try {
       const data = await api("/api/plugins");
-      state.plugins = Array.isArray(data) ? data : data.plugins || [];
-      syncAccountProviderSelects();
+      state.plugins = data || [];
       renderProvidersGrid();
-      renderModelsTable();
-      syncEditorPluginSelect();
-      syncSnippetModels();
-      syncPlaygroundModels();
-      renderStats();
+      populateSnippetModels();
     } catch (err) {
       console.error("Failed to fetch plugins", err);
     }
@@ -235,192 +666,19 @@
   async function fetchAccounts() {
     try {
       const data = await api("/api/accounts");
-      state.accounts = Array.isArray(data) ? data : [];
-      renderAccountsTable();
-      renderAccountsStats();
-      renderProvidersGrid();
-    } catch (err) {
-      console.error("Failed to fetch accounts", err);
-    }
-  }
-
-  function syncAccountProviderSelects() {
-    if (el.accountProviderSelect) {
-      const current = el.accountProviderSelect.value;
-      el.accountProviderSelect.innerHTML = "";
-      state.plugins.forEach((p) => {
-        const opt = document.createElement("option");
-        opt.value = p.id;
-        opt.textContent = `${p.name} (${p.id})`;
-        el.accountProviderSelect.appendChild(opt);
-      });
-      if (current) el.accountProviderSelect.value = current;
-    }
-
-    if (el.accountsProviderFilter) {
-      const current = el.accountsProviderFilter.value;
-      el.accountsProviderFilter.innerHTML = '<option value="">All Providers</option>';
-      state.plugins.forEach((p) => {
-        const opt = document.createElement("option");
-        opt.value = p.id;
-        opt.textContent = p.name;
-        el.accountsProviderFilter.appendChild(opt);
-      });
-      if (current) el.accountsProviderFilter.value = current;
-    }
-  }
-
-  async function fetchTemplates() {
-    try {
-      const data = await api("/api/templates");
-      state.templates = Array.isArray(data) ? data : [];
-      syncTemplateSelects();
-    } catch (err) {
-      console.error("Failed to fetch templates", err);
-    }
-  }
-
-  async function fetchLogs() {
-    try {
-      const data = await api("/api/logs?limit=100");
-      state.logs = Array.isArray(data) ? data : data.logs || [];
-      renderLogsTable();
-    } catch (err) {
-      console.error("Failed to fetch logs", err);
-    }
-  }
-
-  // =========================================================================
-  // Overview Tab & Snippets
-  // =========================================================================
-
-  function renderStats() {
-    const s = state.stats;
-    if (el.statRequests) el.statRequests.textContent = s.total_requests ?? 0;
-    if (el.statSuccessRate) el.statSuccessRate.textContent = `${s.success_rate ?? 100}%`;
-    if (el.statActiveModels) el.statActiveModels.textContent = s.active_models_count ?? 0;
-    if (el.statActivePlugins) el.statActivePlugins.textContent = s.active_plugins_count ?? 0;
-    if (el.statAvgLatency) el.statAvgLatency.textContent = `${Math.round(s.avg_latency_ms ?? 0)} ms`;
-  }
-
-  function syncSnippetModels() {
-    if (!el.snippetModelSelect) return;
-    const currentVal = el.snippetModelSelect.value;
-    el.snippetModelSelect.innerHTML = "";
-
-    const allModels = [];
-    state.plugins.forEach((p) => {
-      if (p.enabled) {
-        p.models.forEach((m) => {
-          if (m.enabled) allModels.push(m.id);
-        });
+      state.accounts = data || [];
+      if (el.statTotalAccounts) el.statTotalAccounts.textContent = state.accounts.length;
+      if (el.statActiveAccounts) {
+        el.statActiveAccounts.textContent = state.accounts.filter((a) => a.enabled).length;
       }
-    });
-
-    if (allModels.length === 0) {
-      allModels.push("gpt-4o");
-    }
-
-    allModels.forEach((modelId) => {
-      const opt = document.createElement("option");
-      opt.value = modelId;
-      opt.textContent = modelId;
-      el.snippetModelSelect.appendChild(opt);
-    });
-
-    if (allModels.includes(currentVal)) {
-      el.snippetModelSelect.value = currentVal;
-    } else {
-      el.snippetModelSelect.value = allModels[0];
-    }
-    state.selectedSnippetModel = el.snippetModelSelect.value;
-    updateSnippetCode();
-  }
-
-  function updateSnippetCode() {
-    const model = state.selectedSnippetModel || "gpt-4o";
-    const lang = state.activeSnippetLang;
-    const baseUrl = `${window.location.origin}/v1`;
-
-    let code = "";
-    if (lang === "python") {
-      code = `from openai import OpenAI
-
-# Connect to local LLMProxy router
-client = OpenAI(
-    base_url="${baseUrl}",
-    api_key="llmproxy",  # Router routes credentials automatically
-)
-
-response = client.chat.completions.create(
-    model="${model}",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Explain quantum computing in one sentence."}
-    ],
-    temperature=0.7,
-)
-
-print(response.choices[0].message.content)`;
-    } else if (lang === "curl") {
-      code = `curl -X POST "${baseUrl}/chat/completions" \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer llmproxy" \\
-  -d '{
-    "model": "${model}",
-    "messages": [
-      {"role": "user", "content": "Hello from LLMProxy!"}
-    ],
-    "temperature": 0.7
-  }'`;
-    } else if (lang === "cursor") {
-      code = `// In Cursor or Cline AI Settings -> OpenAI-Compatible:
-{
-  "baseURL": "${baseUrl}",
-  "apiKey": "llmproxy",
-  "model": "${model}"
-}`;
-    }
-
-    if (el.snippetCode) el.snippetCode.textContent = code;
-  }
-
-  document.querySelectorAll(".snippet-tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".snippet-tab").forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
-      state.activeSnippetLang = tab.dataset.lang;
-      updateSnippetCode();
-    });
-  });
-
-  if (el.snippetModelSelect) {
-    el.snippetModelSelect.addEventListener("change", (e) => {
-      state.selectedSnippetModel = e.target.value;
-      updateSnippetCode();
-    });
-  }
-
-  if (el.copySnippetBtn) {
-    el.copySnippetBtn.addEventListener("click", () => {
-      if (el.snippetCode) {
-        navigator.clipboard.writeText(el.snippetCode.textContent);
-        showToast("Code snippet copied to clipboard");
+      if (el.statCooldownAccounts) {
+        const now = Date.now() / 1000;
+        el.statCooldownAccounts.textContent = state.accounts.filter(
+          (a) => a.rate_limited_until && a.rate_limited_until > now
+        ).length;
       }
-    });
+    } catch (_) {}
   }
-
-  if (el.copyEndpointBtn) {
-    el.copyEndpointBtn.addEventListener("click", () => {
-      const url = `${window.location.origin}/v1`;
-      navigator.clipboard.writeText(url);
-      showToast(`Copied endpoint: ${url}`);
-    });
-  }
-
-  // =========================================================================
-  // Providers & Plugins Tab
-  // =========================================================================
 
   function renderProvidersGrid() {
     if (!el.providersGrid) return;
@@ -435,24 +693,17 @@ print(response.choices[0].message.content)`;
         </div>
       `;
       const quickBtn = document.getElementById("btn-quick-starter");
-      if (quickBtn) {
-        quickBtn.addEventListener("click", () => openNewProviderModal());
-      }
+      if (quickBtn) quickBtn.addEventListener("click", () => openNewProviderModal());
       return;
     }
 
     state.plugins.forEach((p) => {
       const card = document.createElement("div");
-      card.className = "provider-card";
+      card.className = `provider-card ${p.pinned ? 'is-pinned' : ''}`;
 
       const modelsCount = p.models ? p.models.length : 0;
-      const modelBadges = (p.models || [])
-        .slice(0, 3)
-        .map((m) => `<span class="badge">${m.id}</span>`)
-        .join(" ");
-
       const connectedAccounts = (state.accounts || []).filter((a) => a.provider_id === p.id);
-      const accountsBadge = `<span class="badge ${connectedAccounts.length > 0 ? 'badge-success' : 'badge-muted'} btn-jump-accounts" data-id="${p.id}" style="cursor: pointer;" title="View in Accounts tab">${connectedAccounts.length} accounts connected</span>`;
+      const isPinned = !!p.pinned;
 
       card.innerHTML = `
         <div>
@@ -464,31 +715,45 @@ print(response.choices[0].message.content)`;
               </h3>
               <div class="provider-id">${escapeHtml(p.id)} • ${escapeHtml(p.filename || p.id + ".py")}</div>
             </div>
-            <label class="switch" title="Toggle plugin enabled status">
-              <input type="checkbox" class="provider-enable-toggle" data-id="${p.id}" ${p.enabled ? "checked" : ""}>
-              <span class="slider"></span>
-            </label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="btn-pin ${isPinned ? 'pinned' : ''} btn-toggle-pin" data-id="${p.id}" title="${isPinned ? 'Unpin provider' : 'Pin provider to top'}">
+                📌
+              </button>
+              <label class="switch" title="Toggle plugin enabled status">
+                <input type="checkbox" class="provider-enable-toggle" data-id="${p.id}" ${p.enabled ? "checked" : ""}>
+                <span class="slider"></span>
+              </label>
+            </div>
           </div>
           <p class="provider-desc">${escapeHtml(p.description || "Provider plugin for upstream model routing.")}</p>
           <div class="provider-models-badge-group">
-            ${accountsBadge}
-            ${modelBadges}
-            ${modelsCount > 3 ? `<span class="badge">+${modelsCount - 3} more</span>` : ""}
+            <span class="badge ${connectedAccounts.length > 0 ? 'badge-active' : 'badge-muted'}">${connectedAccounts.length} accounts connected</span>
+            <span class="badge">${modelsCount} models</span>
           </div>
         </div>
         <div class="provider-footer">
-          <span style="font-size: 12px; color: var(--ink-muted); font-family: var(--font-mono);">${modelsCount} models</span>
+          <span style="font-size: 12px; color: var(--ink-muted); font-family: var(--font-mono);">${escapeHtml(p.id)}</span>
           <div class="provider-actions">
-            <button class="btn btn-secondary btn-sm btn-provider-account" data-id="${p.id}">+ Account</button>
-            <button class="btn btn-secondary btn-sm btn-vars" data-id="${p.id}">Variables</button>
-            <button class="btn btn-secondary btn-sm btn-edit-code" data-id="${p.id}">Edit Code</button>
-            <button class="btn btn-secondary btn-sm btn-reload" data-id="${p.id}" title="Hot reload plugin">⟳</button>
-            <button class="btn btn-danger btn-sm btn-delete-plugin" data-id="${p.id}" title="Delete plugin">✕</button>
+            <button class="btn btn-primary btn-sm btn-provider-edit" data-id="${p.id}">Edit</button>
+            <button class="btn btn-secondary btn-sm btn-provider-refresh" data-id="${p.id}" title="Hot reload plugin">Refresh</button>
+            <button class="btn btn-danger btn-sm btn-provider-delete" data-id="${p.id}" title="Delete plugin">Delete</button>
           </div>
         </div>
       `;
 
-      // Event Listeners for Card
+      // Event: Pin Toggle
+      card.querySelector(".btn-toggle-pin").addEventListener("click", async () => {
+        try {
+          const res = await api(`/api/plugins/${p.id}/pin`, { method: "POST" });
+          p.pinned = res.pinned;
+          showToast(`Plugin '${p.name}' ${p.pinned ? "pinned to top" : "unpinned"}`);
+          fetchPlugins();
+        } catch (err) {
+          showToast(`Pin failed: ${err.message}`, "error");
+        }
+      });
+
+      // Event: Enable toggle
       const toggle = card.querySelector(".provider-enable-toggle");
       toggle.addEventListener("change", async (e) => {
         try {
@@ -505,20 +770,13 @@ print(response.choices[0].message.content)`;
         }
       });
 
-      card.querySelector(".btn-jump-accounts").addEventListener("click", () => {
-        state.accountProviderFilter = p.id;
-        if (el.accountsProviderFilter) el.accountsProviderFilter.value = p.id;
-        switchTab("accounts");
+      // Action 1: Edit -> Opens Fullscreen Configuration Window
+      card.querySelector(".btn-provider-edit").addEventListener("click", () => {
+        openFullscreenProviderModal(p.id);
       });
-      card.querySelector(".btn-provider-account").addEventListener("click", () => {
-        openAccountModal(null, p.id);
-      });
-      card.querySelector(".btn-vars").addEventListener("click", () => openVariablesModal(p.id));
-      card.querySelector(".btn-edit-code").addEventListener("click", () => {
-        switchTab("editor");
-        selectEditorPlugin(p.id);
-      });
-      card.querySelector(".btn-reload").addEventListener("click", async () => {
+
+      // Action 2: Refresh -> Hot reloads plugin
+      card.querySelector(".btn-provider-refresh").addEventListener("click", async () => {
         try {
           await api(`/api/plugins/${p.id}/reload`, { method: "POST" });
           showToast(`Plugin '${p.name}' hot-reloaded successfully`);
@@ -527,7 +785,9 @@ print(response.choices[0].message.content)`;
           showToast(`Reload failed: ${err.message}`, "error");
         }
       });
-      card.querySelector(".btn-delete-plugin").addEventListener("click", async () => {
+
+      // Action 3: Delete -> Removes plugin
+      card.querySelector(".btn-provider-delete").addEventListener("click", async () => {
         if (confirm(`Are you sure you want to delete plugin '${p.name}' and remove its Python file?`)) {
           try {
             await api(`/api/plugins/${p.id}`, { method: "DELETE" });
@@ -543,1010 +803,803 @@ print(response.choices[0].message.content)`;
     });
   }
 
+  function populateSnippetModels() {
+    if (!el.snippetModelSelect) return;
+    el.snippetModelSelect.innerHTML = "";
+
+    const allModels = [];
+    state.plugins.forEach((p) => {
+      (p.models || []).forEach((m) => {
+        if (m.enabled) allModels.push(m.id);
+      });
+    });
+
+    state.rules.forEach((r) => {
+      if (r.enabled && !allModels.includes(r.model_id)) {
+        allModels.unshift(r.model_id);
+      }
+    });
+
+    if (allModels.length === 0) allModels.push("gemini-3.8-flash-high");
+
+    allModels.forEach((mid) => {
+      const opt = document.createElement("option");
+      opt.value = mid;
+      opt.textContent = mid;
+      if (mid === state.selectedSnippetModel) opt.selected = true;
+      el.snippetModelSelect.appendChild(opt);
+    });
+
+    enhanceSelect(el.snippetModelSelect);
+    updateSnippet();
+
+    el.snippetModelSelect.addEventListener("change", (e) => {
+      state.selectedSnippetModel = e.target.value;
+      updateSnippet();
+    });
+  }
+
   // =========================================================================
-  // Accounts & Multi-Account Load Balancing Tab
+  // FULLSCREEN PROVIDER CONFIGURATION WINDOW
   // =========================================================================
 
-  function renderAccountsStats() {
-    const total = state.accounts.length;
-    const now = Date.now() / 1000;
-    const cooldownCount = state.accounts.filter(
-      (a) => a.rate_limited_until && a.rate_limited_until > now
-    ).length;
-    const activeCount = state.accounts.filter(
-      (a) => a.enabled && (!a.rate_limited_until || a.rate_limited_until <= now)
-    ).length;
+  async function openFullscreenProviderModal(pluginId) {
+    state.currentFullscreenPluginId = pluginId;
+    const plugin = state.plugins.find((p) => p.id === pluginId);
+    if (!plugin) return;
 
-    if (el.statTotalAccounts) el.statTotalAccounts.textContent = total;
-    if (el.statActiveAccounts) el.statActiveAccounts.textContent = activeCount;
-    if (el.statCooldownAccounts) el.statCooldownAccounts.textContent = cooldownCount;
+    const titleEl = document.getElementById("fs-provider-title");
+    const idBadge = document.getElementById("fs-provider-id-badge");
+    const fnBadge = document.getElementById("fs-provider-filename-badge");
+    const pinBtn = document.getElementById("fs-provider-pin-btn");
+    const enableToggle = document.getElementById("fs-provider-enabled-toggle");
 
-    if (el.statRoutingStrategy) {
-      const agPlugin = state.plugins.find((p) => p.id === "antigravity");
-      const stratVar = agPlugin?.variables?.find((v) => v.name === "load_balancing_strategy");
-      const stratVal = stratVar?.value || stratVar?.default || "round_robin";
-      el.statRoutingStrategy.textContent = String(stratVal).replace("_", " ");
+    if (titleEl) titleEl.textContent = `Configure ${plugin.name}`;
+    if (idBadge) idBadge.textContent = plugin.id;
+    if (fnBadge) fnBadge.textContent = plugin.filename || `${plugin.id}.py`;
+
+    if (pinBtn) {
+      pinBtn.classList.toggle("pinned", !!plugin.pinned);
+      pinBtn.onclick = async () => {
+        try {
+          const res = await api(`/api/plugins/${plugin.id}/pin`, { method: "POST" });
+          plugin.pinned = res.pinned;
+          pinBtn.classList.toggle("pinned", !!plugin.pinned);
+          showToast(`Plugin '${plugin.name}' ${plugin.pinned ? "pinned" : "unpinned"}`);
+          fetchPlugins();
+        } catch (err) {
+          showToast(`Pin failed: ${err.message}`, "error");
+        }
+      };
+    }
+
+    if (enableToggle) {
+      enableToggle.checked = !!plugin.enabled;
+      enableToggle.onchange = async (e) => {
+        try {
+          await api(`/api/plugins/${plugin.id}/config`, {
+            method: "PUT",
+            body: JSON.stringify({ enabled: e.target.checked }),
+          });
+          plugin.enabled = e.target.checked;
+          showToast(`Plugin '${plugin.name}' status updated`);
+          fetchPlugins();
+        } catch (err) {
+          e.target.checked = !e.target.checked;
+          showToast(`Update failed: ${err.message}`, "error");
+        }
+      };
+    }
+
+    // Load code
+    await loadFullscreenPluginCode(pluginId);
+    // Render sub-tabs content
+    renderFullscreenAccounts(pluginId);
+    renderFullscreenStrategy(plugin);
+    renderFullscreenVariables(plugin);
+    renderFullscreenModels(plugin);
+
+    switchFullscreenTab("code");
+    el.modalProviderFullscreen.classList.add("active");
+  }
+
+  function switchFullscreenTab(tabKey) {
+    state.currentFullscreenTab = tabKey;
+    document.querySelectorAll(".modal-fullscreen-tab").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.fsTab === tabKey);
+    });
+    document.querySelectorAll(".modal-fullscreen-panel").forEach((panel) => {
+      panel.classList.toggle("active", panel.id === `fs-panel-${tabKey}`);
+    });
+  }
+
+  document.querySelectorAll(".modal-fullscreen-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchFullscreenTab(btn.dataset.fsTab));
+  });
+
+  async function loadFullscreenPluginCode(pluginId) {
+    const textarea = document.getElementById("fs-editor-code");
+    const lineNumbers = document.getElementById("fs-editor-line-numbers");
+    const feedback = document.getElementById("fs-editor-feedback");
+    if (feedback) feedback.className = "feedback-banner";
+
+    try {
+      const data = await api(`/api/plugins/${pluginId}/code`);
+      if (textarea) textarea.value = data.code || "";
+      updateFsLineNumbers();
+    } catch (err) {
+      if (feedback) {
+        feedback.className = "feedback-banner error";
+        feedback.textContent = `Failed to load source code: ${err.message}`;
+      }
     }
   }
 
-  function renderAccountsTable() {
-    if (!el.accountsTableBody) return;
-    el.accountsTableBody.innerHTML = "";
+  function updateFsLineNumbers() {
+    const textarea = document.getElementById("fs-editor-code");
+    const lineNumbers = document.getElementById("fs-editor-line-numbers");
+    if (!textarea || !lineNumbers) return;
+    const lines = (textarea.value || "").split("\n").length;
+    lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
+  }
 
-    const filterProvider = state.accountProviderFilter;
-    const filtered = filterProvider
-      ? state.accounts.filter((a) => a.provider_id === filterProvider)
-      : state.accounts;
+  const fsEditorTextarea = document.getElementById("fs-editor-code");
+  if (fsEditorTextarea) {
+    fsEditorTextarea.addEventListener("input", updateFsLineNumbers);
+    fsEditorTextarea.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const start = fsEditorTextarea.selectionStart;
+        const end = fsEditorTextarea.selectionEnd;
+        fsEditorTextarea.value = fsEditorTextarea.value.substring(0, start) + "    " + fsEditorTextarea.value.substring(end);
+        fsEditorTextarea.selectionStart = fsEditorTextarea.selectionEnd = start + 4;
+        updateFsLineNumbers();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        saveFullscreenPluginCode();
+      }
+    });
+  }
 
-    if (filtered.length === 0) {
-      el.accountsTableBody.innerHTML = `
+  async function saveFullscreenPluginCode() {
+    const pluginId = state.currentFullscreenPluginId;
+    if (!pluginId) return;
+    const textarea = document.getElementById("fs-editor-code");
+    const feedback = document.getElementById("fs-editor-feedback");
+    if (!textarea) return;
+
+    try {
+      if (feedback) {
+        feedback.className = "feedback-banner info";
+        feedback.textContent = "Validating syntax and reloading plugin...";
+      }
+      await api(`/api/plugins/${pluginId}/code`, {
+        method: "PUT",
+        body: JSON.stringify({ code: textarea.value }),
+      });
+      if (feedback) {
+        feedback.className = "feedback-banner success";
+        feedback.textContent = "Code updated and hot-reloaded successfully!";
+      }
+      showToast("Plugin code hot-reloaded successfully");
+      fetchPlugins();
+    } catch (err) {
+      if (feedback) {
+        feedback.className = "feedback-banner error";
+        feedback.textContent = `Save failed: ${err.message}`;
+      }
+      showToast(`Save failed: ${err.message}`, "error");
+    }
+  }
+
+  const fsEditorSaveBtn = document.getElementById("fs-editor-save-btn");
+  if (fsEditorSaveBtn) {
+    fsEditorSaveBtn.addEventListener("click", saveFullscreenPluginCode);
+  }
+
+  const fsEditorSwapBtn = document.getElementById("fs-editor-swap-btn");
+  const fsEditorFileInput = document.getElementById("fs-editor-file-input");
+  if (fsEditorSwapBtn && fsEditorFileInput) {
+    fsEditorSwapBtn.addEventListener("click", () => fsEditorFileInput.click());
+    fsEditorFileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        if (fsEditorTextarea) {
+          fsEditorTextarea.value = evt.target.result;
+          updateFsLineNumbers();
+          showToast(`Loaded ${file.name}. Click Save & Hot-Reload to apply.`);
+        }
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  // Fullscreen: Accounts
+  function renderFullscreenAccounts(pluginId) {
+    const tbody = document.getElementById("fs-accounts-table-body");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+
+    const accounts = (state.accounts || []).filter((a) => a.provider_id === pluginId);
+    if (accounts.length === 0) {
+      tbody.innerHTML = `
         <tr>
-          <td colspan="8" style="text-align: center; padding: 48px 16px; color: var(--ink-secondary);">
-            <div style="font-size: 14px; margin-bottom: 8px;">No Connected Accounts ${filterProvider ? `for ${filterProvider}` : ''}</div>
-            <p style="font-size: 12px; color: var(--ink-muted); margin-bottom: 16px;">Connect accounts to enable automated load balancing and priority failovers.</p>
-            <button class="btn btn-primary btn-sm" id="btn-empty-connect">+ Connect Account</button>
+          <td colspan="8" style="text-align: center; color: var(--ink-muted); padding: 24px;">
+            No accounts connected for this provider. Add keys or tokens to enable load balancing.
           </td>
         </tr>
       `;
-      const emptyBtn = document.getElementById("btn-empty-connect");
-      if (emptyBtn) emptyBtn.addEventListener("click", () => openAccountModal(null, filterProvider));
       return;
     }
 
-    const now = Date.now() / 1000;
+    accounts.forEach((acc) => {
+      const tr = document.createElement("tr");
+      const maskedKey = acc.api_key && acc.api_key.length > 12
+        ? `${acc.api_key.slice(0, 6)}...${acc.api_key.slice(-4)}`
+        : (acc.api_key || "OAuth / None");
 
-    filtered.forEach((acc) => {
-      const plugin = state.plugins.find((p) => p.id === acc.provider_id);
-      const providerLabel = plugin ? plugin.name : acc.provider_id;
-      const isCooldown = Boolean(acc.rate_limited_until && acc.rate_limited_until > now);
-      const remSeconds = isCooldown ? Math.ceil(acc.rate_limited_until - now) : 0;
-      const isGoogleAccount = acc.provider_id === "antigravity" && Boolean(acc.extra_config?.refresh_token || acc.extra_config?.auth_type);
+      const inCooldown = acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000;
+      const statusBadge = inCooldown
+        ? `<span class="badge" style="color: var(--accent-red); border-color: var(--accent-red-border);">Cooldown (${Math.round(acc.rate_limited_until - Date.now() / 1000)}s)</span>`
+        : acc.enabled
+          ? `<span class="badge badge-active">Active</span>`
+          : `<span class="badge badge-muted">Disabled</span>`;
 
-      let statusBadge = "";
-      if (!acc.enabled) {
-        statusBadge = `<span class="badge badge-muted">Disabled</span>`;
-      } else if (isCooldown) {
-        statusBadge = `<span class="badge badge-warning" data-cooldown-until="${acc.rate_limited_until}">⏳ Cooldown (${remSeconds}s)</span>`;
-      } else {
-        statusBadge = `<span class="badge badge-success"><span class="status-dot"></span> Active</span>`;
-      }
-
-      const maskedKey = acc.api_key
-        ? `${acc.api_key.slice(0, 4)}••••••••${acc.api_key.slice(-4)}`
-        : `<span style="color: var(--ink-muted);">(No Key Required)</span>`;
-
-      const lastUsed = acc.last_used_at
-        ? new Date(acc.last_used_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" } )
-        : `<span style="color: var(--ink-muted);">Never</span>`;
-
-      const googleBadge = isGoogleAccount
-        ? `<span class="badge" style="background: rgba(66, 133, 244, 0.1); border-color: rgba(66, 133, 244, 0.3); color: #60a5fa; font-size: 10px; margin-left: 4px;">Google 1:1</span>`
-        : "";
-
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>
-          <span class="badge" style="font-weight: 600;">${escapeHtml(providerLabel)}</span>
-          ${googleBadge}
-        </td>
-        <td>
-          <div style="font-weight: 500; color: var(--ink-primary);">${escapeHtml(acc.name)}</div>
-          <div class="mono-cell" style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(acc.id)}</div>
-        </td>
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(acc.name)}</strong></td>
+        <td><code style="font-family: var(--font-mono); font-size: 11.5px;">${escapeHtml(maskedKey)}</code></td>
+        <td>${acc.priority || 1}</td>
+        <td>${acc.weight || 1}</td>
         <td>${statusBadge}</td>
+        <td>${acc.success_count || 0} / ${acc.error_count || 0}</td>
+        <td style="font-size: 11.5px; color: var(--ink-muted);">${acc.last_used_at ? new Date(acc.last_used_at * 1000).toLocaleTimeString() : 'Never'}</td>
         <td>
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <span class="mono-cell" id="key-text-${acc.id}">${maskedKey}</span>
-            ${acc.api_key ? `<button class="btn btn-secondary btn-sm btn-show-key" data-id="${acc.id}" style="padding: 2px 6px; font-size: 10px;">Reveal</button>` : ''}
-          </div>
-        </td>
-        <td>
-          <span class="mono-cell">Pri: ${acc.priority || 1} • Wt: ${acc.weight || 1}</span>
-        </td>
-        <td>
-          <span class="mono-cell" style="color: #34d399;">✓ ${acc.success_count || 0}</span>
-          <span class="mono-cell" style="color: #f43f5e; margin-left: 6px;">✕ ${acc.error_count || 0}</span>
-        </td>
-        <td>${lastUsed}</td>
-        <td>
-          <div style="display: flex; gap: 6px; align-items: center;">
-            ${isCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cooldown" data-id="${acc.id}" title="Reset cooldown">Reset</button>` : ''}
-            <button class="btn btn-secondary btn-sm btn-edit-account" data-id="${acc.id}">Edit</button>
-            <button class="btn btn-secondary btn-sm btn-toggle-account" data-id="${acc.id}">${acc.enabled ? "Disable" : "Enable"}</button>
-            <button class="btn btn-danger btn-sm btn-delete-account" data-id="${acc.id}" title="Delete account">✕</button>
+          <div style="display: flex; gap: 6px;">
+            ${inCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cd" data-id="${acc.id}">Reset</button>` : ''}
+            <button class="btn btn-secondary btn-sm btn-edit-acc" data-id="${acc.id}">Edit</button>
+            <button class="btn btn-danger btn-sm btn-del-acc" data-id="${acc.id}">Delete</button>
           </div>
         </td>
       `;
 
-      // Event handlers
-      const revealBtn = row.querySelector(".btn-show-key");
-      if (revealBtn) {
-        revealBtn.addEventListener("click", () => {
-          const keySpan = document.getElementById(`key-text-${acc.id}`);
-          if (revealBtn.textContent === "Reveal") {
-            keySpan.textContent = acc.api_key;
-            revealBtn.textContent = "Hide";
-          } else {
-            keySpan.innerHTML = maskedKey;
-            revealBtn.textContent = "Reveal";
+      if (inCooldown) {
+        tr.querySelector(".btn-reset-cd").addEventListener("click", async () => {
+          try {
+            await api(`/api/accounts/${acc.id}/reset-cooldown`, { method: "POST" });
+            showToast("Cooldown cleared");
+            await fetchAccounts();
+            renderFullscreenAccounts(pluginId);
+          } catch (err) {
+            showToast(err.message, "error");
           }
         });
       }
 
-      const resetBtn = row.querySelector(".btn-reset-cooldown");
-      if (resetBtn) {
-        resetBtn.addEventListener("click", () => resetAccountCooldown(acc.id));
-      }
-
-      row.querySelector(".btn-edit-account").addEventListener("click", () => openAccountModal(acc));
-      row.querySelector(".btn-toggle-account").addEventListener("click", async () => {
-        try {
-          await api(`/api/accounts/${acc.id}`, {
-            method: "PUT",
-            body: JSON.stringify({ enabled: !acc.enabled }),
-          });
-          acc.enabled = !acc.enabled;
-          showToast(`Account '${acc.name}' ${acc.enabled ? "enabled" : "disabled"}`);
-          fetchAccounts();
-        } catch (err) {
-          showToast(`Failed: ${err.message}`, "error");
+      tr.querySelector(".btn-edit-acc").addEventListener("click", () => openAccountModal(acc, pluginId));
+      tr.querySelector(".btn-del-acc").addEventListener("click", async () => {
+        if (confirm(`Delete account '${acc.name}'?`)) {
+          try {
+            await api(`/api/accounts/${acc.id}`, { method: "DELETE" });
+            showToast("Account deleted");
+            await fetchAccounts();
+            renderFullscreenAccounts(pluginId);
+          } catch (err) {
+            showToast(err.message, "error");
+          }
         }
       });
 
-      row.querySelector(".btn-delete-account").addEventListener("click", async () => {
-        if (confirm(`Delete account '${acc.name}' from ${providerLabel}?`)) {
+      tbody.appendChild(tr);
+    });
+  }
+
+  const fsBtnAddAccount = document.getElementById("fs-btn-add-account");
+  if (fsBtnAddAccount) {
+    fsBtnAddAccount.addEventListener("click", () => {
+      openAccountModal(null, state.currentFullscreenPluginId);
+    });
+  }
+
+  // Fullscreen: Strategy
+  function renderFullscreenStrategy(plugin) {
+    const select = document.getElementById("fs-strategy-select");
+    const cdInput = document.getElementById("fs-cooldown-input");
+    const retriesInput = document.getElementById("fs-retries-input");
+
+    const vars = {};
+    (plugin.variables || []).forEach((v) => { vars[v.name] = v.value !== undefined ? v.value : v.default; });
+
+    if (select) {
+      select.value = vars.load_balancing_strategy || "round_robin";
+      enhanceSelect(select);
+    }
+    if (cdInput) cdInput.value = vars.account_switch_cooldown || 60;
+    if (retriesInput) retriesInput.value = vars.max_retries || 2;
+  }
+
+  const fsBtnSaveStrategy = document.getElementById("fs-btn-save-strategy");
+  if (fsBtnSaveStrategy) {
+    fsBtnSaveStrategy.addEventListener("click", async () => {
+      const pluginId = state.currentFullscreenPluginId;
+      if (!pluginId) return;
+      const strategy = document.getElementById("fs-strategy-select").value;
+      const cd = parseFloat(document.getElementById("fs-cooldown-input").value) || 60;
+      const retries = parseInt(document.getElementById("fs-retries-input").value, 10) || 2;
+
+      try {
+        await api(`/api/plugins/${pluginId}/config`, {
+          method: "PUT",
+          body: JSON.stringify({
+            variables: {
+              load_balancing_strategy: strategy,
+              account_switch_cooldown: cd,
+              max_retries: retries,
+            },
+          }),
+        });
+        showToast("Load balancing strategy saved");
+        fetchPlugins();
+      } catch (err) {
+        showToast(`Save failed: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Fullscreen: Variables
+  function renderFullscreenVariables(plugin) {
+    const container = document.getElementById("fs-variables-container");
+    if (!container) return;
+    container.innerHTML = "";
+
+    const declaredVars = plugin.variables || [];
+    if (declaredVars.length === 0) {
+      container.innerHTML = `<div style="color: var(--ink-muted); font-size: 13px;">This plugin does not declare custom variables.</div>`;
+      return;
+    }
+
+    declaredVars.forEach((v) => {
+      const grp = document.createElement("div");
+      grp.className = "form-group";
+
+      const val = (v.value !== undefined && v.value !== null) ? v.value : (v.default || "");
+      if (v.type === "boolean") {
+        grp.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <label class="form-label">${escapeHtml(v.label || v.name)}</label>
+              ${v.description ? `<span class="form-hint">${escapeHtml(v.description)}</span>` : ""}
+            </div>
+            <label class="switch">
+              <input type="checkbox" class="fs-var-input" data-var="${escapeHtml(v.name)}" ${val ? "checked" : ""}>
+              <span class="slider"></span>
+            </label>
+          </div>
+        `;
+      } else {
+        grp.innerHTML = `
+          <label class="form-label">${escapeHtml(v.label || v.name)} ${v.required ? '<span style="color: var(--accent-red);">*</span>' : ''}</label>
+          <input type="${v.type === 'secret' ? 'password' : 'text'}" class="form-input fs-var-input" data-var="${escapeHtml(v.name)}" value="${escapeHtml(val)}" placeholder="${escapeHtml(v.default || '')}">
+          ${v.description ? `<span class="form-hint">${escapeHtml(v.description)}</span>` : ""}
+        `;
+      }
+      container.appendChild(grp);
+    });
+  }
+
+  const fsBtnSaveVariables = document.getElementById("fs-btn-save-variables");
+  if (fsBtnSaveVariables) {
+    fsBtnSaveVariables.addEventListener("click", async () => {
+      const pluginId = state.currentFullscreenPluginId;
+      if (!pluginId) return;
+
+      const vars = {};
+      document.querySelectorAll(".fs-var-input").forEach((inp) => {
+        const vName = inp.dataset.var;
+        vars[vName] = inp.type === "checkbox" ? inp.checked : inp.value;
+      });
+
+      try {
+        await api(`/api/plugins/${pluginId}/config`, {
+          method: "PUT",
+          body: JSON.stringify({ variables: vars }),
+        });
+        showToast("Variables updated successfully");
+        fetchPlugins();
+      } catch (err) {
+        showToast(`Failed to update variables: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Fullscreen: Models
+  function renderFullscreenModels(plugin) {
+    const tbody = document.getElementById("fs-models-table-body");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+
+    const models = plugin.models || [];
+    if (models.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--ink-muted); padding: 20px;">No models configured.</td></tr>`;
+      return;
+    }
+
+    models.forEach((m) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(m.id)}</strong></td>
+        <td>${escapeHtml(m.name || m.id)}</td>
+        <td><code style="font-family: var(--font-mono); font-size: 11.5px;">${escapeHtml(m.upstream_model || m.id)}</code></td>
+        <td style="font-family: var(--font-mono);">${m.context_window || 8192} / ${m.max_tokens || 4096}</td>
+        <td>
+          <label class="switch">
+            <input type="checkbox" class="fs-model-toggle" data-mid="${m.id}" ${m.enabled ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+        </td>
+        <td>
+          <button class="btn btn-danger btn-sm btn-fs-del-model" data-mid="${m.id}">Delete</button>
+        </td>
+      `;
+
+      tr.querySelector(".fs-model-toggle").addEventListener("change", async (e) => {
+        try {
+          await api(`/api/plugins/${plugin.id}/models/${m.id}`, {
+            method: "PUT",
+            body: JSON.stringify({ enabled: e.target.checked }),
+          });
+          m.enabled = e.target.checked;
+          showToast(`Model '${m.id}' ${m.enabled ? "enabled" : "disabled"}`);
+          fetchPlugins();
+        } catch (err) {
+          e.target.checked = !e.target.checked;
+          showToast(`Failed to update: ${err.message}`, "error");
+        }
+      });
+
+      tr.querySelector(".btn-fs-del-model").addEventListener("click", async () => {
+        if (confirm(`Remove model '${m.id}' from plugin?`)) {
           try {
-            await api(`/api/accounts/${acc.id}`, { method: "DELETE" });
-            showToast(`Account '${acc.name}' deleted`);
-            fetchAccounts();
+            await api(`/api/plugins/${plugin.id}/models/${m.id}`, { method: "DELETE" });
+            showToast(`Model '${m.id}' removed`);
+            await fetchPlugins();
+            const updatedP = state.plugins.find((p) => p.id === plugin.id);
+            if (updatedP) renderFullscreenModels(updatedP);
           } catch (err) {
             showToast(`Delete failed: ${err.message}`, "error");
           }
         }
       });
 
-      el.accountsTableBody.appendChild(row);
+      tbody.appendChild(tr);
     });
   }
 
-  function openAccountModal(account = null, defaultProviderId = null) {
-    syncAccountProviderSelects();
-    if (account) {
-      if (el.modalAccountTitle) el.modalAccountTitle.textContent = "Edit Provider Account";
-      if (el.accountFormId) el.accountFormId.value = account.id;
-      if (el.accountProviderSelect) el.accountProviderSelect.value = account.provider_id;
-      if (el.accountName) el.accountName.value = account.name;
-      if (el.accountApiKey) el.accountApiKey.value = account.api_key || "";
-      if (el.accountBaseUrl) el.accountBaseUrl.value = account.base_url || "";
-      if (el.accountPriority) el.accountPriority.value = account.priority || 1;
-      if (el.accountWeight) el.accountWeight.value = account.weight || 1;
-      if (el.accountEnabledToggle) el.accountEnabledToggle.checked = account.enabled !== false;
-    } else {
-      if (el.modalAccountTitle) el.modalAccountTitle.textContent = "Connect Provider Account";
-      if (el.accountFormId) el.accountFormId.value = "";
-      if (el.accountProviderSelect) {
-        if (defaultProviderId) {
-          el.accountProviderSelect.value = defaultProviderId;
-        } else if (state.plugins.length > 0) {
-          el.accountProviderSelect.value = state.plugins[0].id;
-        }
-      }
-      if (el.accountName) el.accountName.value = "";
-      if (el.accountApiKey) el.accountApiKey.value = "";
-      if (el.accountBaseUrl) el.accountBaseUrl.value = "";
-      if (el.accountPriority) el.accountPriority.value = 1;
-      if (el.accountWeight) el.accountWeight.value = 1;
-      if (el.accountEnabledToggle) el.accountEnabledToggle.checked = true;
-    }
-
-    if (el.btnToggleAccountKey && el.accountApiKey) {
-      el.accountApiKey.type = "password";
-      el.btnToggleAccountKey.textContent = "Show";
-    }
-
-    toggleAntigravitySection();
-    if (el.modalAccount) el.modalAccount.classList.add("active");
-  }
-
-  function toggleAntigravitySection() {
-    const section = document.getElementById("antigravity-oauth-section");
-    if (!section) return;
-    const isAg = el.accountProviderSelect && el.accountProviderSelect.value === "antigravity";
-    section.style.display = isAg ? "block" : "none";
-  }
-
-  if (el.accountProviderSelect) {
-    el.accountProviderSelect.addEventListener("change", toggleAntigravitySection);
-  }
-
-  async function saveAccount() {
-    const id = el.accountFormId ? el.accountFormId.value.trim() : "";
-    const providerId = el.accountProviderSelect ? el.accountProviderSelect.value : "";
-    const name = el.accountName ? el.accountName.value.trim() : "";
-    const apiKey = el.accountApiKey ? el.accountApiKey.value.trim() : "";
-    const baseUrl = el.accountBaseUrl ? el.accountBaseUrl.value.trim() : "";
-    const priority = el.accountPriority ? parseInt(el.accountPriority.value, 10) || 1 : 1;
-    const weight = el.accountWeight ? parseInt(el.accountWeight.value, 10) || 1 : 1;
-    const enabled = el.accountEnabledToggle ? el.accountEnabledToggle.checked : true;
-
-    if (!name) {
-      showToast("Account name / label is required", "error");
-      return;
-    }
-    if (!providerId) {
-      showToast("Please select a provider", "error");
-      return;
-    }
-
-    try {
-      if (id) {
-        await api(`/api/accounts/${id}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            name,
-            api_key: apiKey,
-            base_url: baseUrl || null,
-            priority,
-            weight,
-            enabled,
-          }),
-        });
-        showToast(`Account '${name}' updated`);
-      } else {
-        await api("/api/accounts", {
-          method: "POST",
-          body: JSON.stringify({
-            provider_id: providerId,
-            name,
-            api_key: apiKey,
-            base_url: baseUrl || null,
-            priority,
-            weight,
-            enabled,
-          }),
-        });
-        showToast(`Account '${name}' connected successfully`);
-      }
-
-      if (el.modalAccount) el.modalAccount.classList.remove("active");
-      fetchAccounts();
-    } catch (err) {
-      showToast(`Save failed: ${err.message}`, "error");
-    }
-  }
-
-  async function resetAccountCooldown(accountId) {
-    try {
-      await api(`/api/accounts/${accountId}/reset-cooldown`, { method: "POST" });
-      showToast("Cooldown reset. Account is active.");
-      fetchAccounts();
-    } catch (err) {
-      showToast(`Failed to reset cooldown: ${err.message}`, "error");
-    }
-  }
-
-  // =========================================================================
-  // Google Antigravity OAuth & Quota Handlers
-  // =========================================================================
-
-  let currentOAuthPollInterval = null;
-
-  const btnStartGoogleOAuth = document.getElementById("btn-start-google-oauth");
-  const btnImportLocalGoogle = document.getElementById("btn-import-local-google");
-  const btnOpenGoogleAuth = document.getElementById("btn-open-google-auth");
-  const btnCopyGoogleUrl = document.getElementById("btn-copy-google-url");
-  const btnSubmitCallbackPaste = document.getElementById("btn-submit-callback-paste");
-  const googleOAuthFlowBox = document.getElementById("google-oauth-flow-box");
-  const googleOAuthStatusText = document.getElementById("google-oauth-status-text");
-  const googleCallbackUrlPaste = document.getElementById("google-callback-url-paste");
-
-  if (btnStartGoogleOAuth) {
-    btnStartGoogleOAuth.addEventListener("click", async () => {
-      try {
-        btnStartGoogleOAuth.disabled = true;
-        btnStartGoogleOAuth.textContent = "Starting OAuth Flow...";
-        const flow = await api("/api/antigravity/oauth/start", { method: "POST" });
-        btnStartGoogleOAuth.disabled = false;
-        btnStartGoogleOAuth.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/></svg>
-          Restart Google Sign-In
-        `;
-
-        if (googleOAuthFlowBox) googleOAuthFlowBox.style.display = "block";
-        if (btnOpenGoogleAuth) btnOpenGoogleAuth.href = flow.auth_url;
-        if (googleOAuthStatusText) {
-          googleOAuthStatusText.innerHTML = `
-            <span class="status-dot"></span>
-            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
-          `;
-        }
-
-        if (btnCopyGoogleUrl) {
-          btnCopyGoogleUrl.onclick = () => {
-            navigator.clipboard.writeText(flow.auth_url);
-            showToast("Google authorization URL copied to clipboard");
-          };
-        }
-
-        if (currentOAuthPollInterval) clearInterval(currentOAuthPollInterval);
-
-        currentOAuthPollInterval = setInterval(async () => {
-          try {
-            const check = await api(`/api/antigravity/oauth/status/${flow.flow_id}`);
-            if (check.status === "complete") {
-              clearInterval(currentOAuthPollInterval);
-              showToast(`Google account '${check.account.name}' connected!`);
-              if (el.modalAccount) el.modalAccount.classList.remove("active");
-              fetchAccounts();
-            } else if (check.status === "error") {
-              clearInterval(currentOAuthPollInterval);
-              showToast(`OAuth error: ${check.error}`, "error");
-              if (googleOAuthStatusText) googleOAuthStatusText.textContent = `Error: ${check.error}`;
-            }
-          } catch (e) {
-            // Ignore poll hiccups
-          }
-        }, 2000);
-      } catch (err) {
-        btnStartGoogleOAuth.disabled = false;
-        btnStartGoogleOAuth.textContent = "Sign in with Google (OAuth)";
-        showToast(`Failed to start OAuth: ${err.message}`, "error");
-      }
+  const fsBtnAddModel = document.getElementById("fs-btn-add-model");
+  if (fsBtnAddModel) {
+    fsBtnAddModel.addEventListener("click", () => {
+      document.getElementById("model-form-plugin-id").value = state.currentFullscreenPluginId;
+      document.getElementById("model-form-id").value = "";
+      document.getElementById("model-form-name").value = "";
+      document.getElementById("model-form-upstream").value = "";
+      el.modalModel.classList.add("active");
     });
   }
 
-  if (btnImportLocalGoogle) {
-    btnImportLocalGoogle.addEventListener("click", async () => {
-      try {
-        btnImportLocalGoogle.disabled = true;
-        btnImportLocalGoogle.textContent = "Importing...";
-        const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
-        showToast(res.message || "Google Antigravity account imported!");
-        if (el.modalAccount) el.modalAccount.classList.remove("active");
-        fetchAccounts();
-      } catch (err) {
-        showToast(`Import failed: ${err.message}`, "error");
-      } finally {
-        btnImportLocalGoogle.disabled = false;
-        btnImportLocalGoogle.textContent = "⟳ Auto-Import";
-      }
-    });
-  }
+  // Model creation submit
+  const btnSaveModel = document.getElementById("btn-save-model");
+  if (btnSaveModel) {
+    btnSaveModel.addEventListener("click", async () => {
+      const pId = document.getElementById("model-form-plugin-id").value;
+      const mId = document.getElementById("model-form-id").value.trim();
+      const mName = document.getElementById("model-form-name").value.trim() || mId;
+      const mUpstream = document.getElementById("model-form-upstream").value.trim() || mId;
+      const mContext = parseInt(document.getElementById("model-form-context").value, 10) || 128000;
+      const mMaxTokens = parseInt(document.getElementById("model-form-max-tokens").value, 10) || 4096;
 
-  if (btnSubmitCallbackPaste) {
-    btnSubmitCallbackPaste.addEventListener("click", async () => {
-      const val = googleCallbackUrlPaste ? googleCallbackUrlPaste.value.trim() : "";
-      if (!val) {
-        showToast("Please paste the callback URL or code first", "error");
-        return;
-      }
-      try {
-        btnSubmitCallbackPaste.disabled = true;
-        btnSubmitCallbackPaste.textContent = "Connecting...";
-        const res = await api("/api/antigravity/oauth/callback", {
-          method: "POST",
-          body: JSON.stringify({ callback_url: val }),
-        });
-        showToast(`Connected Google account '${res.account.name}'!`);
-        if (currentOAuthPollInterval) clearInterval(currentOAuthPollInterval);
-        if (el.modalAccount) el.modalAccount.classList.remove("active");
-        fetchAccounts();
-      } catch (err) {
-        showToast(`Connection failed: ${err.message}`, "error");
-      } finally {
-        btnSubmitCallbackPaste.disabled = false;
-        btnSubmitCallbackPaste.textContent = "Connect";
-      }
-    });
-  }
-
-  function renderQuotaMarkup(quota) {
-    if (!quota) {
-      return `<div style="padding: 16px; color: var(--ink-muted); text-align: center;">No status data available</div>`;
-    }
-    if (quota.error) {
-      return `
-        <div style="padding: 16px; background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 8px; color: #f43f5e; font-size: 13px;">
-          <div style="font-weight: 600; margin-bottom: 4px;">Failed to fetch live Google Antigravity status</div>
-          <div style="font-family: var(--font-mono); font-size: 12px;">${escapeHtml(quota.error)}</div>
-        </div>
-      `;
-    }
-
-    const groups = quota.groups || [{ buckets: quota.buckets || [] }];
-    if (!groups || groups.length === 0) {
-      return `<div style="padding: 16px; color: var(--ink-muted); text-align: center;">No quota buckets returned by Google CloudCode PA.</div>`;
-    }
-
-    let groupsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">';
-    groups.forEach((grp) => {
-      const title = grp.displayName || "Quota Limits";
-      const desc = grp.description || "";
-      const buckets = grp.buckets || [];
-      const bucketCards = buckets
-        .filter((b) => !b.disabled)
-        .map((b) => {
-          const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
-          const pct = Math.round(frac * 100);
-          const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleString() : "Rolling";
-          const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
-          return `
-            <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 12px 14px; margin-bottom: 10px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <strong style="color: var(--ink-primary); font-size: 12.5px;">${escapeHtml(b.displayName || b.bucketId)}</strong>
-                <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: ${color};">${pct}% remaining</span>
-              </div>
-              <div style="background: rgba(255, 255, 255, 0.08); border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 8px;">
-                <div style="background: ${color}; height: 100%; width: ${pct}%; transition: width 0.3s ease;"></div>
-              </div>
-              ${b.description ? `<div style="font-size: 11px; color: var(--ink-secondary); margin-bottom: 6px; line-height: 1.4;">${escapeHtml(b.description)}</div>` : ''}
-              <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
-                <span>Window: ${escapeHtml(b.window || "standard")}</span>
-                <span>Resets: ${escapeHtml(resetStr)}</span>
-              </div>
-            </div>
-          `;
-        })
-        .join("");
-
-      groupsHtml += `
-        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 14px 16px;">
-          <div style="margin-bottom: 12px;">
-            <div style="font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-primary);">${escapeHtml(title)}</div>
-            ${desc ? `<div style="font-size: 11px; color: var(--ink-muted); margin-top: 2px;">${escapeHtml(desc)}</div>` : ''}
-          </div>
-          ${bucketCards || '<div style="color: var(--ink-muted); font-size: 12px;">No active buckets in this group</div>'}
-        </div>
-      `;
-    });
-    groupsHtml += '</div>';
-
-    if (quota.description) {
-      groupsHtml += `
-        <div style="margin-top: 14px; font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; border-top: 1px dashed var(--border-subtle); padding-top: 10px;">
-          ${escapeHtml(quota.description)}
-        </div>
-      `;
-    }
-    return groupsHtml;
-  }
-
-  let cachedStatusData = null;
-
-  async function fetchAntigravityStatus(forceRefresh = false) {
-    const statusTrackerBody = document.getElementById("status-tracker-body");
-    const statusAccountSelect = document.getElementById("status-account-select");
-    const statusAccountBadge = document.getElementById("status-account-badge");
-    const modalStatusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
-
-    if (!statusTrackerBody && !modalStatusBody) return;
-
-    if (statusTrackerBody && (!cachedStatusData || forceRefresh)) {
-      statusTrackerBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live Google Antigravity status from CloudCode PA...</div>`;
-    }
-
-    try {
-      const data = await api("/api/antigravity/status");
-      cachedStatusData = data;
-      const accounts = data.accounts || [];
-
-      if (accounts.length === 0) {
-        const emptyHtml = `
-          <div style="text-align: center; padding: 24px 16px; color: var(--ink-muted);">
-            <div style="margin-bottom: 8px; font-weight: 500; color: var(--ink-secondary);">No Google Antigravity accounts connected</div>
-            <div style="font-size: 12px; margin-bottom: 14px;">Connect a Google account in the Accounts tab to track live 5-hour and weekly quota status.</div>
-            <button class="btn btn-secondary btn-sm" id="btn-status-go-accounts">Go to Accounts</button>
-          </div>
-        `;
-        if (statusTrackerBody) statusTrackerBody.innerHTML = emptyHtml;
-        if (modalStatusBody) modalStatusBody.innerHTML = emptyHtml;
-        if (statusAccountSelect) statusAccountSelect.style.display = "none";
-        if (statusAccountBadge) statusAccountBadge.style.display = "none";
-
-        const btnGo = document.getElementById("btn-status-go-accounts");
-        if (btnGo) {
-          btnGo.addEventListener("click", () => switchTab("accounts"));
-        }
+      if (!mId) {
+        showToast("Model ID is required", "error");
         return;
       }
 
-      // Populate account selector if multiple accounts
-      if (statusAccountSelect) {
-        if (accounts.length > 1) {
-          statusAccountSelect.style.display = "inline-block";
-          const currentVal = statusAccountSelect.value;
-          statusAccountSelect.innerHTML = accounts
-            .map((a) => `<option value="${a.account_id}">${escapeHtml(a.account_name)}</option>`)
-            .join("");
-          if (currentVal && accounts.some((a) => a.account_id === currentVal)) {
-            statusAccountSelect.value = currentVal;
-          }
-        } else {
-          statusAccountSelect.style.display = "none";
-        }
-      }
-
-      // Determine which account to show
-      const selectedId = statusAccountSelect && statusAccountSelect.value
-        ? statusAccountSelect.value
-        : accounts[0].account_id;
-      const selectedAccount = accounts.find((a) => a.account_id === selectedId) || accounts[0];
-
-      if (statusAccountBadge) {
-        statusAccountBadge.style.display = "inline-flex";
-        statusAccountBadge.textContent = `${selectedAccount.account_name} (${selectedAccount.tier || "free-tier"})`;
-      }
-
-      const markup = renderQuotaMarkup(selectedAccount.quota);
-      if (statusTrackerBody) statusTrackerBody.innerHTML = markup;
-      if (modalStatusBody) modalStatusBody.innerHTML = markup;
-
-    } catch (err) {
-      const errHtml = `<div style="color: #f43f5e; padding: 16px;">Failed to load status: ${escapeHtml(err.message)}</div>`;
-      if (statusTrackerBody) statusTrackerBody.innerHTML = errHtml;
-      if (modalStatusBody) modalStatusBody.innerHTML = errHtml;
-    }
-  }
-
-  async function openStatusModal(account = null) {
-    const modalStatus = document.getElementById("modal-status") || document.getElementById("modal-quota");
-    const statusTitle = document.getElementById("modal-status-title") || document.getElementById("modal-quota-title");
-    const statusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
-    if (!modalStatus || !statusBody) return;
-
-    if (statusTitle) statusTitle.textContent = account ? `Status: ${account.name}` : "Google Antigravity Status";
-    statusBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live Google Antigravity status...</div>`;
-    modalStatus.classList.add("active");
-
-    try {
-      if (account) {
-        const quota = await api(`/api/antigravity/status/${account.id}`);
-        statusBody.innerHTML = renderQuotaMarkup(quota);
-      } else {
-        await fetchAntigravityStatus(true);
-      }
-    } catch (err) {
-      statusBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Error: ${escapeHtml(err.message)}</div>`;
-    }
-  }
-
-  // Alias for backwards compatibility
-  const openQuotaModal = openStatusModal;
-
-  // Wire Status tracker event listeners
-  const statusRefreshBtn = document.getElementById("status-refresh-btn");
-  if (statusRefreshBtn) {
-    statusRefreshBtn.addEventListener("click", () => {
-      fetchAntigravityStatus(true);
-      showToast("Google Antigravity status refreshed");
-    });
-  }
-
-  const btnLogsStatus = document.getElementById("btn-logs-status");
-  if (btnLogsStatus) {
-    btnLogsStatus.addEventListener("click", () => {
-      openStatusModal();
-    });
-  }
-
-  const statusAccountSelect = document.getElementById("status-account-select");
-  if (statusAccountSelect) {
-    statusAccountSelect.addEventListener("change", () => {
-      if (cachedStatusData && cachedStatusData.accounts) {
-        const selectedId = statusAccountSelect.value;
-        const selectedAccount = cachedStatusData.accounts.find((a) => a.account_id === selectedId);
-        const statusAccountBadge = document.getElementById("status-account-badge");
-        const statusTrackerBody = document.getElementById("status-tracker-body");
-        const modalStatusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
-        if (selectedAccount) {
-          if (statusAccountBadge) {
-            statusAccountBadge.textContent = `${selectedAccount.account_name} (${selectedAccount.tier || "free-tier"})`;
-          }
-          const markup = renderQuotaMarkup(selectedAccount.quota);
-          if (statusTrackerBody) statusTrackerBody.innerHTML = markup;
-          if (modalStatusBody) modalStatusBody.innerHTML = markup;
-        }
-      }
-    });
-  }
-
-  // Periodic cooldown countdown updater
-  setInterval(() => {
-    if (state.currentTab !== "accounts") return;
-    const now = Date.now() / 1000;
-    const cooldownSpans = document.querySelectorAll("[data-cooldown-until]");
-    cooldownSpans.forEach((span) => {
-      const until = parseFloat(span.dataset.cooldownUntil);
-      if (until > now) {
-        const rem = Math.ceil(until - now);
-        span.textContent = `⏳ Cooldown (${rem}s)`;
-      } else {
-        span.className = "badge badge-success";
-        span.innerHTML = `<span class="status-dot"></span> Active`;
-        span.removeAttribute("data-cooldown-until");
-      }
-    });
-  }, 1000);
-
-  // Wire Accounts Event Listeners
-  if (el.btnConnectAccount) {
-    el.btnConnectAccount.addEventListener("click", () => openAccountModal());
-  }
-
-  if (el.accountsProviderFilter) {
-    el.accountsProviderFilter.addEventListener("change", (e) => {
-      state.accountProviderFilter = e.target.value;
-      renderAccountsTable();
-    });
-  }
-
-  if (el.btnSaveAccount) {
-    el.btnSaveAccount.addEventListener("click", saveAccount);
-  }
-
-  if (el.btnToggleAccountKey && el.accountApiKey) {
-    el.btnToggleAccountKey.addEventListener("click", () => {
-      if (el.accountApiKey.type === "password") {
-        el.accountApiKey.type = "text";
-        el.btnToggleAccountKey.textContent = "Hide";
-      } else {
-        el.accountApiKey.type = "password";
-        el.btnToggleAccountKey.textContent = "Show";
-      }
-    });
-  }
-
-  // =========================================================================
-  // Code Editor & Swap Tab
-  // =========================================================================
-
-  function syncEditorPluginSelect() {
-    if (!el.editorPluginSelect) return;
-    const currentVal = el.editorPluginSelect.value;
-    el.editorPluginSelect.innerHTML = "";
-
-    state.plugins.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.id;
-      opt.textContent = `${p.name} (${p.filename || p.id + ".py"})`;
-      el.editorPluginSelect.appendChild(opt);
-    });
-
-    if (state.selectedEditorPluginId && state.plugins.some((p) => p.id === state.selectedEditorPluginId)) {
-      el.editorPluginSelect.value = state.selectedEditorPluginId;
-    } else if (state.plugins.length > 0) {
-      el.editorPluginSelect.value = state.plugins[0].id;
-      selectEditorPlugin(state.plugins[0].id);
-    }
-  }
-
-  async function selectEditorPlugin(pluginId) {
-    state.selectedEditorPluginId = pluginId;
-    if (el.editorPluginSelect) el.editorPluginSelect.value = pluginId;
-    hideEditorFeedback();
-
-    const plugin = state.plugins.find((p) => p.id === pluginId);
-    if (el.editorFilenameBadge && plugin) {
-      el.editorFilenameBadge.textContent = plugin.filename || `${pluginId}.py`;
-    }
-
-    try {
-      const data = await api(`/api/plugins/${pluginId}/code`);
-      if (el.editorTextarea) {
-        el.editorTextarea.value = data.code;
-        updateLineNumbers();
-      }
-    } catch (err) {
-      showToast(`Failed to load source code: ${err.message}`, "error");
-    }
-  }
-
-  if (el.editorPluginSelect) {
-    el.editorPluginSelect.addEventListener("change", (e) => {
-      selectEditorPlugin(e.target.value);
-    });
-  }
-
-  function updateLineNumbers() {
-    if (!el.editorTextarea || !el.editorLineNumbers) return;
-    const lines = el.editorTextarea.value.split("\n").length;
-    let numbers = "";
-    for (let i = 1; i <= lines; i++) {
-      numbers += i + "\n";
-    }
-    el.editorLineNumbers.textContent = numbers;
-  }
-
-  if (el.editorTextarea) {
-    el.editorTextarea.addEventListener("input", updateLineNumbers);
-    el.editorTextarea.addEventListener("scroll", () => {
-      if (el.editorLineNumbers) el.editorLineNumbers.scrollTop = el.editorTextarea.scrollTop;
-    });
-
-    // Handle Tab key for proper Python indentation (4 spaces)
-    el.editorTextarea.addEventListener("keydown", (e) => {
-      if (e.key === "Tab") {
-        e.preventDefault();
-        const start = el.editorTextarea.selectionStart;
-        const end = el.editorTextarea.selectionEnd;
-        el.editorTextarea.value =
-          el.editorTextarea.value.substring(0, start) + "    " + el.editorTextarea.value.substring(end);
-        el.editorTextarea.selectionStart = el.editorTextarea.selectionEnd = start + 4;
-        updateLineNumbers();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        saveEditorCode();
-      }
-    });
-  }
-
-  async function saveEditorCode() {
-    const pluginId = state.selectedEditorPluginId;
-    if (!pluginId) {
-      showToast("No plugin selected to save", "warning");
-      return;
-    }
-
-    const code = el.editorTextarea.value;
-    hideEditorFeedback();
-
-    try {
-      const res = await api(`/api/plugins/${pluginId}/code`, {
-        method: "PUT",
-        body: JSON.stringify({ code }),
-      });
-      showEditorFeedback("success", `✓ Code saved & hot-reloaded successfully! (v${res.plugin.version})`);
-      showToast(`Plugin '${pluginId}' updated and reloaded`);
-      fetchPlugins();
-    } catch (err) {
-      showEditorFeedback("error", `✕ Hot-reload failed: ${err.message}`);
-      showToast("Error updating plugin code", "error");
-    }
-  }
-
-  if (el.editorSaveBtn) {
-    el.editorSaveBtn.addEventListener("click", saveEditorCode);
-  }
-
-  function showEditorFeedback(type, message) {
-    if (!el.editorFeedback) return;
-    el.editorFeedback.className = `feedback-banner ${type}`;
-    el.editorFeedback.textContent = message;
-    el.editorFeedback.style.display = "flex";
-  }
-
-  function hideEditorFeedback() {
-    if (!el.editorFeedback) return;
-    el.editorFeedback.style.display = "none";
-  }
-
-  // Swap / Upload File
-  if (el.editorSwapBtn && el.editorFileInput) {
-    el.editorSwapBtn.addEventListener("click", () => el.editorFileInput.click());
-    el.editorFileInput.addEventListener("change", (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        el.editorTextarea.value = evt.target.result;
-        updateLineNumbers();
-        showToast(`Loaded file '${file.name}' into editor. Click 'Save & Hot-Reload' to apply.`);
-      };
-      reader.readAsText(file);
-      e.target.value = "";
-    });
-  }
-
-  // Template Selector
-  function syncTemplateSelects() {
-    if (el.editorTemplateSelect) {
-      el.editorTemplateSelect.innerHTML = `<option value="">-- Insert Template --</option>`;
-      state.templates.forEach((t) => {
-        const opt = document.createElement("option");
-        opt.value = t.id;
-        opt.textContent = t.name;
-        el.editorTemplateSelect.appendChild(opt);
-      });
-    }
-
-    const newProviderTemplateSelect = document.getElementById("new-provider-template-select");
-    if (newProviderTemplateSelect) {
-      newProviderTemplateSelect.innerHTML = `<option value="">-- Choose Starter Template --</option>`;
-      state.templates.forEach((t) => {
-        const opt = document.createElement("option");
-        opt.value = t.id;
-        opt.textContent = t.name;
-        newProviderTemplateSelect.appendChild(opt);
-      });
-    }
-  }
-
-  if (el.editorTemplateSelect) {
-    el.editorTemplateSelect.addEventListener("change", (e) => {
-      const templateId = e.target.value;
-      if (!templateId) return;
-      const tmpl = state.templates.find((t) => t.id === templateId);
-      if (tmpl && confirm(`Replace current editor content with template '${tmpl.name}'?`)) {
-        el.editorTextarea.value = tmpl.code;
-        updateLineNumbers();
-        showToast(`Template '${tmpl.name}' inserted.`);
-      }
-      e.target.value = "";
-    });
-  }
-
-  // =========================================================================
-  // Models Management Tab
-  // =========================================================================
-
-  function renderModelsTable() {
-    if (!el.modelsTableBody) return;
-    el.modelsTableBody.innerHTML = "";
-
-    const query = (el.modelsSearchInput ? el.modelsSearchInput.value : "").toLowerCase().trim();
-
-    let allModels = [];
-    state.plugins.forEach((p) => {
-      (p.models || []).forEach((m) => {
-        allModels.push({
-          ...m,
-          pluginId: p.id,
-          pluginName: p.name,
-          pluginEnabled: p.enabled,
+      try {
+        await api(`/api/plugins/${pId}/models`, {
+          method: "POST",
+          body: JSON.stringify({
+            id: mId,
+            name: mName,
+            upstream_model: mUpstream,
+            context_window: mContext,
+            max_tokens: mMaxTokens,
+            enabled: true,
+          }),
         });
-      });
+        showToast(`Model '${mId}' added`);
+        el.modalModel.classList.remove("active");
+        await fetchPlugins();
+        const updatedP = state.plugins.find((p) => p.id === pId);
+        if (updatedP) renderFullscreenModels(updatedP);
+      } catch (err) {
+        showToast(`Failed to add model: ${err.message}`, "error");
+      }
     });
+  }
 
-    if (query) {
-      allModels = allModels.filter(
-        (m) =>
-          m.id.toLowerCase().includes(query) ||
-          m.name.toLowerCase().includes(query) ||
-          m.pluginName.toLowerCase().includes(query)
-      );
+  // =========================================================================
+  // TAB 3: CUSTOM LOAD BALANCING RULES
+  // =========================================================================
+
+  async function fetchRules() {
+    try {
+      const data = await api("/api/load-balancing-rules");
+      state.rules = data || [];
+      renderRulesTable();
+      populateSnippetModels();
+    } catch (err) {
+      console.error("Failed to load rules", err);
     }
+  }
 
-    if (allModels.length === 0) {
-      el.modelsTableBody.innerHTML = `
+  function renderRulesTable() {
+    if (!el.rulesTableBody) return;
+    el.rulesTableBody.innerHTML = "";
+
+    if (state.rules.length === 0) {
+      el.rulesTableBody.innerHTML = `
         <tr>
-          <td colspan="7" style="text-align: center; padding: 32px; color: var(--ink-secondary);">
-            No models found. Add a custom model to an enabled provider.
+          <td colspan="6" style="text-align: center; color: var(--ink-muted); padding: 32px;">
+            No custom load balancing rules created yet. Click "+ Create Custom Rule" to expose a virtual model routing across multiple providers.
           </td>
         </tr>
       `;
       return;
     }
 
-    allModels.forEach((m) => {
+    state.rules.forEach((r) => {
       const tr = document.createElement("tr");
+      const targetsBadges = (r.targets || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ");
+
       tr.innerHTML = `
-        <td class="mono-cell" style="cursor: pointer;" title="Click to copy ID">${escapeHtml(m.id)}</td>
-        <td><strong>${escapeHtml(m.name)}</strong></td>
-        <td><span class="badge">${escapeHtml(m.pluginName)}</span></td>
-        <td class="mono-cell" style="color: var(--ink-muted);">${escapeHtml(m.upstream_model || m.id)}</td>
-        <td>${(m.context_window || 8192).toLocaleString()} / ${(m.max_tokens || 4096).toLocaleString()}</td>
+        <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
+        <td>${escapeHtml(r.name || r.model_id)}</td>
+        <td><code style="font-family: var(--font-mono); text-transform: uppercase; font-size: 11.5px;">${escapeHtml(r.strategy)}</code></td>
+        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetsBadges}</div></td>
         <td>
           <label class="switch">
-            <input type="checkbox" class="model-toggle" data-plugin="${m.pluginId}" data-model="${m.id}" ${m.enabled ? "checked" : ""}>
+            <input type="checkbox" class="rule-enable-toggle" data-id="${r.id}" ${r.enabled ? "checked" : ""}>
             <span class="slider"></span>
           </label>
         </td>
         <td>
           <div style="display: flex; gap: 6px;">
-            <button class="btn btn-secondary btn-sm btn-test-model" data-model="${m.id}">Playground</button>
-            <button class="btn btn-secondary btn-sm btn-edit-model" data-plugin="${m.pluginId}" data-model="${m.id}">Edit</button>
-            <button class="btn btn-danger btn-sm btn-del-model" data-plugin="${m.pluginId}" data-model="${m.id}">✕</button>
+            <button class="btn btn-secondary btn-sm btn-edit-rule" data-id="${r.id}">Edit</button>
+            <button class="btn btn-danger btn-sm btn-del-rule" data-id="${r.id}">Delete</button>
           </div>
         </td>
       `;
 
-      // Copy Model ID
-      tr.querySelector(".mono-cell").addEventListener("click", () => {
-        navigator.clipboard.writeText(m.id);
-        showToast(`Copied model ID: ${m.id}`);
-      });
-
-      // Toggle Enable/Disable
-      tr.querySelector(".model-toggle").addEventListener("change", async (e) => {
+      tr.querySelector(".rule-enable-toggle").addEventListener("change", async (e) => {
         try {
-          await api(`/api/plugins/${m.pluginId}/models/${m.id}`, {
+          await api(`/api/load-balancing-rules/${r.id}`, {
             method: "PUT",
             body: JSON.stringify({ enabled: e.target.checked }),
           });
-          m.enabled = e.target.checked;
-          showToast(`Model '${m.id}' ${m.enabled ? "enabled" : "disabled"}`);
-          fetchStats();
+          r.enabled = e.target.checked;
+          showToast(`Rule '${r.name}' ${r.enabled ? "enabled" : "disabled"}`);
+          populateSnippetModels();
         } catch (err) {
           e.target.checked = !e.target.checked;
-          showToast(`Failed to update model: ${err.message}`, "error");
+          showToast(`Update failed: ${err.message}`, "error");
         }
       });
 
-      // Jump to Playground
-      tr.querySelector(".btn-test-model").addEventListener("click", () => {
-        switchTab("playground");
-        if (el.playgroundModelSelect) {
-          el.playgroundModelSelect.value = m.id;
-          state.selectedPlaygroundModel = m.id;
-        }
-      });
-
-      // Edit Model
-      tr.querySelector(".btn-edit-model").addEventListener("click", () => {
-        openEditModelModal(m.pluginId, m);
-      });
-
-      // Delete Model
-      tr.querySelector(".btn-del-model").addEventListener("click", async () => {
-        if (confirm(`Remove model '${m.id}' from provider '${m.pluginName}'?`)) {
+      tr.querySelector(".btn-edit-rule").addEventListener("click", () => openRuleModal(r));
+      tr.querySelector(".btn-del-rule").addEventListener("click", async () => {
+        if (confirm(`Delete load balancing rule for '${r.model_id}'?`)) {
           try {
-            await api(`/api/plugins/${m.pluginId}/models/${m.id}`, { method: "DELETE" });
-            showToast(`Model '${m.id}' deleted`);
-            fetchPlugins();
+            await api(`/api/load-balancing-rules/${r.id}`, { method: "DELETE" });
+            showToast("Rule deleted");
+            fetchRules();
           } catch (err) {
-            showToast(`Failed to delete model: ${err.message}`, "error");
+            showToast(`Delete failed: ${err.message}`, "error");
           }
         }
       });
 
-      el.modelsTableBody.appendChild(tr);
+      el.rulesTableBody.appendChild(tr);
     });
   }
 
-  if (el.modelsSearchInput) {
-    el.modelsSearchInput.addEventListener("input", renderModelsTable);
+  function openRuleModal(rule = null) {
+    const idInput = document.getElementById("rule-form-id");
+    const mIdInput = document.getElementById("rule-form-model-id");
+    const nameInput = document.getElementById("rule-form-name");
+    const stratSelect = document.getElementById("rule-form-strategy");
+    const descInput = document.getElementById("rule-form-desc");
+    const enabledInput = document.getElementById("rule-form-enabled");
+    const targetsContainer = document.getElementById("rule-targets-container");
+    const title = document.getElementById("modal-rule-title");
+
+    // Gather all active models across all providers
+    const allModels = [];
+    state.plugins.forEach((p) => {
+      (p.models || []).forEach((m) => {
+        allModels.push({ id: m.id, providerName: p.name, providerId: p.id });
+      });
+    });
+
+    targetsContainer.innerHTML = "";
+    if (allModels.length === 0) {
+      targetsContainer.innerHTML = `<span style="color: var(--ink-muted); font-size: 12px;">No provider models available. Enable provider plugins first.</span>`;
+    } else {
+      allModels.forEach((m) => {
+        const lbl = document.createElement("label");
+        lbl.style.display = "flex";
+        lbl.style.alignItems = "center";
+        lbl.style.gap = "8px";
+        lbl.style.fontSize = "12.5px";
+        lbl.style.cursor = "pointer";
+
+        const chk = document.createElement("input");
+        chk.type = "checkbox";
+        chk.value = m.id;
+        chk.className = "rule-target-chk";
+        if (rule && (rule.targets || []).includes(m.id)) {
+          chk.checked = true;
+        }
+
+        lbl.appendChild(chk);
+        lbl.appendChild(document.createTextNode(`${m.id} (${m.providerName})`));
+        targetsContainer.appendChild(lbl);
+      });
+    }
+
+    if (rule) {
+      title.textContent = "Edit Custom Load Balancing Rule";
+      idInput.value = rule.id;
+      mIdInput.value = rule.model_id;
+      mIdInput.disabled = true;
+      nameInput.value = rule.name;
+      stratSelect.value = rule.strategy;
+      descInput.value = rule.description || "";
+      enabledInput.checked = !!rule.enabled;
+    } else {
+      title.textContent = "Create Custom Load Balancing Rule";
+      idInput.value = "";
+      mIdInput.value = "";
+      mIdInput.disabled = false;
+      nameInput.value = "";
+      stratSelect.value = "round_robin";
+      descInput.value = "";
+      enabledInput.checked = true;
+    }
+
+    enhanceSelect(stratSelect);
+    el.modalRule.classList.add("active");
+  }
+
+  if (el.btnCreateRule) {
+    el.btnCreateRule.addEventListener("click", () => openRuleModal(null));
+  }
+
+  const btnSaveRule = document.getElementById("btn-save-rule");
+  if (btnSaveRule) {
+    btnSaveRule.addEventListener("click", async () => {
+      const idInput = document.getElementById("rule-form-id");
+      const mIdInput = document.getElementById("rule-form-model-id");
+      const nameInput = document.getElementById("rule-form-name");
+      const stratSelect = document.getElementById("rule-form-strategy");
+      const descInput = document.getElementById("rule-form-desc");
+      const enabledInput = document.getElementById("rule-form-enabled");
+
+      const selectedTargets = Array.from(document.querySelectorAll(".rule-target-chk:checked")).map((c) => c.value);
+      const modelId = mIdInput.value.trim();
+      const name = nameInput.value.trim() || modelId;
+
+      if (!modelId) {
+        showToast("Exposed model ID is required", "error");
+        return;
+      }
+      if (selectedTargets.length === 0) {
+        showToast("Please select at least one target model", "error");
+        return;
+      }
+
+      try {
+        if (idInput.value) {
+          // Edit
+          await api(`/api/load-balancing-rules/${idInput.value}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              name,
+              strategy: stratSelect.value,
+              targets: selectedTargets,
+              description: descInput.value,
+              enabled: enabledInput.checked,
+            }),
+          });
+          showToast(`Rule '${name}' updated`);
+        } else {
+          // Create
+          await api("/api/load-balancing-rules", {
+            method: "POST",
+            body: JSON.stringify({
+              model_id: modelId,
+              name,
+              strategy: stratSelect.value,
+              targets: selectedTargets,
+              description: descInput.value,
+              enabled: enabledInput.checked,
+            }),
+          });
+          showToast(`Rule '${modelId}' created and exposed to /v1`);
+        }
+
+        el.modalRule.classList.remove("active");
+        fetchRules();
+      } catch (err) {
+        showToast(`Failed to save rule: ${err.message}`, "error");
+      }
+    });
   }
 
   // =========================================================================
-  // Playground Chat Tab
+  // TAB 4: PLAYGROUND
   // =========================================================================
 
-  function syncPlaygroundModels() {
+  function populatePlaygroundModels() {
     if (!el.playgroundModelSelect) return;
-    const currentVal = el.playgroundModelSelect.value;
     el.playgroundModelSelect.innerHTML = "";
 
-    const activeModels = [];
+    const allModels = [];
     state.plugins.forEach((p) => {
       if (p.enabled) {
         (p.models || []).forEach((m) => {
-          if (m.enabled) {
-            activeModels.push({ id: m.id, name: m.name, provider: p.name });
-          }
+          if (m.enabled) allModels.push(m.id);
         });
       }
     });
 
-    if (activeModels.length === 0) {
-      el.playgroundModelSelect.innerHTML = `<option value="">No active models available</option>`;
-      return;
-    }
+    state.rules.forEach((r) => {
+      if (r.enabled && !allModels.includes(r.model_id)) {
+        allModels.unshift(r.model_id);
+      }
+    });
 
-    activeModels.forEach((m) => {
+    if (allModels.length === 0) allModels.push("gemini-3.8-flash-high");
+
+    allModels.forEach((mid) => {
       const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = `${m.name} (${m.id}) - ${m.provider}`;
+      opt.value = mid;
+      opt.textContent = mid;
+      if (mid === state.selectedPlaygroundModel) opt.selected = true;
       el.playgroundModelSelect.appendChild(opt);
     });
 
-    if (activeModels.some((m) => m.id === currentVal)) {
-      el.playgroundModelSelect.value = currentVal;
-    } else {
-      el.playgroundModelSelect.value = activeModels[0].id;
-    }
-    state.selectedPlaygroundModel = el.playgroundModelSelect.value;
-  }
+    enhanceSelect(el.playgroundModelSelect);
 
-  if (el.playgroundModelSelect) {
     el.playgroundModelSelect.addEventListener("change", (e) => {
       state.selectedPlaygroundModel = e.target.value;
     });
   }
 
-  if (el.playgroundTempInput && el.playgroundTempDisplay) {
+  if (el.playgroundTempInput) {
     el.playgroundTempInput.addEventListener("input", (e) => {
-      el.playgroundTempDisplay.textContent = parseFloat(e.target.value).toFixed(1);
+      if (el.playgroundTempDisplay) el.playgroundTempDisplay.textContent = e.target.value;
     });
+  }
+
+  if (el.playgroundClearBtn) {
+    el.playgroundClearBtn.addEventListener("click", () => {
+      state.chatMessages = [];
+      if (el.playgroundHistory) el.playgroundHistory.innerHTML = "";
+    });
+  }
+
+  if (el.playgroundSendBtn) {
+    el.playgroundSendBtn.addEventListener("click", sendPlaygroundMessage);
   }
 
   if (el.playgroundPrompt) {
@@ -1558,221 +1611,294 @@ print(response.choices[0].message.content)`;
     });
   }
 
-  if (el.playgroundSendBtn) {
-    el.playgroundSendBtn.addEventListener("click", sendPlaygroundMessage);
-  }
-
-  if (el.playgroundClearBtn) {
-    el.playgroundClearBtn.addEventListener("click", () => {
-      state.chatMessages = [];
-      renderChatHistory();
-      showToast("Playground chat cleared");
-    });
-  }
-
   async function sendPlaygroundMessage() {
-    const promptText = el.playgroundPrompt ? el.playgroundPrompt.value.trim() : "";
-    if (!promptText) return;
+    const prompt = (el.playgroundPrompt ? el.playgroundPrompt.value : "").trim();
+    if (!prompt) return;
 
-    const model = state.selectedPlaygroundModel || el.playgroundModelSelect.value;
-    if (!model) {
-      showToast("Please select an active model first", "warning");
-      return;
-    }
+    const model = el.playgroundModelSelect ? el.playgroundModelSelect.value : "gemini-3.8-flash-high";
+    const temp = parseFloat(el.playgroundTempInput.value) || 1.0;
+    const maxTokens = parseInt(el.playgroundTokensInput.value, 10) || undefined;
+    const systemPrompt = (el.playgroundSystemInput.value || "").trim();
 
-    // Add user message to history
-    state.chatMessages.push({ role: "user", content: promptText });
     el.playgroundPrompt.value = "";
-    renderChatHistory();
 
-    // Prepare API request payload
-    const systemPrompt = el.playgroundSystemInput ? el.playgroundSystemInput.value.trim() : "";
+    // Append user message to UI
+    appendChatBubble("user", prompt);
+    state.chatMessages.push({ role: "user", content: prompt });
+
     const messagesPayload = [];
-    if (systemPrompt) {
-      messagesPayload.push({ role: "system", content: systemPrompt });
-    }
-    state.chatMessages.forEach((msg) => {
-      messagesPayload.push({ role: msg.role, content: msg.content });
-    });
+    if (systemPrompt) messagesPayload.push({ role: "system", content: systemPrompt });
+    state.chatMessages.forEach((m) => messagesPayload.push(m));
 
-    const temperature = el.playgroundTempInput ? parseFloat(el.playgroundTempInput.value) : 1.0;
-    const maxTokens = el.playgroundMaxTokensInput && el.playgroundMaxTokensInput.value ? parseInt(el.playgroundMaxTokensInput.value, 10) : undefined;
-
-    // Show loading assistant indicator
-    const loadingMsgId = `loading-${Date.now()}`;
-    const loadingElem = document.createElement("div");
-    loadingElem.className = "chat-msg assistant";
-    loadingElem.id = loadingMsgId;
-    loadingElem.innerHTML = `
-      <div class="msg-header"><span>Router Engine</span></div>
-      <div class="msg-bubble" style="color: var(--ink-muted); font-style: italic;">Routing through ${escapeHtml(model)}...</div>
-    `;
-    el.playgroundHistory.appendChild(loadingElem);
-    el.playgroundHistory.scrollTop = el.playgroundHistory.scrollHeight;
-
-    if (el.playgroundSendBtn) {
-      el.playgroundSendBtn.disabled = true;
-      el.playgroundSendBtn.textContent = "Routing...";
-    }
-
-    const startTime = performance.now();
-    let accumulatedText = "";
+    const assistantBubble = appendChatBubble("assistant", "Thinking...");
 
     try {
-      const response = await fetch("/api/test-chat", {
+      const res = await api("/api/test-chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
           messages: messagesPayload,
-          temperature,
+          temperature: temp,
           max_tokens: maxTokens,
-          stream: true,
         }),
       });
 
-      if (!response.ok) {
-        let errDetail = `HTTP ${response.status}`;
-        try {
-          const errData = await response.json();
-          errDetail = errData.detail || errDetail;
-        } catch (_) {}
-        throw new Error(errDetail);
-      }
+      const replyContent = (res.choices && res.choices[0] && res.choices[0].message)
+        ? res.choices[0].message.content
+        : (res.response || JSON.stringify(res));
 
-      const contentType = response.headers.get("content-type") || "";
-
-      if (contentType.includes("text/event-stream") && response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        const bubble = loadingElem.querySelector(".msg-bubble");
-        bubble.style.color = "#f4f4f5";
-        bubble.style.fontStyle = "normal";
-        bubble.textContent = "";
-
-        let done = false;
-        let buffer = "";
-
-        while (!done) {
-          const { value, done: readerDone } = await reader.read();
-          done = readerDone;
-          if (value) {
-            buffer += decoder.decode(value, { stream: !done });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed || !trimmed.startsWith("data:")) continue;
-              const payload = trimmed.substring(5).trim();
-              if (payload === "[DONE]") continue;
-
-              try {
-                const chunk = JSON.parse(payload);
-                const deltaContent =
-                  chunk.choices && chunk.choices[0] && chunk.choices[0].delta
-                    ? chunk.choices[0].delta.content
-                    : "";
-                if (deltaContent) {
-                  accumulatedText += deltaContent;
-                  bubble.textContent = accumulatedText;
-                  el.playgroundHistory.scrollTop = el.playgroundHistory.scrollHeight;
-                }
-              } catch (_) {}
-            }
-          }
-        }
-      } else {
-        const res = await response.json();
-        accumulatedText =
-          res.choices && res.choices[0] && res.choices[0].message
-            ? res.choices[0].message.content
-            : "(No content returned)";
-      }
-
-      const latencyMs = Math.round(performance.now() - startTime);
-
-      state.chatMessages.push({
-        role: "assistant",
-        content: accumulatedText || "(Empty response)",
-        telemetry: {
-          latencyMs,
-          promptTokens: Math.max(1, promptText.split(/\s+/).length),
-          compTokens: Math.max(1, accumulatedText.split(/\s+/).length),
-          model,
-        },
-      });
-
-      fetchStats();
+      assistantBubble.textContent = replyContent;
+      state.chatMessages.push({ role: "assistant", content: replyContent });
     } catch (err) {
-      state.chatMessages.push({
-        role: "assistant",
-        content: `Error: ${err.message}`,
-        isError: true,
-      });
-      showToast(`Playground error: ${err.message}`, "error");
-    } finally {
-      const loading = document.getElementById(loadingMsgId);
-      if (loading) loading.remove();
-
-      if (el.playgroundSendBtn) {
-        el.playgroundSendBtn.disabled = false;
-        el.playgroundSendBtn.textContent = "Send Message";
-      }
-
-      renderChatHistory();
+      assistantBubble.innerHTML = `<span style="color: var(--accent-red);">Error: ${escapeHtml(err.message)}</span>`;
     }
   }
 
-  function renderChatHistory() {
-    if (!el.playgroundHistory) return;
-    el.playgroundHistory.innerHTML = "";
+  function appendChatBubble(role, text) {
+    if (!el.playgroundHistory) return null;
+    const msgDiv = document.createElement("div");
+    msgDiv.className = `chat-msg ${role}`;
+    msgDiv.innerHTML = `
+      <div style="font-size: 11px; color: var(--ink-muted); text-transform: uppercase; font-weight: 600;">${role}</div>
+      <div class="chat-bubble" style="background: ${role === 'user' ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)'}; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 14px; font-size: 13px; white-space: pre-wrap; line-height: 1.5;">${escapeHtml(text)}</div>
+    `;
+    el.playgroundHistory.appendChild(msgDiv);
+    el.playgroundHistory.scrollTop = el.playgroundHistory.scrollHeight;
+    return msgDiv.querySelector(".chat-bubble");
+  }
 
-    if (state.chatMessages.length === 0) {
-      el.playgroundHistory.innerHTML = `
-        <div style="margin: auto; text-align: center; color: var(--ink-muted); padding: 48px;">
-          <div style="font-size: 24px; margin-bottom: 8px;">◈</div>
-          <div style="font-weight: 600; color: var(--ink-secondary); margin-bottom: 4px;">Playground Ready</div>
-          <div style="font-size: 12px;">Type a message below or configure parameters in the left panel.</div>
+  // =========================================================================
+  // TAB 5: STATUS (RENAMED FROM REQUEST LOGS)
+  // =========================================================================
+
+  async function fetchStatusData() {
+    await fetchPlugins();
+    await fetchAccounts();
+    renderStatusProviderTabs();
+    await renderStatusAccountsGrid();
+    await fetchLogs();
+  }
+
+  function renderStatusProviderTabs() {
+    if (!el.statusProviderTabs) return;
+    el.statusProviderTabs.innerHTML = "";
+
+    // Tab: All Providers
+    const allBtn = document.createElement("button");
+    allBtn.className = `status-provider-tab ${state.statusProviderFilter === '' ? 'active' : ''}`;
+    allBtn.textContent = "All Providers";
+    allBtn.addEventListener("click", () => {
+      state.statusProviderFilter = "";
+      renderStatusProviderTabs();
+      renderStatusAccountsGrid();
+    });
+    el.statusProviderTabs.appendChild(allBtn);
+
+    // Sort providers by name with pinned first
+    const sortedPlugins = [...state.plugins].sort((a, b) => {
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    sortedPlugins.forEach((p) => {
+      const btn = document.createElement("button");
+      btn.className = `status-provider-tab ${state.statusProviderFilter === p.id ? 'active' : ''}`;
+      btn.textContent = `${p.pinned ? '📌 ' : ''}${p.name}`;
+      btn.addEventListener("click", () => {
+        state.statusProviderFilter = p.id;
+        renderStatusProviderTabs();
+        renderStatusAccountsGrid();
+      });
+      el.statusProviderTabs.appendChild(btn);
+    });
+  }
+
+  async function renderStatusAccountsGrid() {
+    if (!el.statusAccountsGrid) return;
+    el.statusAccountsGrid.innerHTML = `
+      <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
+        Loading accounts status & quota limits...
+      </div>
+    `;
+
+    // Filter accounts by current filter
+    let accountsToDisplay = state.statusProviderFilter
+      ? state.accounts.filter((a) => a.provider_id === state.statusProviderFilter)
+      : [...state.accounts];
+
+    if (accountsToDisplay.length === 0) {
+      el.statusAccountsGrid.innerHTML = `
+        <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
+          No accounts configured for this provider.
         </div>
       `;
       return;
     }
 
-    state.chatMessages.forEach((msg) => {
-      const msgDiv = document.createElement("div");
-      msgDiv.className = `chat-msg ${msg.role}`;
+    // Sort accounts by provider name (pinned providers first)
+    const providerMap = {};
+    state.plugins.forEach((p) => { providerMap[p.id] = p; });
 
-      let telemetryHtml = "";
-      if (msg.telemetry) {
-        telemetryHtml = `
-          <div class="msg-telemetry">
-            <span>⚡ ${msg.telemetry.latencyMs}ms</span>
-            <span>▤ ${msg.telemetry.promptTokens} in / ${msg.telemetry.compTokens} out</span>
-            <span>◈ ${escapeHtml(msg.telemetry.model)}</span>
+    accountsToDisplay.sort((a, b) => {
+      const pA = providerMap[a.provider_id];
+      const pB = providerMap[b.provider_id];
+      const pinA = pA ? !!pA.pinned : false;
+      const pinB = pB ? !!pB.pinned : false;
+      if (pinA && !pinB) return -1;
+      if (!pinA && pinB) return 1;
+      const nameA = pA ? pA.name.toLowerCase() : "";
+      const nameB = pB ? pB.name.toLowerCase() : "";
+      if (nameA !== nameB) return nameA.localeCompare(nameB);
+      return a.name.localeCompare(b.name);
+    });
+
+    el.statusAccountsGrid.innerHTML = "";
+
+    // Fetch live quota for Antigravity accounts if present
+    const quotaDataMap = {};
+    const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
+    if (antigravityAccounts.length > 0) {
+      try {
+        const agStatusRes = await api("/api/antigravity/status");
+        if (agStatusRes && agStatusRes.accounts) {
+          agStatusRes.accounts.forEach((item) => {
+            quotaDataMap[item.account_id] = item.quota;
+          });
+        }
+      } catch (_) {}
+    }
+
+    accountsToDisplay.forEach((acc) => {
+      const provider = providerMap[acc.provider_id] || { name: acc.provider_id };
+      const card = document.createElement("div");
+      card.className = "account-square-card";
+
+      const hiddenSet = state.hiddenLimits[acc.id] || new Set();
+
+      const inCooldown = acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000;
+      const statusPill = inCooldown
+        ? `<span class="badge" style="color: var(--accent-red); font-size: 11px;">Cooldown (${Math.round(acc.rate_limited_until - Date.now() / 1000)}s)</span>`
+        : acc.enabled
+          ? `<span class="badge badge-active" style="font-size: 11px;">Active</span>`
+          : `<span class="badge badge-muted" style="font-size: 11px;">Disabled</span>`;
+
+      // Render limits cleanly without verbose boilerplate
+      let limitsHtml = "";
+      const quota = quotaDataMap[acc.id];
+
+      if (quota && quota.groups) {
+        quota.groups.forEach((grp) => {
+          (grp.buckets || []).forEach((b) => {
+            const bucketKey = b.bucketId || b.displayName || "limit";
+            const isHidden = hiddenSet.has(bucketKey);
+            const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
+            const pct = Math.round(frac * 100);
+            const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+            const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "Rolling";
+
+            limitsHtml += `
+              <div class="limit-item ${isHidden ? 'hidden-limit' : ''}" data-key="${escapeHtml(bucketKey)}">
+                <div class="limit-header">
+                  <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">${escapeHtml(b.displayName || bucketKey)}</span>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: ${color};">${pct}%</span>
+                    <button class="btn-hide-limit" data-acc="${acc.id}" data-key="${escapeHtml(bucketKey)}" title="Hide this limit">✕</button>
+                  </div>
+                </div>
+                <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 5px; overflow: hidden;">
+                  <div style="background: ${color}; height: 100%; width: ${pct}%;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
+                  <span>${escapeHtml(grp.displayName || "Quota")}</span>
+                  <span>Resets: ${escapeHtml(resetStr)}</span>
+                </div>
+              </div>
+            `;
+          });
+        });
+      } else {
+        // Generic account limits indicator
+        const limitKey = "standard_quota";
+        const isHidden = hiddenSet.has(limitKey);
+        limitsHtml += `
+          <div class="limit-item ${isHidden ? 'hidden-limit' : ''}" data-key="${escapeHtml(limitKey)}">
+            <div class="limit-header">
+              <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">Standard Quota</span>
+              <button class="btn-hide-limit" data-acc="${acc.id}" data-key="${escapeHtml(limitKey)}" title="Hide this limit">✕</button>
+            </div>
+            <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 5px; overflow: hidden;">
+              <div style="background: #34d399; height: 100%; width: 100%;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
+              <span>Requests: ${acc.success_count || 0}</span>
+              <span>Errors: ${acc.error_count || 0}</span>
+            </div>
           </div>
         `;
       }
 
-      msgDiv.innerHTML = `
-        <div class="msg-header">
-          <span>${msg.role === "user" ? "User Prompt" : "Assistant Response"}</span>
+      const hasHidden = hiddenSet.size > 0;
+
+      card.innerHTML = `
+        <div class="account-square-header">
+          <div>
+            <div class="account-square-title">${escapeHtml(acc.name)}</div>
+            <span style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(provider.name)}</span>
+          </div>
+          <div>${statusPill}</div>
         </div>
-        <div class="msg-bubble" ${msg.isError ? 'style="border-color: var(--accent-red-border); color: var(--accent-red);"' : ""}>
-          ${escapeHtml(msg.content)}
+        <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
+          ${limitsHtml}
         </div>
-        ${telemetryHtml}
+        ${hasHidden ? `
+          <div class="unhide-limits-bar">
+            <button class="btn btn-secondary btn-sm btn-unhide-all" data-acc="${acc.id}" style="font-size: 10.5px; padding: 2px 8px;">Unhide all (${hiddenSet.size})</button>
+          </div>
+        ` : ''}
       `;
 
-      el.playgroundHistory.appendChild(msgDiv);
-    });
+      // Events to hide limit
+      card.querySelectorAll(".btn-hide-limit").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const accId = btn.dataset.acc;
+          const k = btn.dataset.key;
+          if (!state.hiddenLimits[accId]) state.hiddenLimits[accId] = new Set();
+          state.hiddenLimits[accId].add(k);
+          saveHiddenLimits();
+          renderStatusAccountsGrid();
+        });
+      });
 
-    el.playgroundHistory.scrollTop = el.playgroundHistory.scrollHeight;
+      // Event to unhide all
+      const unhideBtn = card.querySelector(".btn-unhide-all");
+      if (unhideBtn) {
+        unhideBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const accId = unhideBtn.dataset.acc;
+          if (state.hiddenLimits[accId]) {
+            delete state.hiddenLimits[accId];
+            saveHiddenLimits();
+            renderStatusAccountsGrid();
+          }
+        });
+      }
+
+      el.statusAccountsGrid.appendChild(card);
+    });
   }
 
-  // =========================================================================
-  // Request Logs Tab
-  // =========================================================================
+  // Request Audit Logs
+  async function fetchLogs() {
+    try {
+      const data = await api("/api/logs?limit=100");
+      state.logs = data || [];
+      renderLogsTable();
+    } catch (err) {
+      console.error("Failed to load logs", err);
+    }
+  }
 
   function renderLogsTable() {
     if (!el.logsTableBody) return;
@@ -1781,8 +1907,8 @@ print(response.choices[0].message.content)`;
     if (state.logs.length === 0) {
       el.logsTableBody.innerHTML = `
         <tr>
-          <td colspan="7" style="text-align: center; padding: 32px; color: var(--ink-secondary);">
-            No request logs recorded yet. Send a query via the Playground or OpenAI-compatible endpoint.
+          <td colspan="8" style="text-align: center; color: var(--ink-muted); padding: 24px;">
+            No requests logged yet. Make requests to <code>/v1/chat/completions</code> to see real-time persistent audit records.
           </td>
         </tr>
       `;
@@ -1791,36 +1917,31 @@ print(response.choices[0].message.content)`;
 
     state.logs.forEach((log) => {
       const tr = document.createElement("tr");
+      const timeStr = log.timestamp ? new Date(log.timestamp * 1000).toLocaleTimeString() : "";
+      const isSuccess = log.status === "success" && (log.status_code >= 200 && log.status_code < 300);
 
-      const dateStr = log.timestamp
-        ? new Date(log.timestamp * 1000).toLocaleTimeString([], { hour12: false })
-        : "-";
-
-      const statusBadge =
-        log.status === "success"
-          ? `<span class="badge" style="background: var(--accent-green-bg); border-color: var(--accent-green-border); color: var(--accent-green);">200 OK</span>`
-          : `<span class="badge" style="background: var(--accent-red-bg); border-color: var(--accent-red-border); color: var(--accent-red);">ERR</span>`;
+      const statusBadge = isSuccess
+        ? `<span class="badge badge-active">${log.status_code || 200} OK</span>`
+        : `<span class="badge" style="color: var(--accent-red); border-color: var(--accent-red-border);">${log.status_code || 500} ERR</span>`;
 
       tr.innerHTML = `
-        <td class="mono-cell" style="font-size: 11.5px; color: var(--ink-muted);">${dateStr}</td>
+        <td style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-muted);">${escapeHtml(timeStr)}</td>
         <td>${statusBadge}</td>
-        <td class="mono-cell"><strong>${escapeHtml(log.model)}</strong></td>
-        <td><span class="badge">${escapeHtml(log.plugin_id || "router")}</span></td>
-        <td class="mono-cell">${Math.round(log.latency_ms)} ms</td>
-        <td class="mono-cell">${log.prompt_tokens} / ${log.completion_tokens}</td>
-        <td style="color: var(--ink-muted); font-size: 12px;">${escapeHtml(log.error_message || "—")}</td>
+        <td><strong style="color: var(--ink-primary);">${escapeHtml(log.model)}</strong></td>
+        <td><span class="badge">${escapeHtml(log.plugin_id || "load_balancer")}</span></td>
+        <td><code style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-secondary);">${escapeHtml(log.api_key_id || "direct")}</code></td>
+        <td style="font-family: var(--font-mono);">${log.latency_ms || 0} ms</td>
+        <td style="font-family: var(--font-mono);">${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
+        <td style="font-size: 11.5px; color: var(--ink-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          ${escapeHtml(log.error_message || "Completed")}
+        </td>
       `;
-
       el.logsTableBody.appendChild(tr);
     });
   }
 
   if (el.logsRefreshBtn) {
-    el.logsRefreshBtn.addEventListener("click", () => {
-      fetchLogs();
-      fetchStats();
-      showToast("Logs refreshed");
-    });
+    el.logsRefreshBtn.addEventListener("click", () => fetchStatusData());
   }
 
   if (el.logsAutoToggle) {
@@ -1828,40 +1949,24 @@ print(response.choices[0].message.content)`;
       state.autoRefreshLogs = e.target.checked;
       if (state.autoRefreshLogs) {
         state.autoRefreshInterval = setInterval(() => {
-          if (state.currentTab === "logs" || state.currentTab === "overview") {
-            fetchLogs();
-            fetchStats();
-          }
+          if (state.currentTab === "status") fetchStatusData();
         }, 5000);
-        showToast("Auto-refresh enabled (5s)");
-      } else {
+      } else if (state.autoRefreshInterval) {
         clearInterval(state.autoRefreshInterval);
-        showToast("Auto-refresh paused");
+        state.autoRefreshInterval = null;
       }
     });
   }
 
   // =========================================================================
-  // Modals Management
+  // MODALS & HELPERS
   // =========================================================================
 
-  function closeModal(modalElem) {
-    if (modalElem) modalElem.classList.remove("active");
-  }
-
-  document.querySelectorAll(".modal-close").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      const modal = e.target.closest(".modal-overlay");
-      closeModal(modal);
-    });
-  });
-
-  // Modal: New Provider
   function openNewProviderModal() {
-    if (!el.modalNewProvider) return;
-    document.getElementById("new-provider-filename").value = "";
-    document.getElementById("new-provider-code").value = "";
-    syncTemplateSelects();
+    const fnInput = document.getElementById("new-provider-filename");
+    const codeInput = document.getElementById("new-provider-code");
+    if (fnInput) fnInput.value = "";
+    if (codeInput) codeInput.value = "";
     el.modalNewProvider.classList.add("active");
   }
 
@@ -1869,266 +1974,181 @@ print(response.choices[0].message.content)`;
     el.btnNewProvider.addEventListener("click", openNewProviderModal);
   }
 
-  const newProviderTemplateSelect = document.getElementById("new-provider-template-select");
-  if (newProviderTemplateSelect) {
-    newProviderTemplateSelect.addEventListener("change", (e) => {
-      const tmplId = e.target.value;
-      if (!tmplId) return;
-      const tmpl = state.templates.find((t) => t.id === tmplId);
-      if (tmpl) {
-        document.getElementById("new-provider-filename").value = tmpl.filename;
-        document.getElementById("new-provider-code").value = tmpl.code;
-      }
-    });
-  }
-
   const btnSubmitNewProvider = document.getElementById("btn-submit-new-provider");
   if (btnSubmitNewProvider) {
     btnSubmitNewProvider.addEventListener("click", async () => {
-      const filename = document.getElementById("new-provider-filename").value.trim();
-      const code = document.getElementById("new-provider-code").value.trim();
+      const fnInput = document.getElementById("new-provider-filename");
+      const codeInput = document.getElementById("new-provider-code");
+      const fn = fnInput.value.trim();
+      const code = codeInput.value.trim();
 
-      if (!filename || !code) {
-        showToast("Filename and Python code are required", "warning");
+      if (!fn) {
+        showToast("Filename is required", "error");
+        return;
+      }
+      if (!code) {
+        showToast("Python source code cannot be empty", "error");
         return;
       }
 
       try {
-        const res = await api("/api/plugins", {
+        await api("/api/plugins", {
           method: "POST",
-          body: JSON.stringify({ filename, code }),
+          body: JSON.stringify({ filename: fn, code }),
         });
-        showToast(`Plugin '${res.plugin.name}' created and loaded!`);
-        closeModal(el.modalNewProvider);
-        await fetchPlugins();
-        switchTab("providers");
+        showToast(`Plugin '${fn}' created and loaded`);
+        el.modalNewProvider.classList.remove("active");
+        fetchPlugins();
       } catch (err) {
         showToast(`Failed to create plugin: ${err.message}`, "error");
       }
     });
   }
 
-  // Modal: Variables Configuration
-  function openVariablesModal(pluginId) {
-    const plugin = state.plugins.find((p) => p.id === pluginId);
-    if (!plugin || !el.modalVariables) return;
+  // Account Modal
+  function openAccountModal(account = null, defaultProviderId = null) {
+    const idInput = document.getElementById("account-form-id");
+    const provSelect = document.getElementById("account-provider-select");
+    const nameInput = document.getElementById("account-name");
+    const keyInput = document.getElementById("account-api-key");
+    const baseInput = document.getElementById("account-base-url");
+    const priorityInput = document.getElementById("account-priority");
+    const weightInput = document.getElementById("account-weight");
+    const enabledInput = document.getElementById("account-enabled-toggle");
+    const title = document.getElementById("modal-account-title");
 
-    document.getElementById("vars-plugin-name").textContent = plugin.name;
-    const body = document.getElementById("vars-modal-body");
-    body.innerHTML = "";
-
-    if (!plugin.variables || plugin.variables.length === 0) {
-      body.innerHTML = `<p style="color: var(--ink-secondary); font-size: 13px;">This plugin does not declare any custom variables.</p>`;
-    } else {
-      plugin.variables.forEach((v) => {
-        const group = document.createElement("div");
-        group.className = "form-group";
-
-        const isSecret = v.type === "secret";
-        const val = v.value !== undefined && v.value !== null ? v.value : v.default || "";
-
-        group.innerHTML = `
-          <label class="form-label">
-            ${escapeHtml(v.label || v.name)}
-            ${v.required ? '<span style="color: var(--accent-red);">*</span>' : ""}
-          </label>
-          <div style="display: flex; gap: 8px;">
-            <input
-              type="${isSecret ? "password" : "text"}"
-              class="form-input var-input"
-              data-name="${escapeHtml(v.name)}"
-              data-type="${escapeHtml(v.type || 'string')}"
-              value="${escapeHtml(String(val))}"
-              placeholder="${escapeHtml(v.default ? String(v.default) : '')}"
-              style="flex: 1; font-family: var(--font-mono);"
-            >
-            ${isSecret ? '<button type="button" class="btn btn-secondary btn-sm toggle-mask-btn">👁</button>' : ""}
-          </div>
-          ${v.description ? `<span class="form-hint">${escapeHtml(v.description)}</span>` : ""}
-        `;
-
-        if (isSecret) {
-          const input = group.querySelector(".var-input");
-          const maskBtn = group.querySelector(".toggle-mask-btn");
-          maskBtn.addEventListener("click", () => {
-            if (input.type === "password") {
-              input.type = "text";
-              maskBtn.textContent = "🔒";
-            } else {
-              input.type = "password";
-              maskBtn.textContent = "👁";
-            }
-          });
-        }
-
-        body.appendChild(group);
-      });
-    }
-
-    const saveBtn = document.getElementById("btn-save-variables");
-    saveBtn.onclick = async () => {
-      const updatedVars = {};
-      body.querySelectorAll(".var-input").forEach((inp) => {
-        const type = inp.dataset.type;
-        let value = inp.value;
-        if (type === "number") {
-          const num = Number(value);
-          value = isNaN(num) ? value : num;
-        } else if (type === "boolean") {
-          value = value === "true" || value === "1" || value === true;
-        }
-        updatedVars[inp.dataset.name] = value;
-      });
-
-      try {
-        await api(`/api/plugins/${pluginId}/config`, {
-          method: "PUT",
-          body: JSON.stringify({ variables: updatedVars }),
-        });
-        showToast("Variables saved successfully");
-        closeModal(el.modalVariables);
-        fetchPlugins();
-      } catch (err) {
-        showToast(`Failed to save variables: ${err.message}`, "error");
-      }
-    };
-
-    el.modalVariables.classList.add("active");
-  }
-
-  // Modal: Add / Edit Custom Model
-  function openAddModelModal() {
-    if (!el.modalModel) return;
-    document.getElementById("modal-model-title").textContent = "Add Custom Model";
-    document.getElementById("model-form-id").value = "";
-    document.getElementById("model-form-id").disabled = false;
-    document.getElementById("model-form-name").value = "";
-    document.getElementById("model-form-upstream").value = "";
-    document.getElementById("model-form-context").value = 128000;
-    document.getElementById("model-form-max-tokens").value = 4096;
-
-    const pluginSelect = document.getElementById("model-form-plugin");
-    pluginSelect.innerHTML = "";
+    provSelect.innerHTML = "";
     state.plugins.forEach((p) => {
       const opt = document.createElement("option");
       opt.value = p.id;
-      opt.textContent = `${p.name} (${p.id})`;
-      pluginSelect.appendChild(opt);
+      opt.textContent = p.name;
+      if (defaultProviderId && p.id === defaultProviderId) opt.selected = true;
+      if (account && p.id === account.provider_id) opt.selected = true;
+      provSelect.appendChild(opt);
     });
-    pluginSelect.disabled = false;
+    enhanceSelect(provSelect);
 
-    const saveBtn = document.getElementById("btn-save-model");
-    saveBtn.onclick = async () => {
-      const pluginId = pluginSelect.value;
-      const modelId = document.getElementById("model-form-id").value.trim();
-      const name = document.getElementById("model-form-name").value.trim();
-      const upstream = document.getElementById("model-form-upstream").value.trim();
-      const context = parseInt(document.getElementById("model-form-context").value, 10) || 8192;
-      const maxTokens = parseInt(document.getElementById("model-form-max-tokens").value, 10) || 4096;
+    if (account) {
+      title.textContent = "Edit Provider Account";
+      idInput.value = account.id;
+      nameInput.value = account.name;
+      keyInput.value = account.api_key || "";
+      baseInput.value = account.base_url || "";
+      priorityInput.value = account.priority || 1;
+      weightInput.value = account.weight || 1;
+      enabledInput.checked = !!account.enabled;
+    } else {
+      title.textContent = "Connect Provider Account";
+      idInput.value = "";
+      nameInput.value = "";
+      keyInput.value = "";
+      baseInput.value = "";
+      priorityInput.value = 1;
+      weightInput.value = 1;
+      enabledInput.checked = true;
+    }
 
-      if (!modelId || !name) {
-        showToast("Model ID and Display Name are required", "warning");
+    el.modalAccount.classList.add("active");
+  }
+
+  const btnSaveAccount = document.getElementById("btn-save-account");
+  if (btnSaveAccount) {
+    btnSaveAccount.addEventListener("click", async () => {
+      const idInput = document.getElementById("account-form-id");
+      const provSelect = document.getElementById("account-provider-select");
+      const nameInput = document.getElementById("account-name");
+      const keyInput = document.getElementById("account-api-key");
+      const baseInput = document.getElementById("account-base-url");
+      const priorityInput = document.getElementById("account-priority");
+      const weightInput = document.getElementById("account-weight");
+      const enabledInput = document.getElementById("account-enabled-toggle");
+
+      const name = nameInput.value.trim();
+      const provId = provSelect.value;
+      if (!name) {
+        showToast("Account name is required", "error");
         return;
       }
 
       try {
-        await api(`/api/plugins/${pluginId}/models`, {
-          method: "POST",
-          body: JSON.stringify({
-            id: modelId,
-            name,
-            upstream_model: upstream || modelId,
-            context_window: context,
-            max_tokens: maxTokens,
-            enabled: true,
-          }),
-        });
-        showToast(`Model '${modelId}' added to ${pluginId}`);
-        closeModal(el.modalModel);
-        fetchPlugins();
+        if (idInput.value) {
+          // Edit
+          await api(`/api/accounts/${idInput.value}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              name,
+              api_key: keyInput.value,
+              base_url: baseInput.value || undefined,
+              priority: parseInt(priorityInput.value, 10) || 1,
+              weight: parseInt(weightInput.value, 10) || 1,
+              enabled: enabledInput.checked,
+            }),
+          });
+          showToast(`Account '${name}' updated`);
+        } else {
+          // Create
+          await api("/api/accounts", {
+            method: "POST",
+            body: JSON.stringify({
+              provider_id: provId,
+              name,
+              api_key: keyInput.value,
+              base_url: baseInput.value || undefined,
+              priority: parseInt(priorityInput.value, 10) || 1,
+              weight: parseInt(weightInput.value, 10) || 1,
+              enabled: enabledInput.checked,
+            }),
+          });
+          showToast(`Account '${name}' connected`);
+        }
+
+        el.modalAccount.classList.remove("active");
+        await fetchAccounts();
+        if (state.currentFullscreenPluginId) {
+          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        }
       } catch (err) {
-        showToast(`Failed to add model: ${err.message}`, "error");
+        showToast(`Failed to save account: ${err.message}`, "error");
       }
-    };
-
-    el.modalModel.classList.add("active");
+    });
   }
 
-  function openEditModelModal(pluginId, model) {
-    if (!el.modalModel) return;
-    document.getElementById("modal-model-title").textContent = `Edit Model: ${model.id}`;
-    document.getElementById("model-form-id").value = model.id;
-    document.getElementById("model-form-id").disabled = true;
-    document.getElementById("model-form-name").value = model.name;
-    document.getElementById("model-form-upstream").value = model.upstream_model || "";
-    document.getElementById("model-form-context").value = model.context_window || 8192;
-    document.getElementById("model-form-max-tokens").value = model.max_tokens || 4096;
-
-    const pluginSelect = document.getElementById("model-form-plugin");
-    pluginSelect.innerHTML = `<option value="${pluginId}">${pluginId}</option>`;
-    pluginSelect.disabled = true;
-
-    const saveBtn = document.getElementById("btn-save-model");
-    saveBtn.onclick = async () => {
-      const name = document.getElementById("model-form-name").value.trim();
-      const upstream = document.getElementById("model-form-upstream").value.trim();
-      const context = parseInt(document.getElementById("model-form-context").value, 10) || 8192;
-      const maxTokens = parseInt(document.getElementById("model-form-max-tokens").value, 10) || 4096;
-
-      try {
-        await api(`/api/plugins/${pluginId}/models/${model.id}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            name,
-            upstream_model: upstream || model.id,
-            context_window: context,
-            max_tokens: maxTokens,
-          }),
-        });
-        showToast(`Model '${model.id}' updated`);
-        closeModal(el.modalModel);
-        fetchPlugins();
-      } catch (err) {
-        showToast(`Failed to update model: ${err.message}`, "error");
+  // Toggle account key visibility
+  const btnToggleKey = document.getElementById("btn-toggle-account-key");
+  if (btnToggleKey) {
+    btnToggleKey.addEventListener("click", () => {
+      const keyInput = document.getElementById("account-api-key");
+      if (keyInput) {
+        const isPass = keyInput.type === "password";
+        keyInput.type = isPass ? "text" : "password";
+        btnToggleKey.textContent = isPass ? "Hide" : "Show";
       }
-    };
-
-    el.modalModel.classList.add("active");
+    });
   }
 
-  if (el.btnAddModel) {
-    el.btnAddModel.addEventListener("click", openAddModelModal);
-  }
+  // Close modals on click of .modal-close or clicking backdrop
+  document.querySelectorAll(".modal-close").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".modal-overlay").forEach((m) => m.classList.remove("active"));
+    });
+  });
 
-  // =========================================================================
-  // Utility Functions
-  // =========================================================================
+  document.querySelectorAll(".modal-overlay").forEach((m) => {
+    m.addEventListener("click", (e) => {
+      if (e.target === m) m.classList.remove("active");
+    });
+  });
 
-  function escapeHtml(str) {
-    if (typeof str !== "string") return "";
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  // =========================================================================
-  // App Initialization
-  // =========================================================================
-
+  // Global initial boot
   async function init() {
-    await Promise.all([
-      fetchStats(),
-      fetchPlugins(),
-      fetchAccounts(),
-      fetchTemplates(),
-      fetchLogs(),
-    ]);
-
-    renderChatHistory();
+    enhanceAllSelects();
+    await fetchStats();
+    await fetchPlugins();
+    await fetchAccounts();
+    await fetchApiKeys();
+    await fetchRules();
+    updateSnippet();
   }
 
-  init();
+  window.addEventListener("DOMContentLoaded", init);
 })();

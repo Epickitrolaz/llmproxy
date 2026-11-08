@@ -15,6 +15,12 @@ from llmproxy.schemas import (
     Account,
     AccountCreate,
     AccountUpdate,
+    APIKey,
+    APIKeyCreate,
+    APIKeyUpdate,
+    LoadBalancingRule,
+    LoadBalancingRuleCreate,
+    LoadBalancingRuleUpdate,
     PluginMetadata,
     PluginModelConfig,
     PluginVariable,
@@ -38,16 +44,25 @@ class PluginManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.data_dir / "plugin_configs.json"
         self.accounts_file = self.data_dir / "accounts.json"
+        self.api_keys_file = self.data_dir / "api_keys.json"
+        self.rules_file = self.data_dir / "load_balancing_rules.json"
+        self.logs_file = self.data_dir / "request_logs.json"
 
         self.plugins: Dict[str, BasePlugin] = {}
         self.plugin_files: Dict[str, Path] = {}
         self.configs: Dict[str, Dict[str, Any]] = {}
         self.accounts: Dict[str, Account] = {}
+        self.api_keys: Dict[str, APIKey] = {}
+        self.rules: Dict[str, LoadBalancingRule] = {}
         self.rr_indices: Dict[str, int] = {}
+        self.rule_rr_indices: Dict[str, int] = {}
         self.logs: List[RequestLogEntry] = []
 
         self._load_configs()
         self._load_accounts()
+        self._load_api_keys()
+        self._load_rules()
+        self._load_logs()
 
     def _load_configs(self) -> None:
         """Load persisted plugin configurations from disk."""
@@ -93,6 +108,75 @@ class PluginManager:
         except Exception as e:
             logger.error("Failed to save accounts to %s: %s", self.accounts_file, e)
 
+    def _load_api_keys(self) -> None:
+        """Load API keys from disk."""
+        if self.api_keys_file.exists():
+            try:
+                data = json.loads(self.api_keys_file.read_text(encoding="utf-8"))
+                self.api_keys = {
+                    item["id"]: APIKey.model_validate(item)
+                    for item in data
+                }
+            except Exception as e:
+                logger.warning("Failed to load API keys from %s: %s", self.api_keys_file, e)
+                self.api_keys = {}
+        else:
+            self.api_keys = {}
+
+    def _save_api_keys(self) -> None:
+        """Persist API keys to disk."""
+        try:
+            self.api_keys_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = [k.model_dump() for k in self.api_keys.values()]
+            self.api_keys_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save API keys to %s: %s", self.api_keys_file, e)
+
+    def _load_rules(self) -> None:
+        """Load custom load balancing rules from disk."""
+        if self.rules_file.exists():
+            try:
+                data = json.loads(self.rules_file.read_text(encoding="utf-8"))
+                self.rules = {
+                    item["id"]: LoadBalancingRule.model_validate(item)
+                    for item in data
+                }
+            except Exception as e:
+                logger.warning("Failed to load rules from %s: %s", self.rules_file, e)
+                self.rules = {}
+        else:
+            self.rules = {}
+
+    def _save_rules(self) -> None:
+        """Persist custom load balancing rules to disk."""
+        try:
+            self.rules_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = [r.model_dump() for r in self.rules.values()]
+            self.rules_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save rules to %s: %s", self.rules_file, e)
+
+    def _load_logs(self) -> None:
+        """Load request logs from disk."""
+        if self.logs_file.exists():
+            try:
+                data = json.loads(self.logs_file.read_text(encoding="utf-8"))
+                self.logs = [RequestLogEntry.model_validate(item) for item in data]
+            except Exception as e:
+                logger.warning("Failed to load request logs from %s: %s", self.logs_file, e)
+                self.logs = []
+        else:
+            self.logs = []
+
+    def _save_logs(self) -> None:
+        """Persist request logs to disk."""
+        try:
+            self.logs_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = [log.model_dump() for log in self.logs[:1000]]
+            self.logs_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save request logs to %s: %s", self.logs_file, e)
+
     # ==========================================
     # Accounts Management & Load Balancing
     # ==========================================
@@ -132,6 +216,171 @@ class PluginManager:
         self.accounts[account.id] = account
         self._save_accounts()
         return account
+
+    # ==========================================
+    # Local API Key Management & Usage Tracking
+    # ==========================================
+
+    def get_api_keys(self) -> List[APIKey]:
+        """Return all local API keys."""
+        return list(self.api_keys.values())
+
+    def get_api_key(self, key_id: str) -> Optional[APIKey]:
+        """Retrieve an API key by ID."""
+        return self.api_keys.get(key_id)
+
+    def get_api_key_by_secret(self, secret: str) -> Optional[APIKey]:
+        """Find an API key by its key string."""
+        for k in self.api_keys.values():
+            if k.key == secret:
+                return k
+        return None
+
+    def add_api_key(self, key_data: Union[APIKey, APIKeyCreate, Dict[str, Any]]) -> APIKey:
+        """Create and persist a new local API key."""
+        if isinstance(key_data, APIKey):
+            key = key_data
+        elif isinstance(key_data, APIKeyCreate):
+            secret = key_data.key if key_data.key and key_data.key.strip() else f"sk-proxy-{uuid.uuid4().hex}"
+            key = APIKey(
+                name=key_data.name,
+                key=secret,
+                enabled=key_data.enabled,
+            )
+        else:
+            k_dict = dict(key_data)
+            if "key" not in k_dict or not k_dict["key"] or not str(k_dict["key"]).strip():
+                k_dict["key"] = f"sk-proxy-{uuid.uuid4().hex}"
+            key = APIKey.model_validate(k_dict)
+
+        self.api_keys[key.id] = key
+        self._save_api_keys()
+        return key
+
+    def update_api_key(
+        self, key_id: str, updates: Union[APIKeyUpdate, Dict[str, Any]]
+    ) -> Optional[APIKey]:
+        """Update an existing local API key."""
+        key = self.api_keys.get(key_id)
+        if not key:
+            return None
+
+        upd = updates.model_dump(exclude_unset=True) if isinstance(updates, APIKeyUpdate) else updates
+        for k, v in upd.items():
+            if v is not None and hasattr(key, k):
+                setattr(key, k, v)
+
+        self._save_api_keys()
+        return key
+
+    def delete_api_key(self, key_id: str) -> bool:
+        """Delete an API key."""
+        if key_id in self.api_keys:
+            del self.api_keys[key_id]
+            self._save_api_keys()
+            return True
+        return False
+
+    def record_api_key_usage(
+        self, key_id: str, prompt_tokens: int = 0, completion_tokens: int = 0
+    ) -> None:
+        """Increment usage counters and update timestamp for an API key."""
+        key = self.api_keys.get(key_id)
+        if not key:
+            return
+        key.total_requests += 1
+        key.prompt_tokens += prompt_tokens
+        key.completion_tokens += completion_tokens
+        key.total_tokens += (prompt_tokens + completion_tokens)
+        key.last_used_at = time.time()
+        self._save_api_keys()
+
+    # ==========================================
+    # Custom Load Balancing Rules Management
+    # ==========================================
+
+    def get_load_balancing_rules(self) -> List[LoadBalancingRule]:
+        """Return all custom load balancing rules."""
+        return list(self.rules.values())
+
+    def get_load_balancing_rule(self, rule_id: str) -> Optional[LoadBalancingRule]:
+        """Get a custom load balancing rule by ID."""
+        return self.rules.get(rule_id)
+
+    def add_load_balancing_rule(
+        self, rule_data: Union[LoadBalancingRule, LoadBalancingRuleCreate, Dict[str, Any]]
+    ) -> LoadBalancingRule:
+        """Add and persist a new custom load balancing rule."""
+        if isinstance(rule_data, LoadBalancingRule):
+            rule = rule_data
+        elif isinstance(rule_data, LoadBalancingRuleCreate):
+            rule = LoadBalancingRule(
+                model_id=rule_data.model_id,
+                name=rule_data.name,
+                enabled=rule_data.enabled,
+                strategy=rule_data.strategy,
+                targets=rule_data.targets,
+                description=rule_data.description or "",
+            )
+        else:
+            r_dict = dict(rule_data)
+            rule = LoadBalancingRule.model_validate(r_dict)
+
+        self.rules[rule.id] = rule
+        self._save_rules()
+        return rule
+
+    def update_load_balancing_rule(
+        self, rule_id: str, updates: Union[LoadBalancingRuleUpdate, Dict[str, Any]]
+    ) -> Optional[LoadBalancingRule]:
+        """Update properties of a custom load balancing rule."""
+        rule = self.rules.get(rule_id)
+        if not rule:
+            return None
+
+        upd = updates.model_dump(exclude_unset=True) if isinstance(updates, LoadBalancingRuleUpdate) else updates
+        for k, v in upd.items():
+            if v is not None and hasattr(rule, k):
+                setattr(rule, k, v)
+
+        self._save_rules()
+        return rule
+
+    def delete_load_balancing_rule(self, rule_id: str) -> bool:
+        """Delete a custom load balancing rule."""
+        if rule_id in self.rules:
+            del self.rules[rule_id]
+            self._save_rules()
+            return True
+        return False
+
+    def select_rule_target(self, rule: LoadBalancingRule) -> Optional[str]:
+        """Select a target model ID based on the rule's load balancing strategy."""
+        if not rule.targets:
+            return None
+
+        valid_targets = [t for t in rule.targets if t and t.strip()]
+        if not valid_targets:
+            return None
+
+        strat = (rule.strategy or "round_robin").lower().replace("-", "_")
+
+        if strat == "random":
+            return random.choice(valid_targets)
+        elif strat in ("fallback", "priority"):
+            return valid_targets[0]
+        elif strat == "least_used":
+            counts = {t: 0 for t in valid_targets}
+            for log in self.logs:
+                if log.model in counts:
+                    counts[log.model] += 1
+            return min(valid_targets, key=lambda t: counts[t])
+        else:
+            # Default: round_robin
+            idx = self.rule_rr_indices.get(rule.id, 0)
+            selected = valid_targets[idx % len(valid_targets)]
+            self.rule_rr_indices[rule.id] = (idx + 1) % len(valid_targets)
+            return selected
 
     def update_account(
         self, account_id: str, updates: Union[AccountUpdate, Dict[str, Any]]
@@ -404,6 +653,7 @@ class PluginManager:
         for plugin in self.plugins.values():
             cfg = self.configs.get(plugin.metadata.id, {})
             enabled = cfg.get("enabled", plugin.metadata.enabled)
+            pinned = cfg.get("pinned", getattr(plugin.metadata, "pinned", False))
             models = self.get_plugin_models(plugin.metadata.id)
             vars_dict = self.get_plugin_variables(plugin.metadata.id)
 
@@ -424,20 +674,25 @@ class PluginManager:
 
             meta_copy = plugin.metadata.model_copy(update={
                 "enabled": enabled,
+                "pinned": pinned,
                 "filename": filename,
                 "variables": variables,
                 "models": models,
             })
             result.append(meta_copy)
+
+        # Sort pinned plugins first, then alphabetically by name
+        result.sort(key=lambda p: (not p.pinned, p.name.lower()))
         return result
 
     def update_plugin_config(
         self,
         plugin_id: str,
         enabled: Optional[bool] = None,
+        pinned: Optional[bool] = None,
         variables: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Update plugin variables and/or enabled status."""
+        """Update plugin variables and/or enabled/pinned status."""
         if plugin_id not in self.plugins and plugin_id not in self.configs:
             return False
 
@@ -445,6 +700,7 @@ class PluginManager:
             plugin_id,
             {
                 "enabled": True,
+                "pinned": False,
                 "variables": {},
                 "custom_models": [],
                 "edited_models": {},
@@ -453,6 +709,8 @@ class PluginManager:
         )
         if enabled is not None:
             cfg["enabled"] = enabled
+        if pinned is not None:
+            cfg["pinned"] = pinned
         if variables is not None:
             cfg.setdefault("variables", {}).update(variables)
 
@@ -564,6 +822,8 @@ class PluginManager:
 
     def get_all_active_models(self) -> List[Tuple[PluginModelConfig, BasePlugin]]:
         """Return list of (model_config, plugin) for all enabled plugins and models."""
+        if not self.plugins:
+            self.discover_and_load_all()
         active: List[Tuple[PluginModelConfig, BasePlugin]] = []
         for plugin_id, plugin in self.plugins.items():
             cfg = self.configs.get(plugin_id, {})
@@ -579,6 +839,16 @@ class PluginManager:
         self, model_id: str
     ) -> Optional[Tuple[PluginModelConfig, BasePlugin, Dict[str, Any]]]:
         """Resolve a model ID to its plugin, model config, and active variables."""
+        # 1. First check if model_id is a custom load balancing rule
+        for rule in self.rules.values():
+            if rule.enabled and rule.model_id == model_id:
+                target_model_id = self.select_rule_target(rule)
+                if target_model_id and target_model_id != model_id:
+                    res = self.resolve_model(target_model_id)
+                    if res is not None:
+                        return res
+
+        # 2. Check directly across active plugin models
         for model_config, plugin in self.get_all_active_models():
             if model_config.id == model_id:
                 vars_dict = self.get_plugin_variables(plugin.metadata.id)
@@ -586,14 +856,17 @@ class PluginManager:
         return None
 
     def add_log(self, entry: RequestLogEntry) -> None:
-        """Add a request log entry."""
+        """Add a request log entry and persist to disk."""
         self.logs.insert(0, entry)
         if len(self.logs) > 1000:
             self.logs.pop()
+        self._save_logs()
 
-    def get_logs(self, limit: int = 100) -> List[RequestLogEntry]:
+    def get_logs(self, limit: Optional[int] = None) -> List[RequestLogEntry]:
         """Retrieve recent request logs."""
-        return self.logs[:limit]
+        if limit is not None:
+            return self.logs[:limit]
+        return list(self.logs)
 
 
 # Global singleton instance

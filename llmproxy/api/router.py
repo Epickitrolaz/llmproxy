@@ -90,10 +90,59 @@ async def _invoke_plugin_completion(plugin, request, model_config, variables, ac
     return await plugin.chat_completion(request, model_config, variables)
 
 
+def _extract_api_key(req: Request) -> Optional[str]:
+    """Extract local API key from Authorization header or custom headers."""
+    auth = req.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    if auth.startswith("bearer "):
+        return auth[7:].strip()
+    x_key = req.headers.get("x-api-key") or req.headers.get("api-key")
+    if x_key:
+        return x_key.strip()
+    return None
+
+
 @router.post("/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     start_time = time.time()
     prompt_tokens = _calc_prompt_tokens(request.messages, tools=request.tools)
+
+    # 0. Local API Key Authentication & Verification
+    matched_api_key = None
+    all_keys = plugin_manager.get_api_keys()
+    active_keys = [k for k in all_keys if k.enabled]
+    token = _extract_api_key(http_request)
+
+    if active_keys:
+        if not token:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Missing API key. Pass 'Authorization: Bearer <key>' or 'x-api-key'.",
+                        "type": "invalid_request_error",
+                        "code": "missing_api_key",
+                    }
+                },
+            )
+        matched = next((k for k in active_keys if k.key == token), None)
+        if not matched:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Invalid API key or key is disabled.",
+                        "type": "invalid_request_error",
+                        "code": "invalid_api_key",
+                    }
+                },
+            )
+        matched_api_key = matched
+    elif token:
+        matched = next((k for k in all_keys if k.key == token), None)
+        if matched and matched.enabled:
+            matched_api_key = matched
 
     # 1. Resolve model to plugin, model config, and variables
     resolved = plugin_manager.resolve_model(request.model)
@@ -104,6 +153,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 id=f"req-{uuid.uuid4().hex[:12]}",
                 model=request.model,
                 plugin_id=None,
+                api_key_id=matched_api_key.id if matched_api_key else None,
                 status="error",
                 status_code=404,
                 latency_ms=latency_ms,
@@ -228,12 +278,19 @@ async def chat_completions(request: ChatCompletionRequest):
                 latency_ms = round((time.time() - start_time) * 1000, 2)
                 if current_account:
                     plugin_manager.mark_account_result(current_account.id, success=True)
+                if matched_api_key:
+                    plugin_manager.record_api_key_usage(
+                        matched_api_key.id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
 
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=log_id,
                         model=request.model,
                         plugin_id=plugin.metadata.id,
+                        api_key_id=matched_api_key.id if matched_api_key else None,
                         status="success",
                         status_code=200,
                         latency_ms=latency_ms,
@@ -257,6 +314,7 @@ async def chat_completions(request: ChatCompletionRequest):
                         id=log_id,
                         model=request.model,
                         plugin_id=plugin.metadata.id,
+                        api_key_id=matched_api_key.id if matched_api_key else None,
                         status="error",
                         status_code=429 if is_rate_limit else 500,
                         latency_ms=latency_ms,
@@ -308,12 +366,19 @@ async def chat_completions(request: ChatCompletionRequest):
 
             if current_account:
                 plugin_manager.mark_account_result(current_account.id, success=True)
+            if matched_api_key:
+                plugin_manager.record_api_key_usage(
+                    matched_api_key.id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
 
             plugin_manager.add_log(
                 RequestLogEntry(
                     id=getattr(response, "id", f"req-{uuid.uuid4().hex[:12]}"),
                     model=request.model,
                     plugin_id=plugin.metadata.id,
+                    api_key_id=matched_api_key.id if matched_api_key else None,
                     status="success",
                     status_code=200,
                     latency_ms=latency_ms,
@@ -351,6 +416,7 @@ async def chat_completions(request: ChatCompletionRequest):
             id=f"req-{uuid.uuid4().hex[:12]}",
             model=request.model,
             plugin_id=plugin.metadata.id,
+            api_key_id=matched_api_key.id if matched_api_key else None,
             status="error",
             status_code=status_code,
             latency_ms=latency_ms,
@@ -373,10 +439,17 @@ async def chat_completions(request: ChatCompletionRequest):
 
 @router.get("/models", response_model=ModelListResponse)
 async def list_models():
-    """List all available models from active plugins in OpenAI format."""
-    active_models = plugin_manager.get_all_active_models()
+    """List all available models from active plugins and load balancing rules in OpenAI format."""
     cards: List[ModelCard] = []
     seen = set()
+
+    # Include custom load balancing rule models
+    for rule in plugin_manager.get_load_balancing_rules():
+        if rule.enabled and rule.model_id not in seen:
+            cards.append(ModelCard(id=rule.model_id, owned_by="load_balancer"))
+            seen.add(rule.model_id)
+
+    active_models = plugin_manager.get_all_active_models()
     for model_config, plugin in active_models:
         if model_config.id not in seen:
             cards.append(
@@ -392,6 +465,10 @@ async def list_models():
 @router.get("/models/{model_id}", response_model=ModelCard)
 async def get_model(model_id: str):
     """Get information about a specific model."""
+    for rule in plugin_manager.get_load_balancing_rules():
+        if rule.enabled and rule.model_id == model_id:
+            return ModelCard(id=rule.model_id, owned_by="load_balancer")
+
     active_models = plugin_manager.get_all_active_models()
     for model_config, plugin in active_models:
         if model_config.id == model_id:
