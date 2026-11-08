@@ -299,46 +299,55 @@
         </div>
       </div>
 
-      <div class="card status-tracker-card" id="status-tracker-card" style="margin-bottom: 24px; padding: 20px;">
-        <div id="status-tracker-body">
-          <!-- Provider Tabs for Multi-Provider Status Scaling -->
-          <div class="status-provider-tabs" id="status-provider-tabs">
-            <button class="status-provider-tab active" data-provider="">All Providers</button>
-          </div>
+      <div class="status-layout-grid">
+        <!-- Left: Usage / Account Status Tracker -->
+        <div class="status-col-usage">
+          <div class="card status-tracker-card" id="status-tracker-card">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+              <h3>Account Usage & Quota</h3>
+            </div>
+            <div id="status-tracker-body">
+              <!-- Provider Tabs for Multi-Provider Status Scaling -->
+              <div class="status-provider-tabs" id="status-provider-tabs">
+                <button class="status-provider-tab active" data-provider="">All Providers</button>
+              </div>
 
-          <!-- Accounts Two-Row Layout Cards -->
-          <div class="accounts-two-rows-grid" id="status-accounts-grid">
-            <div style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--ink-muted);">
-              Loading accounts and status...
+              <!-- Accounts Grid Layout Cards -->
+              <div class="accounts-two-rows-grid" id="status-accounts-grid">
+                <div style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--ink-muted);">
+                  Loading accounts and status...
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- Request Logs Audit Table -->
-      <div class="card">
-        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-          <h3>Persistent Request Audit Log</h3>
-          <span style="font-size: 11.5px; color: var(--ink-muted);">Persisted across server restarts</span>
-        </div>
-        <div class="table-container">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Status</th>
-                <th>Model</th>
-                <th>Provider</th>
-                <th>API Key</th>
-                <th>Latency</th>
-                <th>Tokens (In / Out)</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody id="logs-table-body">
-              <!-- Rendered dynamically via app.js -->
-            </tbody>
-          </table>
+        <!-- Right: Persistent Request Audit Log -->
+        <div class="status-col-logs">
+          <div class="card status-logs-card">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+              <h3>Persistent Request Audit Log</h3>
+            </div>
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Status</th>
+                    <th>Model</th>
+                    <th>Provider</th>
+                    <th>API Key</th>
+                    <th>Latency</th>
+                    <th>Tokens (In / Out)</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="logs-table-body">
+                  <!-- Rendered dynamically via app.js -->
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -357,7 +366,6 @@
           <h3 id="fs-provider-title">Configure Provider</h3>
           <span class="badge" id="fs-provider-id-badge">provider_id</span>
           <span class="badge" id="fs-provider-filename-badge">file.py</span>
-          <button class="btn-pin" id="fs-provider-pin-btn" title="Pin to top">📌 Pin</button>
         </div>
         <div style="display: flex; align-items: center; gap: 12px;">
           <label class="switch" title="Toggle plugin enabled status">

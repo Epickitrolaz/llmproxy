@@ -25,6 +25,7 @@
     chatMessages: [],
     autoRefreshLogs: false,
     autoRefreshInterval: null,
+    cachedQuotaData: null,
     hiddenLimits: {}, // { [accountId]: Set of bucketIds/limitNames }
   };
 
@@ -54,6 +55,7 @@
 
   // DOM Elements Cache
   const el = {
+    mainContent: document.querySelector(".main-content"),
     navTabs: document.querySelectorAll(".nav-tab"),
     tabPanels: document.querySelectorAll(".tab-panel"),
     // Stats
@@ -67,6 +69,7 @@
     btnCreateApiKey: document.getElementById("btn-create-api-key"),
     snippetCode: document.getElementById("snippet-code"),
     snippetModelSelect: document.getElementById("snippet-model-select"),
+    headerEndpointDisplay: document.getElementById("header-endpoint-display"),
     copySnippetBtn: document.getElementById("copy-snippet-btn"),
     copyEndpointBtn: document.getElementById("copy-endpoint-btn"),
     // Providers
@@ -133,6 +136,53 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  // Themed SVG Icon for Pin (minimalist monochrome)
+  function renderPinSvg(pinned = false, size = 13) {
+    if (pinned) {
+      return `<svg class="pin-svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M16 3H8a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 16.24V17h14v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 11.76V7h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1z"></path>
+        <line x1="12" y1="17" x2="12" y2="22" stroke-width="2"></line>
+      </svg>`;
+    }
+    return `<svg class="pin-svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 3H8a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 16.24V17h14v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 11.76V7h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1z"></path>
+      <line x1="12" y1="17" x2="12" y2="22"></line>
+    </svg>`;
+  }
+
+  // Robust Cross-Browser Clipboard Helper
+  // Fixes "navigator.clipboard is undefined" when accessed over HTTP IP (e.g. http://10.0.0.110:8080)
+  async function copyToClipboard(text) {
+    if (!text && text !== "") return false;
+    if (navigator.clipboard && window.isSecureContext && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (err) {
+        console.warn("navigator.clipboard.writeText failed, using fallback:", err);
+      }
+    }
+
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      textarea.style.left = "-9999px";
+      textarea.style.opacity = "0";
+      textarea.setAttribute("readonly", "");
+      document.body.appendChild(textarea);
+      textarea.select();
+      textarea.setSelectionRange(0, 999999);
+      const successful = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return !!successful;
+    } catch (err) {
+      console.error("Clipboard execCommand fallback failed:", err);
+      return false;
+    }
   }
 
   // API Client
@@ -381,6 +431,9 @@
 
   function switchTab(tabId) {
     state.currentTab = tabId;
+    if (el.mainContent) {
+      el.mainContent.classList.toggle("wide-layout", tabId === "playground" || tabId === "logs" || tabId === "status");
+    }
     el.navTabs.forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.tab === tabId);
     });
@@ -399,7 +452,7 @@
     } else if (tabId === "playground") {
       populatePlaygroundModels();
     } else if (tabId === "status" || tabId === "logs") {
-      fetchStatusData();
+      fetchStatusData(true);
     }
   }
 
@@ -486,9 +539,13 @@
         </td>
       `;
 
-      tr.querySelector(".btn-copy-key").addEventListener("click", () => {
-        navigator.clipboard.writeText(k.key);
-        showToast("API key copied to clipboard");
+      tr.querySelector(".btn-copy-key").addEventListener("click", async () => {
+        const ok = await copyToClipboard(k.key);
+        if (ok) {
+          showToast("API key copied to clipboard");
+        } else {
+          showToast("Failed to copy API key", "error");
+        }
       });
 
       tr.querySelector(".btn-edit-key").addEventListener("click", () => {
@@ -632,19 +689,48 @@ print()`;
     });
   });
 
+  // Initialize endpoint display with active origin
+  if (el.headerEndpointDisplay && window.location.origin) {
+    el.headerEndpointDisplay.textContent = `${window.location.origin}/v1`;
+  }
+
   if (el.copySnippetBtn) {
-    el.copySnippetBtn.addEventListener("click", () => {
+    el.copySnippetBtn.addEventListener("click", async () => {
       if (el.snippetCode) {
-        navigator.clipboard.writeText(el.snippetCode.textContent);
-        showToast("Integration snippet copied to clipboard");
+        const ok = await copyToClipboard(el.snippetCode.textContent);
+        if (ok) {
+          showToast("Integration snippet copied to clipboard");
+        } else {
+          showToast("Failed to copy snippet", "error");
+        }
       }
     });
   }
 
   if (el.copyEndpointBtn) {
-    el.copyEndpointBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText("http://localhost:8000/v1");
-      showToast("Base URL endpoint copied");
+    el.copyEndpointBtn.addEventListener("click", async () => {
+      const url = (el.headerEndpointDisplay && el.headerEndpointDisplay.textContent) || `${window.location.origin}/v1`;
+      const ok = await copyToClipboard(url);
+      if (ok) {
+        showToast("Base URL endpoint copied");
+      } else {
+        showToast("Failed to copy URL", "error");
+      }
+    });
+  }
+
+  const copyGoogleBtn = document.getElementById("btn-copy-google-url");
+  if (copyGoogleBtn) {
+    copyGoogleBtn.addEventListener("click", async () => {
+      const authLink = document.getElementById("btn-open-google-auth");
+      if (authLink && authLink.href) {
+        const ok = await copyToClipboard(authLink.href);
+        if (ok) {
+          showToast("Sign-in link copied to clipboard");
+        } else {
+          showToast("Failed to copy link", "error");
+        }
+      }
     });
   }
 
@@ -716,9 +802,6 @@ print()`;
               <div class="provider-id">${escapeHtml(p.id)} • ${escapeHtml(p.filename || p.id + ".py")}</div>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <button class="btn-pin ${isPinned ? 'pinned' : ''} btn-toggle-pin" data-id="${p.id}" title="${isPinned ? 'Unpin provider' : 'Pin provider to top'}">
-                📌
-              </button>
               <label class="switch" title="Toggle plugin enabled status">
                 <input type="checkbox" class="provider-enable-toggle" data-id="${p.id}" ${p.enabled ? "checked" : ""}>
                 <span class="slider"></span>
@@ -740,18 +823,6 @@ print()`;
           </div>
         </div>
       `;
-
-      // Event: Pin Toggle
-      card.querySelector(".btn-toggle-pin").addEventListener("click", async () => {
-        try {
-          const res = await api(`/api/plugins/${p.id}/pin`, { method: "POST" });
-          p.pinned = res.pinned;
-          showToast(`Plugin '${p.name}' ${p.pinned ? "pinned to top" : "unpinned"}`);
-          fetchPlugins();
-        } catch (err) {
-          showToast(`Pin failed: ${err.message}`, "error");
-        }
-      });
 
       // Event: Enable toggle
       const toggle = card.querySelector(".provider-enable-toggle");
@@ -859,18 +930,7 @@ print()`;
     if (fnBadge) fnBadge.textContent = plugin.filename || `${plugin.id}.py`;
 
     if (pinBtn) {
-      pinBtn.classList.toggle("pinned", !!plugin.pinned);
-      pinBtn.onclick = async () => {
-        try {
-          const res = await api(`/api/plugins/${plugin.id}/pin`, { method: "POST" });
-          plugin.pinned = res.pinned;
-          pinBtn.classList.toggle("pinned", !!plugin.pinned);
-          showToast(`Plugin '${plugin.name}' ${plugin.pinned ? "pinned" : "unpinned"}`);
-          fetchPlugins();
-        } catch (err) {
-          showToast(`Pin failed: ${err.message}`, "error");
-        }
-      };
+      pinBtn.remove();
     }
 
     if (enableToggle) {
@@ -1671,12 +1731,28 @@ print()`;
   // TAB 5: STATUS (RENAMED FROM REQUEST LOGS)
   // =========================================================================
 
-  async function fetchStatusData() {
-    await fetchPlugins();
-    await fetchAccounts();
+  async function fetchStatusData(fetchFreshQuota = true) {
+    await Promise.allSettled([
+      fetchPlugins(),
+      fetchAccounts(),
+      fetchLogs(),
+    ]);
     renderStatusProviderTabs();
-    await renderStatusAccountsGrid();
-    await fetchLogs();
+    await renderStatusAccountsGrid(fetchFreshQuota);
+  }
+
+  async function togglePluginPin(plugin) {
+    try {
+      const res = await api(`/api/plugins/${plugin.id}/pin`, { method: "POST" });
+      plugin.pinned = res.pinned;
+      const pInState = state.plugins.find((item) => item.id === plugin.id);
+      if (pInState) pInState.pinned = res.pinned;
+      showToast(`Provider '${plugin.name}' ${res.pinned ? "pinned to top" : "unpinned"}`);
+      renderStatusProviderTabs();
+      renderStatusAccountsGrid(false);
+    } catch (err) {
+      showToast(`Pin failed: ${err.message}`, "error");
+    }
   }
 
   function renderStatusProviderTabs() {
@@ -1690,7 +1766,7 @@ print()`;
     allBtn.addEventListener("click", () => {
       state.statusProviderFilter = "";
       renderStatusProviderTabs();
-      renderStatusAccountsGrid();
+      renderStatusAccountsGrid(false);
     });
     el.statusProviderTabs.appendChild(allBtn);
 
@@ -1704,23 +1780,69 @@ print()`;
     sortedPlugins.forEach((p) => {
       const btn = document.createElement("button");
       btn.className = `status-provider-tab ${state.statusProviderFilter === p.id ? 'active' : ''}`;
-      btn.textContent = `${p.pinned ? '📌 ' : ''}${p.name}`;
-      btn.addEventListener("click", () => {
+      btn.innerHTML = `
+        <span>${escapeHtml(p.name)}</span>
+        <span class="tab-pin-toggle ${p.pinned ? 'pinned' : ''}" data-pin-id="${p.id}" title="${p.pinned ? 'Unpin provider' : 'Pin provider to top'}">
+          ${renderPinSvg(p.pinned, 11)}
+        </span>
+      `;
+      btn.addEventListener("click", (e) => {
+        const pinToggle = e.target.closest(".tab-pin-toggle");
+        if (pinToggle) {
+          e.stopPropagation();
+          togglePluginPin(p);
+          return;
+        }
         state.statusProviderFilter = p.id;
         renderStatusProviderTabs();
-        renderStatusAccountsGrid();
+        renderStatusAccountsGrid(false);
       });
       el.statusProviderTabs.appendChild(btn);
     });
   }
 
-  async function renderStatusAccountsGrid() {
+  function updateCardUnhideBar(card, accId) {
+    const hiddenCount = state.hiddenLimits[accId] ? state.hiddenLimits[accId].size : 0;
+    let bar = card.querySelector(".unhide-limits-bar");
+    if (hiddenCount > 0) {
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "unhide-limits-bar";
+        card.appendChild(bar);
+      }
+      bar.innerHTML = `<button class="btn btn-secondary btn-sm btn-unhide-all" data-acc="${accId}" style="font-size: 10.5px; padding: 2px 8px;">Unhide all (${hiddenCount})</button>`;
+      bar.querySelector(".btn-unhide-all").addEventListener("click", (e) => {
+        e.stopPropagation();
+        unhideAllForCard(card, accId);
+      });
+    } else if (bar) {
+      bar.remove();
+    }
+  }
+
+  function unhideAllForCard(card, accId) {
+    if (state.hiddenLimits[accId]) {
+      delete state.hiddenLimits[accId];
+      saveHiddenLimits();
+    }
+    card.querySelectorAll(".limit-item").forEach((item) => {
+      item.classList.remove("hidden-limit");
+    });
+    const bar = card.querySelector(".unhide-limits-bar");
+    if (bar) bar.remove();
+  }
+
+  async function renderStatusAccountsGrid(fetchFreshQuota = false) {
     if (!el.statusAccountsGrid) return;
-    el.statusAccountsGrid.innerHTML = `
-      <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
-        Loading accounts status & quota limits...
-      </div>
-    `;
+    
+    // Only show loading placeholder if grid is completely empty
+    if (el.statusAccountsGrid.children.length === 0) {
+      el.statusAccountsGrid.innerHTML = `
+        <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
+          Loading accounts status & quota limits...
+        </div>
+      `;
+    }
 
     // Filter accounts by current filter
     let accountsToDisplay = state.statusProviderFilter
@@ -1753,24 +1875,27 @@ print()`;
       return a.name.localeCompare(b.name);
     });
 
+    // Fetch live quota for Antigravity accounts if requested fresh or not cached yet
+    if (fetchFreshQuota || !state.cachedQuotaData) {
+      const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
+      if (antigravityAccounts.length > 0) {
+        try {
+          const agStatusRes = await api("/api/antigravity/status");
+          if (agStatusRes && agStatusRes.accounts) {
+            state.cachedQuotaData = {};
+            agStatusRes.accounts.forEach((item) => {
+              state.cachedQuotaData[item.account_id] = item.quota;
+            });
+          }
+        } catch (_) {}
+      }
+    }
+    const quotaDataMap = state.cachedQuotaData || {};
+
     el.statusAccountsGrid.innerHTML = "";
 
-    // Fetch live quota for Antigravity accounts if present
-    const quotaDataMap = {};
-    const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
-    if (antigravityAccounts.length > 0) {
-      try {
-        const agStatusRes = await api("/api/antigravity/status");
-        if (agStatusRes && agStatusRes.accounts) {
-          agStatusRes.accounts.forEach((item) => {
-            quotaDataMap[item.account_id] = item.quota;
-          });
-        }
-      } catch (_) {}
-    }
-
     accountsToDisplay.forEach((acc) => {
-      const provider = providerMap[acc.provider_id] || { name: acc.provider_id };
+      const provider = providerMap[acc.provider_id] || { id: acc.provider_id, name: acc.provider_id, pinned: false };
       const card = document.createElement("div");
       card.className = "account-square-card";
 
@@ -1842,11 +1967,16 @@ print()`;
 
       card.innerHTML = `
         <div class="account-square-header">
-          <div>
+          <div style="min-width: 0; flex: 1;">
             <div class="account-square-title">${escapeHtml(acc.name)}</div>
             <span style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(provider.name)}</span>
           </div>
-          <div>${statusPill}</div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+            <button class="btn-pin ${provider.pinned ? 'pinned' : ''} btn-toggle-card-pin" data-provider-id="${provider.id}" title="${provider.pinned ? 'Unpin provider' : 'Pin provider to top'}">
+              ${renderPinSvg(provider.pinned, 12)}
+            </button>
+            ${statusPill}
+          </div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
           ${limitsHtml}
@@ -1858,7 +1988,16 @@ print()`;
         ` : ''}
       `;
 
-      // Events to hide limit
+      // Event: Pin toggle on account card
+      const pinBtn = card.querySelector(".btn-toggle-card-pin");
+      if (pinBtn) {
+        pinBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          togglePluginPin(provider);
+        });
+      }
+
+      // Events to hide limit (instantaneous DOM update without network roundtrip)
       card.querySelectorAll(".btn-hide-limit").forEach((btn) => {
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -1867,21 +2006,19 @@ print()`;
           if (!state.hiddenLimits[accId]) state.hiddenLimits[accId] = new Set();
           state.hiddenLimits[accId].add(k);
           saveHiddenLimits();
-          renderStatusAccountsGrid();
+
+          const limitItem = btn.closest(".limit-item");
+          if (limitItem) limitItem.classList.add("hidden-limit");
+          updateCardUnhideBar(card, accId);
         });
       });
 
-      // Event to unhide all
+      // Event to unhide all (instantaneous DOM update)
       const unhideBtn = card.querySelector(".btn-unhide-all");
       if (unhideBtn) {
         unhideBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          const accId = unhideBtn.dataset.acc;
-          if (state.hiddenLimits[accId]) {
-            delete state.hiddenLimits[accId];
-            saveHiddenLimits();
-            renderStatusAccountsGrid();
-          }
+          unhideAllForCard(card, acc.id);
         });
       }
 
@@ -1941,15 +2078,21 @@ print()`;
   }
 
   if (el.logsRefreshBtn) {
-    el.logsRefreshBtn.addEventListener("click", () => fetchStatusData());
+    el.logsRefreshBtn.addEventListener("click", () => fetchStatusData(true));
   }
 
   if (el.logsAutoToggle) {
     el.logsAutoToggle.addEventListener("change", (e) => {
       state.autoRefreshLogs = e.target.checked;
       if (state.autoRefreshLogs) {
+        if (state.currentTab === "status" || state.currentTab === "logs") {
+          fetchStatusData(true);
+        }
+        if (state.autoRefreshInterval) clearInterval(state.autoRefreshInterval);
         state.autoRefreshInterval = setInterval(() => {
-          if (state.currentTab === "status") fetchStatusData();
+          if (state.currentTab === "status" || state.currentTab === "logs") {
+            fetchStatusData(true);
+          }
         }, 5000);
       } else if (state.autoRefreshInterval) {
         clearInterval(state.autoRefreshInterval);
