@@ -7,6 +7,7 @@ services:
     container_name: llmproxy
     ports:
       - "8000:8000"
+      - "8080:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app

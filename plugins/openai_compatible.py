@@ -402,7 +402,7 @@ class OpenAICompatiblePlugin(BasePlugin):
             return self._stream_request(url, headers, body, model_config, request, account=account)
 
         try:
-            timeout = float(variables.get("timeout", 60.0))
+            timeout = float(variables.get("timeout") or 60.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, headers=headers, json=body)
                 resp.raise_for_status()

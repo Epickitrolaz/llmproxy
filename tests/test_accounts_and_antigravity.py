@@ -344,6 +344,38 @@ def test_fetch_antigravity_quota_endpoint_ordering_and_401_refresh(monkeypatch):
     assert requested_urls[0] == "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 
 
+def test_antigravity_build_upstream_request_clean():
+    """Verify Antigravity requests do not inject unwanted IDE identity or USER_REQUEST tags."""
+    from llmproxy.schemas import PluginModelConfig, ChatCompletionRequest, ChatMessage
+    plugin = AntigravityPlugin()
+    model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
+
+    # 1. Plain user request: no systemInstruction, no <USER_REQUEST> wrapping, no requestType
+    req1 = ChatCompletionRequest(
+        model="gemini-3.8-flash-high",
+        messages=[ChatMessage(role="user", content="Hello LLMProxy!")],
+    )
+    headers, body = plugin._build_upstream_request(req1, model_cfg, account=None)
+    assert "requestType" not in body
+    assert "systemInstruction" not in body["request"]
+    assert body["request"]["contents"][0]["parts"][0]["text"] == "Hello LLMProxy!"
+
+    # 2. User request with system instruction: systemInstruction is set to user's text
+    req2 = ChatCompletionRequest(
+        model="gemini-3.8-flash-high",
+        messages=[
+            ChatMessage(role="system", content="You are a helpful assistant."),
+            ChatMessage(role="user", content="Hi"),
+        ],
+    )
+    headers2, body2 = plugin._build_upstream_request(req2, model_cfg, account=None)
+    assert "systemInstruction" in body2["request"]
+    sys_parts = body2["request"]["systemInstruction"]["parts"]
+    assert sys_parts[0]["text"] == "You are a helpful assistant."
+    assert body2["request"]["contents"][0]["parts"][0]["text"] == "Hi"
+
+
+
 def test_sanitize_ssl_env_prevents_file_not_found_error(monkeypatch):
     """Verify that invalid SSL_CERT_FILE or CA bundle paths are cleared and don't cause [Errno 2] No such file or directory."""
     import os

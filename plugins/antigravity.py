@@ -842,10 +842,9 @@ class AntigravityPlugin(BasePlugin):
                 contents.append({"role": "user", "parts": [{"functionResponse": fr_part}]})
             elif m.role == "user":
                 prompt_text = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
-                wrapped_text = f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>" if not prompt_text.startswith("<USER_REQUEST>") else prompt_text
                 contents.append({
                     "role": "user",
-                    "parts": [{"text": wrapped_text}]
+                    "parts": [{"text": prompt_text}]
                 })
             elif m.role in ("assistant", "model"):
                 parts = []
@@ -889,7 +888,7 @@ class AntigravityPlugin(BasePlugin):
         if not contents:
             contents.append({
                 "role": "user",
-                "parts": [{"text": "<USER_REQUEST>\nHello\n</USER_REQUEST>"}]
+                "parts": [{"text": "Hello"}]
             })
 
         max_tokens = request.max_tokens or model_config.max_tokens or 65536
@@ -905,41 +904,16 @@ class AntigravityPlugin(BasePlugin):
         if request.top_p is not None and request.top_p != 1.0:
             generation_config["topP"] = request.top_p
 
-        # Standard agy identity instructions when none explicitly supplied
-        default_identity = (
-            "<identity>\n"
-            "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n"
-            "You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.\n"
-            "The USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n"
-            "</identity>"
-        )
-        system_parts_text = system_instruction_text.strip() if system_instruction_text.strip() else default_identity
-
-        is_claude = "claude" in target_model.lower()
-        is_gpt = "gpt" in target_model.lower()
-
-        labels = {
-            "cascade_id": conv_id,
-            "last_step_index": str(max(0, step - 1)),
-            "model_enum": "MODEL_PLACEHOLDER_M318",
-            "request_id": f"{traj_id}-{max(0, step - 1)}",
-            "root_cascade_id": conv_id,
-            "trajectory_id": traj_id,
-            "used_claude": "true" if is_claude else "false",
-            "used_claude_conservative": "false",
-            "used_non_gemini_model": "true" if (is_claude or is_gpt) else "false",
-        }
-
         inner_request: Dict[str, Any] = {
             "contents": contents,
-            "systemInstruction": {
-                "role": "user",
-                "parts": [{"text": system_parts_text}],
-            },
             "generationConfig": generation_config,
-            "labels": labels,
             "sessionId": session_id_str,
         }
+        if system_instruction_text.strip():
+            inner_request["systemInstruction"] = {
+                "role": "user",
+                "parts": [{"text": system_instruction_text.strip()}],
+            }
 
         gemini_tools = _convert_openai_tools_to_gemini(request.tools)
         if gemini_tools:
@@ -954,7 +928,6 @@ class AntigravityPlugin(BasePlugin):
             "request": inner_request,
             "model": target_model,
             "userAgent": "antigravity",
-            "requestType": "agent",
         }
 
         return headers, body
@@ -973,7 +946,7 @@ class AntigravityPlugin(BasePlugin):
             if (account and account.base_url)
             else str(variables.get("base_url") or CLOUDCODE_PA_ENDPOINTS[0])
         ).rstrip("/")
-        timeout = float(variables.get("timeout", 60.0))
+        timeout = float(variables.get("timeout") or 60.0)
 
         # Resolve reasoning tags configuration
         enable_reasoning_tags = True
@@ -1036,39 +1009,132 @@ class AntigravityPlugin(BasePlugin):
                 )
 
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
-                        if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
-                            refreshed = await antigravity_oauth.refresh_account_token(account)
-                            if refreshed:
-                                new_headers = self.build_headers(account=account)
-                                async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
-                                    stream_resp = retry_resp
+                    async def get_stream():
+                        async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
+                            if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                                refreshed = await antigravity_oauth.refresh_account_token(account)
+                                if refreshed:
+                                    new_headers = self.build_headers(account=account)
+                                    async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
+                                        if retry_resp.status_code >= 400:
+                                            err_bytes = await retry_resp.aread()
+                                            raise httpx.HTTPStatusError(
+                                                f"Google Antigravity upstream error ({retry_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                                request=retry_resp.request,
+                                                response=retry_resp,
+                                            )
+                                        async for line in retry_resp.aiter_lines():
+                                            yield line
+                                    return
+                            if stream_resp.status_code >= 400:
+                                err_bytes = await stream_resp.aread()
+                                raise httpx.HTTPStatusError(
+                                    f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                    request=stream_resp.request,
+                                    response=stream_resp,
+                                )
+                            async for line in stream_resp.aiter_lines():
+                                yield line
 
-                        if stream_resp.status_code >= 400:
-                            err_bytes = await stream_resp.aread()
-                            raise httpx.HTTPStatusError(
-                                f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
-                                request=stream_resp.request,
-                                response=stream_resp,
-                            )
+                    async for line in get_stream():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        raw_data = line[6:].strip()
+                        if raw_data == "[DONE]":
+                            break
+                        try:
+                            payload = json.loads(raw_data)
+                            candidates = payload.get("response", {}).get("candidates", [])
+                            for cand in candidates:
+                                parts = cand.get("content", {}).get("parts", [])
+                                for part in parts:
+                                    if "thoughtSignature" in part and part["thoughtSignature"]:
+                                        current_thought_sig = part["thoughtSignature"]
 
-                        async for line in stream_resp.aiter_lines():
-                            if not line or not line.startswith("data: "):
-                                continue
-                            raw_data = line[6:].strip()
-                            if raw_data == "[DONE]":
-                                break
-                            try:
-                                payload = json.loads(raw_data)
-                                candidates = payload.get("response", {}).get("candidates", [])
-                                for cand in candidates:
-                                    parts = cand.get("content", {}).get("parts", [])
-                                    for part in parts:
-                                        if "thoughtSignature" in part and part["thoughtSignature"]:
-                                            current_thought_sig = part["thoughtSignature"]
+                                    if "functionCall" in part:
+                                        # Close open reasoning tag before tool call
+                                        if in_thought:
+                                            in_thought = False
+                                            closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                                            yield ChatCompletionChunk(
+                                                id=chunk_id,
+                                                created=created,
+                                                model=target_model,
+                                                choices=[
+                                                    ChatChoiceDelta(
+                                                        index=0,
+                                                        delta={"content": closing},
+                                                    )
+                                                ],
+                                            )
 
-                                        if "functionCall" in part:
-                                            # Close open reasoning tag before tool call
+                                        fc = part["functionCall"]
+                                        name = fc.get("name", "")
+                                        args = fc.get("args", {})
+                                        call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                                        has_tool_call = True
+                                        if current_thought_sig:
+                                            _save_thought_signature(call_id, name, args, current_thought_sig)
+
+                                        yield ChatCompletionChunk(
+                                            id=chunk_id,
+                                            created=created,
+                                            model=target_model,
+                                            choices=[
+                                                ChatChoiceDelta(
+                                                    index=0,
+                                                    delta={
+                                                        "tool_calls": [
+                                                            {
+                                                                "index": tool_call_idx,
+                                                                "id": call_id,
+                                                                "type": "function",
+                                                                "function": {
+                                                                    "name": name,
+                                                                    "arguments": json.dumps(args),
+                                                                },
+                                                            }
+                                                        ]
+                                                    },
+                                                    finish_reason=None,
+                                                )
+                                            ],
+                                        )
+                                        tool_call_idx += 1
+                                    elif "text" in part and part["text"]:
+                                        is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
+                                        if enable_reasoning_tags and is_thought:
+                                            if not in_thought:
+                                                in_thought = True
+                                                # Emit opening tag
+                                                yield ChatCompletionChunk(
+                                                    id=chunk_id,
+                                                    created=created,
+                                                    model=target_model,
+                                                    choices=[
+                                                        ChatChoiceDelta(
+                                                            index=0,
+                                                            delta={"content": f"<{tag_name}>\n"},
+                                                        )
+                                                    ],
+                                                )
+                                            thought_ended_with_newline = part["text"].endswith("\n")
+                                            yield ChatCompletionChunk(
+                                                id=chunk_id,
+                                                created=created,
+                                                model=target_model,
+                                                choices=[
+                                                    ChatChoiceDelta(
+                                                        index=0,
+                                                        delta={
+                                                            "content": part["text"],
+                                                            "reasoning_content": part["text"],
+                                                        },
+                                                    )
+                                                ],
+                                            )
+                                        else:
+                                            # Non-thought text part
                                             if in_thought:
                                                 in_thought = False
                                                 closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
@@ -1083,15 +1149,6 @@ class AntigravityPlugin(BasePlugin):
                                                         )
                                                     ],
                                                 )
-
-                                            fc = part["functionCall"]
-                                            name = fc.get("name", "")
-                                            args = fc.get("args", {})
-                                            call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                                            has_tool_call = True
-                                            if current_thought_sig:
-                                                _save_thought_signature(call_id, name, args, current_thought_sig)
-
                                             yield ChatCompletionChunk(
                                                 id=chunk_id,
                                                 created=created,
@@ -1099,109 +1156,36 @@ class AntigravityPlugin(BasePlugin):
                                                 choices=[
                                                     ChatChoiceDelta(
                                                         index=0,
-                                                        delta={
-                                                            "tool_calls": [
-                                                                {
-                                                                    "index": tool_call_idx,
-                                                                    "id": call_id,
-                                                                    "type": "function",
-                                                                    "function": {
-                                                                        "name": name,
-                                                                        "arguments": json.dumps(args),
-                                                                    },
-                                                                }
-                                                            ]
-                                                        },
-                                                        finish_reason=None,
+                                                        delta={"content": part["text"]},
                                                     )
                                                 ],
                                             )
-                                            tool_call_idx += 1
-                                        elif "text" in part and part["text"]:
-                                            is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
-                                            if enable_reasoning_tags and is_thought:
-                                                if not in_thought:
-                                                    in_thought = True
-                                                    # Emit opening tag
-                                                    yield ChatCompletionChunk(
-                                                        id=chunk_id,
-                                                        created=created,
-                                                        model=target_model,
-                                                        choices=[
-                                                            ChatChoiceDelta(
-                                                                index=0,
-                                                                delta={"content": f"<{tag_name}>\n"},
-                                                            )
-                                                        ],
-                                                    )
-                                                thought_ended_with_newline = part["text"].endswith("\n")
-                                                yield ChatCompletionChunk(
-                                                    id=chunk_id,
-                                                    created=created,
-                                                    model=target_model,
-                                                    choices=[
-                                                        ChatChoiceDelta(
-                                                            index=0,
-                                                            delta={
-                                                                "content": part["text"],
-                                                                "reasoning_content": part["text"],
-                                                            },
-                                                        )
-                                                    ],
-                                                )
-                                            else:
-                                                # Non-thought text part
-                                                if in_thought:
-                                                    in_thought = False
-                                                    closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
-                                                    yield ChatCompletionChunk(
-                                                        id=chunk_id,
-                                                        created=created,
-                                                        model=target_model,
-                                                        choices=[
-                                                            ChatChoiceDelta(
-                                                                index=0,
-                                                                delta={"content": closing},
-                                                            )
-                                                        ],
-                                                    )
-                                                yield ChatCompletionChunk(
-                                                    id=chunk_id,
-                                                    created=created,
-                                                    model=target_model,
-                                                    choices=[
-                                                        ChatChoiceDelta(
-                                                            index=0,
-                                                            delta={"content": part["text"]},
-                                                        )
-                                                    ],
-                                                )
-                            except Exception:
-                                continue
+                        except Exception:
+                            continue
 
-                # If stream ended while still in thought tag, close it
-                if in_thought:
-                    in_thought = False
-                    closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                    # If stream ended while still in thought tag, close it
+                    if in_thought:
+                        in_thought = False
+                        closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=target_model,
+                            choices=[
+                                ChatChoiceDelta(
+                                    index=0,
+                                    delta={"content": closing},
+                                )
+                            ],
+                        )
+
+                    finish_reason = "tool_calls" if has_tool_call else "stop"
                     yield ChatCompletionChunk(
                         id=chunk_id,
                         created=created,
                         model=target_model,
-                        choices=[
-                            ChatChoiceDelta(
-                                index=0,
-                                delta={"content": closing},
-                            )
-                        ],
+                        choices=[ChatChoiceDelta(index=0, delta={}, finish_reason=finish_reason)],
                     )
-
-                finish_reason = "tool_calls" if has_tool_call else "stop"
-                yield ChatCompletionChunk(
-                    id=chunk_id,
-                    created=created,
-                    model=target_model,
-                    choices=[ChatChoiceDelta(index=0, delta={}, finish_reason=finish_reason)],
-                )
 
             return sse_stream_generator()
 
@@ -1215,66 +1199,77 @@ class AntigravityPlugin(BasePlugin):
         total_tokens = 0
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
-                if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
-                    refreshed = await antigravity_oauth.refresh_account_token(account)
-                    if refreshed:
-                        new_headers = self.build_headers(account=account)
-                        async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
-                            stream_resp = retry_resp
+            async def get_stream():
+                async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
+                    if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                        refreshed = await antigravity_oauth.refresh_account_token(account)
+                        if refreshed:
+                            new_headers = self.build_headers(account=account)
+                            async with client.stream("POST", url, headers=new_headers, json=body) as retry_resp:
+                                if retry_resp.status_code >= 400:
+                                    err_bytes = await retry_resp.aread()
+                                    raise httpx.HTTPStatusError(
+                                        f"Google Antigravity upstream error ({retry_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                        request=retry_resp.request,
+                                        response=retry_resp,
+                                    )
+                                async for line in retry_resp.aiter_lines():
+                                    yield line
+                            return
+                    if stream_resp.status_code >= 400:
+                        err_bytes = await stream_resp.aread()
+                        raise httpx.HTTPStatusError(
+                            f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                            request=stream_resp.request,
+                            response=stream_resp,
+                        )
+                    async for line in stream_resp.aiter_lines():
+                        yield line
 
-                if stream_resp.status_code >= 400:
-                    err_bytes = await stream_resp.aread()
-                    raise httpx.HTTPStatusError(
-                        f"Google Antigravity upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
-                        request=stream_resp.request,
-                        response=stream_resp,
-                    )
+            async for line in get_stream():
+                if not line or not line.startswith("data: "):
+                    continue
+                raw_data = line[6:].strip()
+                if raw_data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(raw_data)
+                    resp_obj = payload.get("response", {})
+                    usage = resp_obj.get("usageMetadata", {})
+                    if usage:
+                        prompt_tokens = int(usage.get("promptTokenCount", prompt_tokens))
+                        completion_tokens = int(usage.get("candidatesTokenCount", completion_tokens))
+                        total_tokens = int(usage.get("totalTokenCount", total_tokens))
 
-                async for line in stream_resp.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    raw_data = line[6:].strip()
-                    if raw_data == "[DONE]":
-                        break
-                    try:
-                        payload = json.loads(raw_data)
-                        resp_obj = payload.get("response", {})
-                        usage = resp_obj.get("usageMetadata", {})
-                        if usage:
-                            prompt_tokens = int(usage.get("promptTokenCount", prompt_tokens))
-                            completion_tokens = int(usage.get("candidatesTokenCount", completion_tokens))
-                            total_tokens = int(usage.get("totalTokenCount", total_tokens))
-
-                        candidates = resp_obj.get("candidates", [])
-                        for cand in candidates:
-                            parts = cand.get("content", {}).get("parts", [])
-                            for part in parts:
-                                if "thoughtSignature" in part and part["thoughtSignature"]:
-                                    current_thought_sig = part["thoughtSignature"]
-                                if "functionCall" in part:
-                                    fc = part["functionCall"]
-                                    name = fc.get("name", "")
-                                    args = fc.get("args", {})
-                                    call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                                    if current_thought_sig:
-                                        _save_thought_signature(call_id, name, args, current_thought_sig)
-                                    tool_calls.append({
-                                        "id": call_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": name,
-                                            "arguments": json.dumps(args),
-                                        },
-                                    })
-                                elif "text" in part and part["text"]:
-                                    is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
-                                    if is_thought:
-                                        thought_parts.append(part["text"])
-                                    else:
-                                        regular_parts.append(part["text"])
-                    except Exception:
-                        continue
+                    candidates = resp_obj.get("candidates", [])
+                    for cand in candidates:
+                        parts = cand.get("content", {}).get("parts", [])
+                        for part in parts:
+                            if "thoughtSignature" in part and part["thoughtSignature"]:
+                                current_thought_sig = part["thoughtSignature"]
+                            if "functionCall" in part:
+                                fc = part["functionCall"]
+                                name = fc.get("name", "")
+                                args = fc.get("args", {})
+                                call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                                if current_thought_sig:
+                                    _save_thought_signature(call_id, name, args, current_thought_sig)
+                                tool_calls.append({
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(args),
+                                    },
+                                })
+                            elif "text" in part and part["text"]:
+                                is_thought = bool(part.get("thought") or part.get("isThought") or part.get("type") == "thought")
+                                if is_thought:
+                                    thought_parts.append(part["text"])
+                                else:
+                                    regular_parts.append(part["text"])
+                except Exception:
+                    continue
 
         thought_text = "".join(thought_parts)
         regular_text = "".join(regular_parts)
