@@ -1,6 +1,7 @@
 """Tests for Accounts, Multi-Account Load Balancing, and 9Router Antigravity Implementation."""
 
 import time
+from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from llmproxy.main import app
@@ -239,11 +240,108 @@ def test_antigravity_import_local_and_live_quota():
             assert "Google" in acc_data["name"]
             acc_id = acc_data["id"]
 
-            # Test quota endpoint
+            # Test quota endpoint and status endpoints
             quota_res = client.get(f"/api/antigravity/quota/{acc_id}")
             assert quota_res.status_code == 200
             quota_data = quota_res.json()
             assert "groups" in quota_data or "buckets" in quota_data
+
+            status_res = client.get(f"/api/antigravity/status/{acc_id}")
+            assert status_res.status_code == 200
+            status_data = status_res.json()
+            assert "groups" in status_data or "buckets" in status_data
+
+            all_status_res = client.get("/api/antigravity/status")
+            assert all_status_res.status_code == 200
+            all_status_data = all_status_res.json()
+            assert "accounts" in all_status_data
+            assert len(all_status_data["accounts"]) >= 1
+            assert any(a["account_id"] == acc_id for a in all_status_data["accounts"])
+
+
+def test_status_tracker_moved_to_logs_tab_in_frontend():
+    """Verify that the usage tracker is in the request logs tab and labeled Status in the frontend."""
+    index_html_path = Path(__file__).resolve().parent.parent / "llmproxy" / "static" / "index.html"
+    app_js_path = Path(__file__).resolve().parent.parent / "llmproxy" / "static" / "app.js"
+    assert index_html_path.exists()
+    assert app_js_path.exists()
+
+    html_content = index_html_path.read_text(encoding="utf-8")
+    js_content = app_js_path.read_text(encoding="utf-8")
+
+    # In index.html: tab-logs section must contain the status tracker card with "Status" heading
+    assert 'id="tab-logs"' in html_content
+    logs_section = html_content.split('id="tab-logs"')[1].split('</section>')[0]
+    assert 'id="status-tracker-card"' in logs_section
+    assert "Status" in logs_section
+    assert 'id="status-tracker-body"' in logs_section
+    assert 'id="btn-logs-status"' in logs_section
+
+    # Status modal should be defined
+    assert 'id="modal-status"' in html_content
+    assert "Status" in html_content
+
+def test_fetch_antigravity_quota_endpoint_ordering_and_401_refresh(monkeypatch):
+    """Verify that fetch_antigravity_quota respects account.base_url first and handles token refresh on 401."""
+    import httpx
+    from llmproxy.dashboard.router import fetch_antigravity_quota
+    from llmproxy.schemas import Account
+
+    acc = Account(
+        id="acc_test_ag_quota",
+        provider_id="antigravity",
+        name="Google (test@example.com)",
+        api_key="old-token",
+        base_url="https://daily-cloudcode-pa.googleapis.com",
+        extra_config={
+            "refresh_token": "mock-refresh-token",
+            "project_id": "test-project",
+            "expires_at": 9999999999,
+        },
+    )
+
+    requested_urls = []
+    attempt_count = {"daily": 0}
+
+    async def mock_post(self, url, headers=None, json=None):
+        requested_urls.append(url)
+        # First call to daily-cloudcode returns 401 to trigger token refresh
+        if "daily-cloudcode" in url and attempt_count["daily"] == 0:
+            attempt_count["daily"] += 1
+            return httpx.Response(401, json={"error": "unauthorized"})
+        
+        # After refresh, return 200 with quota groups
+        return httpx.Response(200, json={
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {"bucketId": "gemini-weekly", "remainingFraction": 0.85, "displayName": "Weekly Limit Remaining"}
+                    ]
+                }
+            ]
+        })
+
+    refresh_called = []
+    async def mock_refresh(account):
+        refresh_called.append(True)
+        account.api_key = "new-refreshed-token"
+        return True
+
+    from llmproxy.core.antigravity_oauth import antigravity_oauth
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setattr(antigravity_oauth, "refresh_account_token", mock_refresh)
+
+    import asyncio
+    result = asyncio.run(fetch_antigravity_quota(acc))
+
+    assert "groups" in result
+    assert result["groups"][0]["displayName"] == "Gemini Models"
+    assert result["groups"][0]["buckets"][0]["remainingFraction"] == 0.85
+    assert len(refresh_called) == 1
+    assert acc.api_key == "new-refreshed-token"
+    # Ensure daily-cloudcode was attempted first (from account.base_url)
+    assert requested_urls[0] == "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 
 
 def test_sanitize_ssl_env_prevents_file_not_found_error(monkeypatch):

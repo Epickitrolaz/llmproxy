@@ -91,10 +91,14 @@
     logsTableBody: document.getElementById("logs-table-body"),
     logsRefreshBtn: document.getElementById("logs-refresh-btn"),
     logsAutoToggle: document.getElementById("logs-auto-toggle"),
+    btnLogsStatus: document.getElementById("btn-logs-status"),
+    statusTrackerCard: document.getElementById("status-tracker-card"),
+    statusTrackerBody: document.getElementById("status-tracker-body"),
     // Modals
     modalNewProvider: document.getElementById("modal-new-provider"),
     modalVariables: document.getElementById("modal-variables"),
     modalModel: document.getElementById("modal-model"),
+    modalStatus: document.getElementById("modal-status"),
     toastContainer: document.getElementById("toast-container"),
   };
 
@@ -190,6 +194,7 @@
       syncPlaygroundModels();
     } else if (tabId === "logs") {
       fetchLogs();
+      fetchAntigravityStatus();
     }
   }
 
@@ -645,7 +650,6 @@ print(response.choices[0].message.content)`;
         <td>${lastUsed}</td>
         <td>
           <div style="display: flex; gap: 6px; align-items: center;">
-            ${isGoogleAccount ? `<button class="btn btn-secondary btn-sm btn-view-quota" data-id="${acc.id}" title="View live Google Antigravity quota">Quota</button>` : ''}
             ${isCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cooldown" data-id="${acc.id}" title="Reset cooldown">Reset</button>` : ''}
             <button class="btn btn-secondary btn-sm btn-edit-account" data-id="${acc.id}">Edit</button>
             <button class="btn btn-secondary btn-sm btn-toggle-account" data-id="${acc.id}">${acc.enabled ? "Disable" : "Enable"}</button>
@@ -655,10 +659,6 @@ print(response.choices[0].message.content)`;
       `;
 
       // Event handlers
-      const quotaBtn = row.querySelector(".btn-view-quota");
-      if (quotaBtn) {
-        quotaBtn.addEventListener("click", () => openQuotaModal(acc));
-      }
       const revealBtn = row.querySelector(".btn-show-key");
       if (revealBtn) {
         revealBtn.addEventListener("click", () => {
@@ -940,65 +940,214 @@ print(response.choices[0].message.content)`;
     });
   }
 
-  async function openQuotaModal(account) {
-    const modalQuota = document.getElementById("modal-quota");
-    const quotaTitle = document.getElementById("modal-quota-title");
-    const quotaBody = document.getElementById("modal-quota-body");
-    if (!modalQuota || !quotaBody) return;
+  function renderQuotaMarkup(quota) {
+    if (!quota) {
+      return `<div style="padding: 16px; color: var(--ink-muted); text-align: center;">No status data available</div>`;
+    }
+    if (quota.error) {
+      return `
+        <div style="padding: 16px; background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 8px; color: #f43f5e; font-size: 13px;">
+          <div style="font-weight: 600; margin-bottom: 4px;">Failed to fetch live Google Antigravity status</div>
+          <div style="font-family: var(--font-mono); font-size: 12px;">${escapeHtml(quota.error)}</div>
+        </div>
+      `;
+    }
 
-    if (quotaTitle) quotaTitle.textContent = `Google Quota: ${account.name}`;
-    quotaBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live quota from Google CloudCode PA...</div>`;
-    modalQuota.classList.add("active");
+    const groups = quota.groups || [{ buckets: quota.buckets || [] }];
+    if (!groups || groups.length === 0) {
+      return `<div style="padding: 16px; color: var(--ink-muted); text-align: center;">No quota buckets returned by Google CloudCode PA.</div>`;
+    }
+
+    let groupsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">';
+    groups.forEach((grp) => {
+      const title = grp.displayName || "Quota Limits";
+      const desc = grp.description || "";
+      const buckets = grp.buckets || [];
+      const bucketCards = buckets
+        .filter((b) => !b.disabled)
+        .map((b) => {
+          const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
+          const pct = Math.round(frac * 100);
+          const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleString() : "Rolling";
+          const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+          return `
+            <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 12px 14px; margin-bottom: 10px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <strong style="color: var(--ink-primary); font-size: 12.5px;">${escapeHtml(b.displayName || b.bucketId)}</strong>
+                <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: ${color};">${pct}% remaining</span>
+              </div>
+              <div style="background: rgba(255, 255, 255, 0.08); border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 8px;">
+                <div style="background: ${color}; height: 100%; width: ${pct}%; transition: width 0.3s ease;"></div>
+              </div>
+              ${b.description ? `<div style="font-size: 11px; color: var(--ink-secondary); margin-bottom: 6px; line-height: 1.4;">${escapeHtml(b.description)}</div>` : ''}
+              <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
+                <span>Window: ${escapeHtml(b.window || "standard")}</span>
+                <span>Resets: ${escapeHtml(resetStr)}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+
+      groupsHtml += `
+        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 14px 16px;">
+          <div style="margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-primary);">${escapeHtml(title)}</div>
+            ${desc ? `<div style="font-size: 11px; color: var(--ink-muted); margin-top: 2px;">${escapeHtml(desc)}</div>` : ''}
+          </div>
+          ${bucketCards || '<div style="color: var(--ink-muted); font-size: 12px;">No active buckets in this group</div>'}
+        </div>
+      `;
+    });
+    groupsHtml += '</div>';
+
+    if (quota.description) {
+      groupsHtml += `
+        <div style="margin-top: 14px; font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; border-top: 1px dashed var(--border-subtle); padding-top: 10px;">
+          ${escapeHtml(quota.description)}
+        </div>
+      `;
+    }
+    return groupsHtml;
+  }
+
+  let cachedStatusData = null;
+
+  async function fetchAntigravityStatus(forceRefresh = false) {
+    const statusTrackerBody = document.getElementById("status-tracker-body");
+    const statusAccountSelect = document.getElementById("status-account-select");
+    const statusAccountBadge = document.getElementById("status-account-badge");
+    const modalStatusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
+
+    if (!statusTrackerBody && !modalStatusBody) return;
+
+    if (statusTrackerBody && (!cachedStatusData || forceRefresh)) {
+      statusTrackerBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live Google Antigravity status from CloudCode PA...</div>`;
+    }
 
     try {
-      const quota = await api(`/api/antigravity/quota/${account.id}`);
-      if (quota.error) {
-        quotaBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Failed to fetch quota: ${escapeHtml(quota.error)}</div>`;
+      const data = await api("/api/antigravity/status");
+      cachedStatusData = data;
+      const accounts = data.accounts || [];
+
+      if (accounts.length === 0) {
+        const emptyHtml = `
+          <div style="text-align: center; padding: 24px 16px; color: var(--ink-muted);">
+            <div style="margin-bottom: 8px; font-weight: 500; color: var(--ink-secondary);">No Google Antigravity accounts connected</div>
+            <div style="font-size: 12px; margin-bottom: 14px;">Connect a Google account in the Accounts tab to track live 5-hour and weekly quota status.</div>
+            <button class="btn btn-secondary btn-sm" id="btn-status-go-accounts">Go to Accounts</button>
+          </div>
+        `;
+        if (statusTrackerBody) statusTrackerBody.innerHTML = emptyHtml;
+        if (modalStatusBody) modalStatusBody.innerHTML = emptyHtml;
+        if (statusAccountSelect) statusAccountSelect.style.display = "none";
+        if (statusAccountBadge) statusAccountBadge.style.display = "none";
+
+        const btnGo = document.getElementById("btn-status-go-accounts");
+        if (btnGo) {
+          btnGo.addEventListener("click", () => switchTab("accounts"));
+        }
         return;
       }
 
-      let groupsHtml = "";
-      const groups = quota.groups || [{ buckets: quota.buckets || [] }];
-      groups.forEach((grp) => {
-        const title = grp.displayName || "Quota Limits";
-        const buckets = grp.buckets || [];
-        const bucketCards = buckets
-          .filter((b) => !b.disabled)
-          .map((b) => {
-            const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
-            const pct = Math.round(frac * 100);
-            const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleString() : "Rolling";
-            const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
-            return `
-              <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 14px 16px; margin-bottom: 10px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                  <strong style="color: var(--ink-primary); font-size: 13px;">${escapeHtml(b.displayName || b.bucketId)}</strong>
-                  <span style="font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: ${color};">${pct}% remaining</span>
-                </div>
-                <div style="background: rgba(255, 255, 255, 0.08); border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 8px;">
-                  <div style="background: ${color}; height: 100%; width: ${pct}%;"></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-muted);">
-                  <span>Window: ${escapeHtml(b.window || "standard")}</span>
-                  <span>Resets at: ${escapeHtml(resetStr)}</span>
-                </div>
-              </div>
-            `;
-          })
-          .join("");
+      // Populate account selector if multiple accounts
+      if (statusAccountSelect) {
+        if (accounts.length > 1) {
+          statusAccountSelect.style.display = "inline-block";
+          const currentVal = statusAccountSelect.value;
+          statusAccountSelect.innerHTML = accounts
+            .map((a) => `<option value="${a.account_id}">${escapeHtml(a.account_name)}</option>`)
+            .join("");
+          if (currentVal && accounts.some((a) => a.account_id === currentVal)) {
+            statusAccountSelect.value = currentVal;
+          }
+        } else {
+          statusAccountSelect.style.display = "none";
+        }
+      }
 
-        groupsHtml += `
-          <div style="margin-bottom: 16px;">
-            <div style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-muted); margin-bottom: 8px;">${escapeHtml(title)}</div>
-            ${bucketCards || '<div style="color: var(--ink-muted); font-size: 12px;">No active buckets in group</div>'}
-          </div>
-        `;
-      });
+      // Determine which account to show
+      const selectedId = statusAccountSelect && statusAccountSelect.value
+        ? statusAccountSelect.value
+        : accounts[0].account_id;
+      const selectedAccount = accounts.find((a) => a.account_id === selectedId) || accounts[0];
 
-      quotaBody.innerHTML = groupsHtml || `<div style="padding: 16px; color: var(--ink-muted);">No quota information returned</div>`;
+      if (statusAccountBadge) {
+        statusAccountBadge.style.display = "inline-flex";
+        statusAccountBadge.textContent = `${selectedAccount.account_name} (${selectedAccount.tier || "free-tier"})`;
+      }
+
+      const markup = renderQuotaMarkup(selectedAccount.quota);
+      if (statusTrackerBody) statusTrackerBody.innerHTML = markup;
+      if (modalStatusBody) modalStatusBody.innerHTML = markup;
+
     } catch (err) {
-      quotaBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Error: ${escapeHtml(err.message)}</div>`;
+      const errHtml = `<div style="color: #f43f5e; padding: 16px;">Failed to load status: ${escapeHtml(err.message)}</div>`;
+      if (statusTrackerBody) statusTrackerBody.innerHTML = errHtml;
+      if (modalStatusBody) modalStatusBody.innerHTML = errHtml;
     }
+  }
+
+  async function openStatusModal(account = null) {
+    const modalStatus = document.getElementById("modal-status") || document.getElementById("modal-quota");
+    const statusTitle = document.getElementById("modal-status-title") || document.getElementById("modal-quota-title");
+    const statusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
+    if (!modalStatus || !statusBody) return;
+
+    if (statusTitle) statusTitle.textContent = account ? `Status: ${account.name}` : "Google Antigravity Status";
+    statusBody.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--ink-muted);">Fetching live Google Antigravity status...</div>`;
+    modalStatus.classList.add("active");
+
+    try {
+      if (account) {
+        const quota = await api(`/api/antigravity/status/${account.id}`);
+        statusBody.innerHTML = renderQuotaMarkup(quota);
+      } else {
+        await fetchAntigravityStatus(true);
+      }
+    } catch (err) {
+      statusBody.innerHTML = `<div style="color: #f43f5e; padding: 16px;">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // Alias for backwards compatibility
+  const openQuotaModal = openStatusModal;
+
+  // Wire Status tracker event listeners
+  const statusRefreshBtn = document.getElementById("status-refresh-btn");
+  if (statusRefreshBtn) {
+    statusRefreshBtn.addEventListener("click", () => {
+      fetchAntigravityStatus(true);
+      showToast("Google Antigravity status refreshed");
+    });
+  }
+
+  const btnLogsStatus = document.getElementById("btn-logs-status");
+  if (btnLogsStatus) {
+    btnLogsStatus.addEventListener("click", () => {
+      openStatusModal();
+    });
+  }
+
+  const statusAccountSelect = document.getElementById("status-account-select");
+  if (statusAccountSelect) {
+    statusAccountSelect.addEventListener("change", () => {
+      if (cachedStatusData && cachedStatusData.accounts) {
+        const selectedId = statusAccountSelect.value;
+        const selectedAccount = cachedStatusData.accounts.find((a) => a.account_id === selectedId);
+        const statusAccountBadge = document.getElementById("status-account-badge");
+        const statusTrackerBody = document.getElementById("status-tracker-body");
+        const modalStatusBody = document.getElementById("modal-status-body") || document.getElementById("modal-quota-body");
+        if (selectedAccount) {
+          if (statusAccountBadge) {
+            statusAccountBadge.textContent = `${selectedAccount.account_name} (${selectedAccount.tier || "free-tier"})`;
+          }
+          const markup = renderQuotaMarkup(selectedAccount.quota);
+          if (statusTrackerBody) statusTrackerBody.innerHTML = markup;
+          if (modalStatusBody) modalStatusBody.innerHTML = markup;
+        }
+      }
+    });
   }
 
   // Periodic cooldown countdown updater

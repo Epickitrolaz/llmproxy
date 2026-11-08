@@ -624,6 +624,68 @@ async def import_local_antigravity_session():
     }
 
 
+async def fetch_antigravity_quota(account: Account) -> Dict[str, Any]:
+    """Fetch live quota and usage summary for an Antigravity account using configured endpoints and token refresh."""
+    import httpx
+    antigravity_oauth.sanitize_ssl_env()
+
+    # Pre-emptively refresh token if expiring within 2 minutes or missing
+    if account.extra_config.get("refresh_token"):
+        expires_at = account.extra_config.get("expires_at", 0)
+        if expires_at - time.time() < 120:
+            refreshed = await antigravity_oauth.refresh_account_token(account)
+            if refreshed:
+                plugin_manager._save_accounts()
+
+    # Determine endpoints in order of priority: account.base_url first, then fallbacks
+    endpoints: List[str] = []
+    if account.base_url:
+        endpoints.append(account.base_url.rstrip("/"))
+    for ep in CLOUDCODE_PA_ENDPOINTS:
+        if ep not in endpoints:
+            endpoints.append(ep)
+
+    project_id = account.extra_config.get("project_id", "aicode-consumers")
+    headers = {
+        "Authorization": f"Bearer {account.api_key}",
+        "User-Agent": "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)",
+        "x-goog-api-client": "ide/antigravity",
+        "Content-Type": "application/json",
+    }
+
+    last_error = "No endpoints attempted"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for ep in endpoints:
+            url = f"{ep}/v1internal:retrieveUserQuotaSummary"
+            bodies = [{"project": project_id}] if project_id else [{}]
+            if {} not in bodies:
+                bodies.append({})
+
+            for body in bodies:
+                try:
+                    resp = await client.post(url, headers=headers, json=body)
+                    # If 401 Unauthorized, refresh token once and retry
+                    if resp.status_code == 401 and account.extra_config.get("refresh_token"):
+                        refreshed = await antigravity_oauth.refresh_account_token(account)
+                        if refreshed:
+                            plugin_manager._save_accounts()
+                            headers["Authorization"] = f"Bearer {account.api_key}"
+                            resp = await client.post(url, headers=headers, json=body)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        data["account_id"] = account.id
+                        data["account_name"] = account.name
+                        data["tier"] = account.extra_config.get("tier", "free-tier")
+                        data["email"] = account.extra_config.get("email", "")
+                        return data
+                    last_error = f"Upstream error ({resp.status_code}) from {ep}: {resp.text}"
+                except Exception as e:
+                    last_error = f"Connection error to {ep}: {e}"
+
+    return {"error": last_error}
+
+
 @router.get("/antigravity/quota/{account_id}")
 async def get_antigravity_account_quota(account_id: str):
     """Fetch live 5-hour and weekly Google Antigravity quota usage summary."""
@@ -633,36 +695,35 @@ async def get_antigravity_account_quota(account_id: str):
     if account.provider_id != "antigravity":
         raise HTTPException(status_code=400, detail="Account is not an Antigravity account")
 
-    # Refresh token if needed
-    if account.extra_config.get("refresh_token"):
-        await antigravity_oauth.refresh_account_token(account)
-        plugin_manager._save_accounts()
+    return await fetch_antigravity_quota(account)
 
-    access_token = account.api_key
-    project_id = account.extra_config.get("project_id", "aicode-consumers")
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": "antigravity/hub/2.24.0 (aidev_client; os_type=linux; arch=x64; cl=963137146)",
-        "x-goog-api-client": "ide/antigravity",
-        "Content-Type": "application/json",
-    }
-    body = {"project": project_id}
+@router.get("/antigravity/status/{account_id}")
+async def get_antigravity_account_status(account_id: str):
+    """Alias for Google Antigravity account status & quota usage summary."""
+    return await get_antigravity_account_quota(account_id)
 
-    import httpx
-    try:
-        antigravity_oauth.sanitize_ssl_env()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-                headers=headers,
-                json=body,
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            return {"error": f"Upstream error {resp.status_code}: {resp.text}"}
-    except Exception as e:
-        return {"error": str(e)}
+
+@router.get("/antigravity/status")
+async def get_antigravity_all_status():
+    """Fetch live status and quota usage for all connected Google Antigravity accounts."""
+    accounts = [a for a in plugin_manager.get_accounts() if a.provider_id == "antigravity"]
+    if not accounts:
+        return {"accounts": [], "message": "No Google Antigravity accounts configured"}
+
+    results = []
+    for acc in accounts:
+        quota_data = await fetch_antigravity_quota(acc)
+        results.append({
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "enabled": acc.enabled,
+            "email": acc.extra_config.get("email", ""),
+            "tier": acc.extra_config.get("tier", "free-tier"),
+            "rate_limited": not acc.is_available(),
+            "quota": quota_data,
+        })
+    return {"accounts": results}
 
 
 # =========================================================================
