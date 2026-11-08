@@ -28,7 +28,7 @@ def setup_antigravity():
         variables={
             "api_key": "test-key",
             "timeout": 60,
-            "reasoning_tags": True,
+            "reasoning_tags": False,
             "reasoning_tag_name": "think",
         },
     )
@@ -41,7 +41,7 @@ def test_antigravity_metadata_has_reasoning_variables():
 
     assert "reasoning_tags" in var_names
     assert var_names["reasoning_tags"].type == "boolean"
-    assert var_names["reasoning_tags"].default is True
+    assert var_names["reasoning_tags"].default is False
 
     assert "reasoning_tag_name" in var_names
     assert var_names["reasoning_tag_name"].type == "select"
@@ -71,7 +71,7 @@ def test_antigravity_sanitizes_reasoning_fields():
 
 
 def test_mock_response_with_reasoning_tags():
-    """Verify _mock_response wraps simulated reasoning when mock_thought is enabled."""
+    """Verify _mock_response handles reasoning content properly without duplicating as normal text by default."""
     plugin = AntigravityPlugin()
     model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
 
@@ -84,7 +84,7 @@ def test_mock_response_with_reasoning_tags():
     assert "<think>" not in resp_normal.choices[0].message.content
     assert getattr(resp_normal.choices[0].message, "reasoning_content", None) is None
 
-    # With mock_thought: wrapped in <think> tags
+    # With mock_thought: reasoning_content is set, content does NOT duplicate reasoning
     req_thought = ChatCompletionRequest(
         model="gemini-3.8-flash-high",
         messages=[ChatMessage(role="user", content="solve 2+2")],
@@ -92,10 +92,16 @@ def test_mock_response_with_reasoning_tags():
     )
     resp_thought = plugin._mock_response(req_thought, model_cfg)
     content = resp_thought.choices[0].message.content
-    assert "<think>" in content
-    assert "</think>" in content
-    assert "Simulated reasoning for gemini-3.8-flash-high." in content
+    assert "<think>" not in content
+    assert "Simulated reasoning" not in content
     assert resp_thought.choices[0].message.reasoning_content == "Simulated reasoning for gemini-3.8-flash-high."
+
+    # When enable_reasoning_tags is True: wrapped in <think> tags in content
+    resp_tagged = plugin._mock_response(req_thought, model_cfg, enable_reasoning_tags=True)
+    content_tagged = resp_tagged.choices[0].message.content
+    assert "<think>" in content_tagged
+    assert "</think>" in content_tagged
+    assert "Simulated reasoning for gemini-3.8-flash-high." in content_tagged
 
     # With custom tag_name 'thought'
     resp_custom_tag = plugin._mock_response(
@@ -109,7 +115,7 @@ def test_mock_response_with_reasoning_tags():
 
 @pytest.mark.anyio
 async def test_mock_stream_with_reasoning_tags():
-    """Verify _mock_stream emits reasoning tag chunks when mock_thought is enabled."""
+    """Verify _mock_stream emits reasoning_content and does not duplicate in content by default."""
     plugin = AntigravityPlugin()
     model_cfg = PluginModelConfig(id="gemini-3.8-flash-high", name="Gemini 3.8 Flash High")
 
@@ -120,10 +126,11 @@ async def test_mock_stream_with_reasoning_tags():
         extra_body={"mock_thought": True},
     )
 
+    # 1. Default (reasoning_tags: False)
     stream_gen = await plugin.chat_completion(
         req_stream,
         model_cfg,
-        variables={"api_key": "test-key", "reasoning_tags": True, "reasoning_tag_name": "think"},
+        variables={"api_key": "test-key", "reasoning_tags": False},
     )
 
     chunks = []
@@ -133,17 +140,32 @@ async def test_mock_stream_with_reasoning_tags():
     contents = [c.choices[0].delta.get("content", "") for c in chunks if c.choices[0].delta.get("content")]
     full_text = "".join(contents)
 
-    assert "<think>" in full_text
-    assert "</think>" in full_text
-    assert "Simulated reasoning." in full_text
+    assert "<think>" not in full_text
+    assert "</think>" not in full_text
+    assert "Simulated reasoning." not in full_text
 
-    # Verify reasoning_content is present on the thought chunk delta
     thought_deltas = [
         c.choices[0].delta for c in chunks
         if c.choices[0].delta.get("reasoning_content")
     ]
     assert len(thought_deltas) > 0
     assert thought_deltas[0]["reasoning_content"] == "Simulated reasoning."
+
+    # 2. Explicitly enabled reasoning_tags: True
+    stream_gen_tagged = await plugin.chat_completion(
+        req_stream,
+        model_cfg,
+        variables={"api_key": "test-key", "reasoning_tags": True, "reasoning_tag_name": "think"},
+    )
+    chunks_tagged = []
+    async for chunk in stream_gen_tagged:
+        chunks_tagged.append(chunk)
+
+    contents_tagged = [c.choices[0].delta.get("content", "") for c in chunks_tagged if c.choices[0].delta.get("content")]
+    full_text_tagged = "".join(contents_tagged)
+    assert "<think>" in full_text_tagged
+    assert "</think>" in full_text_tagged
+    assert "Simulated reasoning." in full_text_tagged
 
 
 @pytest.mark.anyio
@@ -186,18 +208,29 @@ async def test_upstream_non_streaming_reasoning_tags():
     )
 
     with patch("plugins.antigravity.httpx.AsyncClient", return_value=FakeClient()):
-        # Call with real api_key (not test mode)
+        # 1. Default (reasoning_tags: False) - reasoning only in reasoning_content, not in content
         resp = await plugin.chat_completion(
             req,
             model_cfg,
-            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+            variables={"api_key": "real-token-123", "reasoning_tags": False},
         )
 
         assert isinstance(resp, ChatCompletionResponse)
         content = resp.choices[0].message.content
-        assert content.startswith("<think>\nI am analyzing the problem step by step. Everything looks clear.\n</think>\n")
-        assert "The answer is 42." in content
+        assert "<think>" not in content
+        assert "analyzing" not in content
+        assert content == "The answer is 42."
         assert resp.choices[0].message.reasoning_content == "I am analyzing the problem step by step. Everything looks clear."
+
+        # 2. Explicitly enabled reasoning_tags: True
+        resp_tagged = await plugin.chat_completion(
+            req,
+            model_cfg,
+            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+        )
+        content_tagged = resp_tagged.choices[0].message.content
+        assert content_tagged.startswith("<think>\nI am analyzing the problem step by step. Everything looks clear.\n</think>\n")
+        assert "The answer is 42." in content_tagged
 
 
 @pytest.mark.anyio
@@ -238,10 +271,11 @@ async def test_upstream_streaming_reasoning_tags():
     )
 
     with patch("plugins.antigravity.httpx.AsyncClient", return_value=FakeClient()):
+        # 1. Default (reasoning_tags: False): emits reasoning_content, content only contains visible answer
         stream_gen = await plugin.chat_completion(
             req,
             model_cfg,
-            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+            variables={"api_key": "real-token-123", "reasoning_tags": False},
         )
 
         chunks = []
@@ -251,15 +285,34 @@ async def test_upstream_streaming_reasoning_tags():
         content_deltas = [c.choices[0].delta.get("content", "") for c in chunks if "content" in c.choices[0].delta]
         full_streamed = "".join(content_deltas)
 
-        assert "<think>\n" in full_streamed
-        assert "</think>\n" in full_streamed
-        assert "Step 1: Calculate sum." in full_streamed
-        assert "Sum is 10." in full_streamed
+        assert "<think>" not in full_streamed
+        assert "</think>" not in full_streamed
+        assert "Step 1: Calculate sum." not in full_streamed
+        assert full_streamed == "Sum is 10."
 
         # Check reasoning_content in delta
         thought_chunks = [c for c in chunks if c.choices[0].delta.get("reasoning_content")]
         assert len(thought_chunks) == 1
         assert thought_chunks[0].choices[0].delta["reasoning_content"] == "Step 1: Calculate sum."
+        assert "content" not in thought_chunks[0].choices[0].delta
+
+        # 2. When reasoning_tags: True is explicitly enabled
+        stream_gen_tagged = await plugin.chat_completion(
+            req,
+            model_cfg,
+            variables={"api_key": "real-token-123", "reasoning_tags": True, "reasoning_tag_name": "think"},
+        )
+        chunks_tagged = []
+        async for chunk in stream_gen_tagged:
+            chunks_tagged.append(chunk)
+
+        content_deltas_tagged = [c.choices[0].delta.get("content", "") for c in chunks_tagged if "content" in c.choices[0].delta]
+        full_streamed_tagged = "".join(content_deltas_tagged)
+
+        assert "<think>\n" in full_streamed_tagged
+        assert "</think>\n" in full_streamed_tagged
+        assert "Step 1: Calculate sum." in full_streamed_tagged
+        assert "Sum is 10." in full_streamed_tagged
 
 
 @pytest.mark.anyio
@@ -374,7 +427,8 @@ async def test_upstream_disabled_reasoning_tags():
         content = resp.choices[0].message.content
         assert "<think>" not in content
         assert "</think>" not in content
-        assert "Raw thought text.Final answer." == content
+        assert content == "Final answer."
+        assert resp.choices[0].message.reasoning_content == "Raw thought text."
 
 
 def test_build_upstream_request_sanitizes_prior_reasoning_tags():
@@ -543,4 +597,68 @@ async def test_upstream_streaming_handles_raw_tag_leakage():
         assert full_streamed.count("</think>") == 1
         assert "Inner thought" in full_streamed
         assert "Answer." in full_streamed
+
+
+def test_api_chat_completions_streaming_reasoning_not_doubled():
+    """Verify that through /v1/chat/completions SSE stream, reasoning is emitted only as reasoning_content."""
+    client = TestClient(app)
+
+    # Use test mode with mock_thought
+    payload = {
+        "model": "gemini-3.8-flash-high",
+        "messages": [{"role": "user", "content": "How does quicksort work?"}],
+        "stream": True,
+        "extra_body": {"mock_thought": True},
+    }
+
+    resp = client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+
+    lines = resp.text.split("\n")
+    data_lines = [l[6:].strip() for l in lines if l.startswith("data: ") and l[6:].strip() != "[DONE]"]
+
+    thought_pieces = []
+    content_pieces = []
+
+    for d in data_lines:
+        parsed = json.loads(d)
+        delta = parsed["choices"][0]["delta"]
+        if "reasoning_content" in delta:
+            thought_pieces.append(delta["reasoning_content"])
+            # Ensure thought chunk does not ALSO emit content
+            assert "content" not in delta
+        if "content" in delta and delta["content"]:
+            content_pieces.append(delta["content"])
+
+    full_thought = "".join(thought_pieces)
+    full_content = "".join(content_pieces)
+
+    assert len(full_thought) > 0
+    assert "<think>" not in full_content
+    assert "</think>" not in full_content
+    assert full_thought.strip() not in full_content
+    assert len(full_content) > 0
+
+
+def test_api_chat_completions_non_streaming_reasoning_not_doubled():
+    """Verify that through /v1/chat/completions non-streaming, reasoning is separate from message.content."""
+    client = TestClient(app)
+
+    payload = {
+        "model": "gemini-3.8-flash-high",
+        "messages": [{"role": "user", "content": "Solve puzzle"}],
+        "stream": False,
+        "extra_body": {"mock_thought": True},
+    }
+
+    resp = client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    message = data["choices"][0]["message"]
+    assert len(message["reasoning_content"]) > 0
+    assert "<think>" not in message["content"]
+    assert "</think>" not in message["content"]
+    assert message["reasoning_content"].strip() not in message["content"]
+    assert len(message["content"]) > 0
 

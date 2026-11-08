@@ -343,7 +343,7 @@ class AntigravityPlugin(BasePlugin):
                     name="reasoning_tags",
                     label="Enable Reasoning Tags",
                     type="boolean",
-                    default=True,
+                    default=False,
                     description="Wrap model reasoning/thoughts in reasoning tags (e.g. <think>...</think>)",
                 ),
                 PluginVariable(
@@ -579,7 +579,7 @@ class AntigravityPlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account] = None,
-        enable_reasoning_tags: bool = True,
+        enable_reasoning_tags: bool = False,
         tag_name: str = "think",
         actual_model: Optional[str] = None,
         enable_reasoning: bool = True,
@@ -598,11 +598,10 @@ class AntigravityPlugin(BasePlugin):
         thought_prefix = ""
         if mock_thought:
             thought_text = f"Simulated reasoning for {model_name}."
-            reasoning_content = thought_text
             if enable_reasoning_tags:
                 thought_prefix = f"<{tag_name}>\n{thought_text}\n</{tag_name}>\n"
             else:
-                thought_prefix = f"{thought_text}\n"
+                reasoning_content = thought_text
 
         if request.tools and not any(m.role in ("tool", "function") for m in request.messages[-2:]):
             fn = request.tools[0].get("function", {}) if "function" in request.tools[0] else request.tools[0]
@@ -687,7 +686,7 @@ class AntigravityPlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account] = None,
-        enable_reasoning_tags: bool = True,
+        enable_reasoning_tags: bool = False,
         tag_name: str = "think",
         actual_model: Optional[str] = None,
         enable_reasoning: bool = True,
@@ -735,18 +734,24 @@ class AntigravityPlugin(BasePlugin):
                         model=model_name,
                         choices=[ChatChoiceDelta(index=0, delta={"content": f"<{tag_name}>\n"})],
                     )
-                yield ChatCompletionChunk(
-                    id=chunk_id,
-                    created=created,
-                    model=model_name,
-                    choices=[ChatChoiceDelta(index=0, delta={"content": "Thinking about tools...", "reasoning_content": "Thinking about tools..."})],
-                )
-                if enable_reasoning_tags:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=model_name,
+                        choices=[ChatChoiceDelta(index=0, delta={"content": "Thinking about tools..."})],
+                    )
                     yield ChatCompletionChunk(
                         id=chunk_id,
                         created=created,
                         model=model_name,
                         choices=[ChatChoiceDelta(index=0, delta={"content": f"\n</{tag_name}>\n"})],
+                    )
+                else:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=model_name,
+                        choices=[ChatChoiceDelta(index=0, delta={"reasoning_content": "Thinking about tools..."})],
                     )
 
             yield ChatCompletionChunk(
@@ -827,18 +832,24 @@ class AntigravityPlugin(BasePlugin):
                     model=model_name,
                     choices=[ChatChoiceDelta(index=0, delta={"content": f"<{tag_name}>\n"})],
                 )
-            yield ChatCompletionChunk(
-                id=chunk_id,
-                created=created,
-                model=model_name,
-                choices=[ChatChoiceDelta(index=0, delta={"content": "Simulated reasoning.", "reasoning_content": "Simulated reasoning."})],
-            )
-            if enable_reasoning_tags:
+                yield ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=model_name,
+                    choices=[ChatChoiceDelta(index=0, delta={"content": "Simulated reasoning."})],
+                )
                 yield ChatCompletionChunk(
                     id=chunk_id,
                     created=created,
                     model=model_name,
                     choices=[ChatChoiceDelta(index=0, delta={"content": f"\n</{tag_name}>\n"})],
+                )
+            else:
+                yield ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=model_name,
+                    choices=[ChatChoiceDelta(index=0, delta={"reasoning_content": "Simulated reasoning."})],
                 )
 
         for i, word in enumerate(words):
@@ -1074,15 +1085,15 @@ class AntigravityPlugin(BasePlugin):
         )
 
         # Resolve reasoning tags configuration
-        enable_reasoning_tags = enable_reasoning
-        if not enable_reasoning:
-            enable_reasoning_tags = False
-        elif "reasoning_tags" in variables:
+        enable_reasoning_tags = False
+        if "reasoning_tags" in variables:
             enable_reasoning_tags = bool(variables.get("reasoning_tags"))
         if hasattr(request, "reasoning_tags") and getattr(request, "reasoning_tags") is not None:
             enable_reasoning_tags = bool(getattr(request, "reasoning_tags"))
         if request.extra_body and "reasoning_tags" in request.extra_body:
             enable_reasoning_tags = bool(request.extra_body["reasoning_tags"])
+        if not enable_reasoning:
+            enable_reasoning_tags = False
 
         raw_tag = (
             (request.extra_body.get("reasoning_tag") if request.extra_body else None)
@@ -1193,18 +1204,19 @@ class AntigravityPlugin(BasePlugin):
                                         # Close open reasoning tag before tool call
                                         if in_thought:
                                             in_thought = False
-                                            closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
-                                            yield ChatCompletionChunk(
-                                                id=chunk_id,
-                                                created=created,
-                                                model=target_model,
-                                                choices=[
-                                                    ChatChoiceDelta(
-                                                        index=0,
-                                                        delta={"content": closing},
-                                                    )
-                                                ],
-                                            )
+                                            if enable_reasoning_tags:
+                                                closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                                                yield ChatCompletionChunk(
+                                                    id=chunk_id,
+                                                    created=created,
+                                                    model=target_model,
+                                                    choices=[
+                                                        ChatChoiceDelta(
+                                                            index=0,
+                                                            delta={"content": closing},
+                                                        )
+                                                    ],
+                                                )
 
                                         fc = part["functionCall"]
                                         name = fc.get("name", "")
@@ -1241,49 +1253,17 @@ class AntigravityPlugin(BasePlugin):
                                         tool_call_idx += 1
                                     elif "text" in part and part["text"]:
                                         is_thought = self._is_thought_part(part)
-                                        if enable_reasoning_tags and is_thought:
-                                            if not in_thought:
-                                                in_thought = True
-                                                # Emit opening tag
-                                                yield ChatCompletionChunk(
-                                                    id=chunk_id,
-                                                    created=created,
-                                                    model=target_model,
-                                                    choices=[
-                                                        ChatChoiceDelta(
-                                                            index=0,
-                                                            delta={"content": f"<{tag_name}>\n"},
-                                                        )
-                                                    ],
-                                                )
+                                        if is_thought:
                                             raw_text = part["text"]
-                                            if in_thought:
-                                                if raw_text.startswith(f"<{tag_name}>"):
-                                                    raw_text = raw_text[len(f"<{tag_name}>"):].lstrip("\n")
-                                                if raw_text.endswith(f"</{tag_name}>"):
-                                                    raw_text = raw_text[:-len(f"</{tag_name}>")].rstrip("\n")
+                                            if raw_text.startswith(f"<{tag_name}>"):
+                                                raw_text = raw_text[len(f"<{tag_name}>"):].lstrip("\n")
+                                            if raw_text.endswith(f"</{tag_name}>"):
+                                                raw_text = raw_text[:-len(f"</{tag_name}>")].rstrip("\n")
                                             thought_ended_with_newline = raw_text.endswith("\n")
-                                            yield ChatCompletionChunk(
-                                                id=chunk_id,
-                                                created=created,
-                                                model=target_model,
-                                                choices=[
-                                                    ChatChoiceDelta(
-                                                        index=0,
-                                                        delta={
-                                                            "content": raw_text,
-                                                            "reasoning_content": raw_text,
-                                                        },
-                                                    )
-                                                ],
-                                            )
-                                        else:
-                                            # Non-thought text part
-                                            if in_thought:
-                                                # If part is purely whitespace/newline and thought was ongoing,
-                                                # retain it as part of thought instead of prematurely closing tags.
-                                                if not part["text"].strip():
-                                                    thought_ended_with_newline = part["text"].endswith("\n")
+                                            if enable_reasoning_tags:
+                                                if not in_thought:
+                                                    in_thought = True
+                                                    # Emit opening tag
                                                     yield ChatCompletionChunk(
                                                         id=chunk_id,
                                                         created=created,
@@ -1291,17 +1271,10 @@ class AntigravityPlugin(BasePlugin):
                                                         choices=[
                                                             ChatChoiceDelta(
                                                                 index=0,
-                                                                delta={
-                                                                    "content": part["text"],
-                                                                    "reasoning_content": part["text"],
-                                                                },
+                                                                delta={"content": f"<{tag_name}>\n"},
                                                             )
                                                         ],
                                                     )
-                                                    continue
-
-                                                in_thought = False
-                                                closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
                                                 yield ChatCompletionChunk(
                                                     id=chunk_id,
                                                     created=created,
@@ -1309,10 +1282,70 @@ class AntigravityPlugin(BasePlugin):
                                                     choices=[
                                                         ChatChoiceDelta(
                                                             index=0,
-                                                            delta={"content": closing},
+                                                            delta={"content": raw_text},
                                                         )
                                                     ],
                                                 )
+                                            else:
+                                                in_thought = True
+                                                yield ChatCompletionChunk(
+                                                    id=chunk_id,
+                                                    created=created,
+                                                    model=target_model,
+                                                    choices=[
+                                                        ChatChoiceDelta(
+                                                            index=0,
+                                                            delta={"reasoning_content": raw_text},
+                                                        )
+                                                    ],
+                                                )
+                                        else:
+                                            # Non-thought text part
+                                            if in_thought:
+                                                # If part is purely whitespace/newline and thought was ongoing,
+                                                # retain it as part of thought instead of prematurely closing tags.
+                                                if not part["text"].strip():
+                                                    thought_ended_with_newline = part["text"].endswith("\n")
+                                                    if enable_reasoning_tags:
+                                                        yield ChatCompletionChunk(
+                                                            id=chunk_id,
+                                                            created=created,
+                                                            model=target_model,
+                                                            choices=[
+                                                                ChatChoiceDelta(
+                                                                    index=0,
+                                                                    delta={"content": part["text"]},
+                                                                )
+                                                            ],
+                                                        )
+                                                    else:
+                                                        yield ChatCompletionChunk(
+                                                            id=chunk_id,
+                                                            created=created,
+                                                            model=target_model,
+                                                            choices=[
+                                                                ChatChoiceDelta(
+                                                                    index=0,
+                                                                    delta={"reasoning_content": part["text"]},
+                                                                )
+                                                            ],
+                                                        )
+                                                    continue
+
+                                                in_thought = False
+                                                if enable_reasoning_tags:
+                                                    closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                                                    yield ChatCompletionChunk(
+                                                        id=chunk_id,
+                                                        created=created,
+                                                        model=target_model,
+                                                        choices=[
+                                                            ChatChoiceDelta(
+                                                                index=0,
+                                                                delta={"content": closing},
+                                                            )
+                                                        ],
+                                                    )
                                             yield ChatCompletionChunk(
                                                 id=chunk_id,
                                                 created=created,
@@ -1330,18 +1363,19 @@ class AntigravityPlugin(BasePlugin):
                     # If stream ended while still in thought tag, close it
                     if in_thought:
                         in_thought = False
-                        closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
-                        yield ChatCompletionChunk(
-                            id=chunk_id,
-                            created=created,
-                            model=target_model,
-                            choices=[
-                                ChatChoiceDelta(
-                                    index=0,
-                                    delta={"content": closing},
-                                )
-                            ],
-                        )
+                        if enable_reasoning_tags:
+                            closing = f"</{tag_name}>\n" if thought_ended_with_newline else f"\n</{tag_name}>\n"
+                            yield ChatCompletionChunk(
+                                id=chunk_id,
+                                created=created,
+                                model=target_model,
+                                choices=[
+                                    ChatChoiceDelta(
+                                        index=0,
+                                        delta={"content": closing},
+                                    )
+                                ],
+                            )
 
                     finish_reason = "tool_calls" if has_tool_call else "stop"
                     yield ChatCompletionChunk(
@@ -1452,8 +1486,6 @@ class AntigravityPlugin(BasePlugin):
                 tagged_thought = f"<{tag_name}>\n{clean_thought}</{tag_name}>\n"
 
             assembled_text = f"{tagged_thought}{regular_text}" if regular_text else tagged_thought
-        elif thought_text and not enable_reasoning_tags:
-            assembled_text = f"{thought_text}{regular_text}"
         else:
             assembled_text = regular_text
 
@@ -1465,7 +1497,7 @@ class AntigravityPlugin(BasePlugin):
             "content": msg_content,
             "tool_calls": tool_calls if tool_calls else None,
         }
-        if thought_text:
+        if thought_text and not enable_reasoning_tags:
             msg_payload["reasoning_content"] = thought_text
 
         return ChatCompletionResponse(
