@@ -331,11 +331,32 @@
           <p>Real-time audit log of routed requests, model aliases, latency, and status.</p>
         </div>
         <div class="section-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-logs-status" title="View live Google Antigravity status modal">Status</button>
           <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-secondary); cursor: pointer;">
             <input type="checkbox" id="logs-auto-toggle" style="accent-color: var(--accent-white);">
             Auto-refresh (5s)
           </label>
           <button class="btn btn-secondary btn-sm" id="logs-refresh-btn">Refresh</button>
+        </div>
+      </div>
+
+      <!-- Google Antigravity Usage Tracker: Status -->
+      <div class="card status-tracker-card" id="status-tracker-card" style="margin-bottom: 24px;">
+        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <h3>Status</h3>
+            <span class="badge" style="background: rgba(66, 133, 244, 0.1); border-color: rgba(66, 133, 244, 0.3); color: #60a5fa; font-size: 11px;">Google Antigravity</span>
+            <span id="status-account-badge" class="badge" style="display: none; font-size: 11px;"></span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <select class="select-input" id="status-account-select" style="display: none; font-size: 12px; padding: 4px 8px;"></select>
+            <button class="btn btn-secondary btn-sm" id="status-refresh-btn" title="Refresh live Google Antigravity status">⟳ Refresh</button>
+          </div>
+        </div>
+        <div class="card-body" id="status-tracker-body" style="padding: 16px 20px;">
+          <div style="text-align: center; padding: 20px; color: var(--ink-muted);">
+            Loading live Google Antigravity status...
+          </div>
         </div>
       </div>
 
@@ -517,14 +538,14 @@
     </div>
   </div>
 
-  <!-- Modal: Google Quota Viewer -->
-  <div class="modal-overlay" id="modal-quota">
+  <!-- Modal: Google Antigravity Status Viewer -->
+  <div class="modal-overlay" id="modal-status">
     <div class="modal-dialog">
       <div class="modal-header">
-        <h3 id="modal-quota-title">Google Antigravity Quota Summary</h3>
+        <h3 id="modal-status-title">Status • Google Antigravity</h3>
         <button class="btn btn-secondary btn-sm modal-close">✕</button>
       </div>
-      <div class="modal-body" id="modal-quota-body">
+      <div class="modal-body" id="modal-status-body">
         <!-- Rendered dynamically -->
       </div>
       <div class="modal-footer">
