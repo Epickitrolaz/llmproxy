@@ -136,6 +136,10 @@
 
   function closeModal(modalEl) {
     if (!modalEl || !modalEl.classList.contains("active")) return;
+    if (modalEl === el.modalAccount && typeof stopOAuthPolling === "function") {
+      stopOAuthPolling();
+      resetGoogleOAuthUI();
+    }
     modalEl.classList.add("closing");
     setTimeout(() => {
       modalEl.classList.remove("active");
@@ -2655,6 +2659,172 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
   }
 
+  // =========================================================================
+  // Google Antigravity OAuth & Account Helpers
+  // =========================================================================
+
+  const GOOGLE_SVG = `<svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>`;
+
+  let currentOAuthPollInterval = null;
+
+  function stopOAuthPolling() {
+    if (currentOAuthPollInterval) {
+      clearInterval(currentOAuthPollInterval);
+      currentOAuthPollInterval = null;
+    }
+  }
+
+  function resetGoogleOAuthUI() {
+    stopOAuthPolling();
+    const btnStart = document.getElementById("btn-start-google-oauth");
+    const flowBox = document.getElementById("google-oauth-flow-box");
+    const pasteInput = document.getElementById("google-callback-url-paste");
+    const statusText = document.getElementById("google-oauth-status-text");
+    if (btnStart) {
+      btnStart.disabled = false;
+      btnStart.innerHTML = `${GOOGLE_SVG} <span>Sign in with Google (OAuth)</span>`;
+    }
+    if (flowBox) flowBox.style.display = "none";
+    if (pasteInput) pasteInput.value = "";
+    if (statusText) statusText.textContent = "Waiting for Google authorization...";
+  }
+
+  function updateAccountModalVisibility() {
+    const provSelect = document.getElementById("account-provider-select");
+    const idInput = document.getElementById("account-form-id");
+    const isEditing = Boolean(idInput && idInput.value);
+    const selectedProvider = provSelect ? provSelect.value : "";
+    const isAg = selectedProvider === "antigravity";
+
+    const agSection = document.getElementById("antigravity-oauth-section");
+    const keyGroup = document.getElementById("account-key-group");
+
+    if (agSection) {
+      agSection.style.display = (isAg && !isEditing) ? "block" : "none";
+    }
+
+    if (keyGroup) {
+      // Hide API Key / Token selection entirely when adding or managing a Google Antigravity account
+      keyGroup.style.display = isAg ? "none" : "block";
+    }
+  }
+
+  const accountProvSelect = document.getElementById("account-provider-select");
+  if (accountProvSelect) {
+    accountProvSelect.addEventListener("change", updateAccountModalVisibility);
+  }
+
+  const btnStartGoogleOAuth = document.getElementById("btn-start-google-oauth");
+  if (btnStartGoogleOAuth) {
+    btnStartGoogleOAuth.addEventListener("click", async () => {
+      const flowBox = document.getElementById("google-oauth-flow-box");
+      const authLink = document.getElementById("btn-open-google-auth");
+      const statusText = document.getElementById("google-oauth-status-text");
+
+      try {
+        btnStartGoogleOAuth.disabled = true;
+        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Starting OAuth Flow...</span>`;
+        const flow = await api("/api/antigravity/oauth/start", { method: "POST" });
+        btnStartGoogleOAuth.disabled = false;
+        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Restart Google Sign-In</span>`;
+
+        if (flowBox) flowBox.style.display = "block";
+        if (authLink) {
+          authLink.href = flow.auth_url;
+        }
+        if (statusText) {
+          statusText.innerHTML = `
+            <span class="status-dot"></span>
+            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
+          `;
+        }
+
+        // Attempt to open Google OAuth sign-in tab
+        try {
+          window.open(flow.auth_url, "_blank");
+        } catch (_) {}
+
+        stopOAuthPolling();
+        currentOAuthPollInterval = setInterval(async () => {
+          try {
+            const check = await api(`/api/antigravity/oauth/status/${flow.flow_id}`);
+            if (check.status === "complete") {
+              stopOAuthPolling();
+              showToast(`Google account '${check.account.name}' connected!`);
+              closeModal(el.modalAccount);
+              await fetchAccounts();
+              if (state.currentFullscreenPluginId) {
+                renderFullscreenAccounts(state.currentFullscreenPluginId);
+              }
+            } else if (check.status === "error") {
+              stopOAuthPolling();
+              showToast(`OAuth error: ${check.error}`, "error");
+              if (statusText) statusText.textContent = `Error: ${check.error}`;
+            }
+          } catch (_) {}
+        }, 2000);
+      } catch (err) {
+        btnStartGoogleOAuth.disabled = false;
+        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Sign in with Google (OAuth)</span>`;
+        showToast(`Failed to start OAuth: ${err.message}`, "error");
+      }
+    });
+  }
+
+  const btnImportLocalGoogle = document.getElementById("btn-import-local-google");
+  if (btnImportLocalGoogle) {
+    btnImportLocalGoogle.addEventListener("click", async () => {
+      try {
+        btnImportLocalGoogle.disabled = true;
+        btnImportLocalGoogle.textContent = "Importing...";
+        const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
+        showToast(res.message || "Google Antigravity account imported!");
+        closeModal(el.modalAccount);
+        await fetchAccounts();
+        if (state.currentFullscreenPluginId) {
+          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        }
+      } catch (err) {
+        showToast(`Import failed: ${err.message}`, "error");
+      } finally {
+        btnImportLocalGoogle.disabled = false;
+        btnImportLocalGoogle.textContent = "⟳ Auto-Import";
+      }
+    });
+  }
+
+  const btnSubmitCallbackPaste = document.getElementById("btn-submit-callback-paste");
+  if (btnSubmitCallbackPaste) {
+    btnSubmitCallbackPaste.addEventListener("click", async () => {
+      const pasteInput = document.getElementById("google-callback-url-paste");
+      const val = pasteInput ? pasteInput.value.trim() : "";
+      if (!val) {
+        showToast("Please paste the callback URL or code first", "error");
+        return;
+      }
+      try {
+        btnSubmitCallbackPaste.disabled = true;
+        btnSubmitCallbackPaste.textContent = "Connecting...";
+        const res = await api("/api/antigravity/oauth/callback", {
+          method: "POST",
+          body: JSON.stringify({ callback_url: val }),
+        });
+        showToast(`Connected Google account '${res.account.name}'!`);
+        stopOAuthPolling();
+        closeModal(el.modalAccount);
+        await fetchAccounts();
+        if (state.currentFullscreenPluginId) {
+          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        }
+      } catch (err) {
+        showToast(`Connection failed: ${err.message}`, "error");
+      } finally {
+        btnSubmitCallbackPaste.disabled = false;
+        btnSubmitCallbackPaste.textContent = "Connect";
+      }
+    });
+  }
+
   // Account Modal
   function openAccountModal(account = null, defaultProviderId = null) {
     const idInput = document.getElementById("account-form-id");
@@ -2678,6 +2848,8 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
     enhanceSelect(provSelect);
 
+    resetGoogleOAuthUI();
+
     if (account) {
       title.textContent = "Edit Provider Account";
       idInput.value = account.id;
@@ -2698,6 +2870,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       enabledInput.checked = true;
     }
 
+    updateAccountModalVisibility();
     openModal(el.modalAccount);
   }
 
@@ -2715,24 +2888,40 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
 
       const name = nameInput.value.trim();
       const provId = provSelect.value;
+      const isEditing = Boolean(idInput.value);
+
+      if (!isEditing && provId === "antigravity") {
+        showToast("Please use 'Sign in with Google (OAuth)' or 'Auto-Import' to connect a Google Antigravity account", "warning");
+        return;
+      }
+
       if (!name) {
         showToast("Account name is required", "error");
         return;
       }
 
+      if (!isEditing && provId !== "antigravity" && !keyInput.value.trim()) {
+        showToast("API Key / Token is required", "error");
+        return;
+      }
+
       try {
-        if (idInput.value) {
+        if (isEditing) {
           // Edit
+          const updatePayload = {
+            name,
+            base_url: baseInput.value || undefined,
+            priority: parseInt(priorityInput.value, 10) || 1,
+            weight: parseInt(weightInput.value, 10) || 1,
+            enabled: enabledInput.checked,
+          };
+          if (provId !== "antigravity" || keyInput.value) {
+            updatePayload.api_key = keyInput.value;
+          }
+
           await api(`/api/accounts/${idInput.value}`, {
             method: "PUT",
-            body: JSON.stringify({
-              name,
-              api_key: keyInput.value,
-              base_url: baseInput.value || undefined,
-              priority: parseInt(priorityInput.value, 10) || 1,
-              weight: parseInt(weightInput.value, 10) || 1,
-              enabled: enabledInput.checked,
-            }),
+            body: JSON.stringify(updatePayload),
           });
           showToast(`Account '${name}' updated`);
         } else {
