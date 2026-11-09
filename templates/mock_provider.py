@@ -62,6 +62,7 @@ class MockProviderPlugin(BasePlugin):
         model_config: PluginModelConfig,
         variables: dict,
     ) -> ChatCompletionResponse:
+        start_t = time.perf_counter()
         prefix = variables.get("response_prefix") or "[Mock AI]"
         last_user_msg = "Hello!"
         for msg in reversed(request.messages):
@@ -69,10 +70,23 @@ class MockProviderPlugin(BasePlugin):
                 last_user_msg = str(msg.content)
                 break
 
-        reply = f"{prefix} Received prompt for model '{request.model}':\n\n> {last_user_msg}\n\nEverything is functioning properly in LLMProxy router."
-
+        base_reply = f"{prefix} Received prompt for model '{request.model}':\n\n> {last_user_msg}\n\nEverything is functioning properly in LLMProxy router."
+        time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         prompt_tokens = max(1, len(last_user_msg.split()))
-        completion_tokens = len(reply.split())
+        completion_tokens = len(base_reply.split())
+        total_tokens = prompt_tokens + completion_tokens
+
+        details = (
+            f"\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** {time_taken_ms:.2f} ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** {request.model}\n"
+            f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+            f"• **Account status:** No account configured (Simulation Mode)"
+        )
+        reply = base_reply + details
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:12]}",

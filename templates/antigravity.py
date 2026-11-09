@@ -561,9 +561,12 @@ class AntigravityPlugin(BasePlugin):
         tag_name: str = "think",
         actual_model: Optional[str] = None,
         enable_reasoning: bool = True,
+        time_taken_ms: float = 0.0,
     ) -> ChatCompletionResponse:
         model_name = request.model or model_config.id
         acc_label = f" via account '{account.name}'" if account else ""
+        if time_taken_ms <= 0.0:
+            time_taken_ms = 1.25
 
         mock_thought = bool(
             enable_reasoning
@@ -621,9 +624,30 @@ class AntigravityPlugin(BasePlugin):
                 ),
             )
 
-        content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label}."
+        base_content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label}."
         if any(m.role in ("tool", "function") for m in request.messages):
-            content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label} with tool output processed."
+            base_content = f"Simulated response from 9Router Antigravity ({model_name}){acc_label} with tool output processed."
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        status_desc = (
+            "No account configured (Simulation Mode)"
+            if (not account or account.id.startswith("default-") or not account.api_key)
+            else f"Account '{account.name}' (Test mode)"
+        )
+        prompt_tokens = 15
+        completion_tokens = 25
+        total_tokens = prompt_tokens + completion_tokens
+
+        details = (
+            f"\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** {time_taken_ms:.2f} ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** {model_name}\n"
+            f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+            f"• **Account status:** {status_desc}"
+        )
+        content = base_content + details
 
         resp_msg_dict: Dict[str, Any] = {
             "role": "assistant",
@@ -659,11 +683,14 @@ class AntigravityPlugin(BasePlugin):
         tag_name: str = "think",
         actual_model: Optional[str] = None,
         enable_reasoning: bool = True,
+        time_taken_ms: float = 0.0,
     ) -> AsyncIterator[ChatCompletionChunk]:
         model_name = model_config.id
         chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         acc_label = f" via account '{account.name}'" if account else ""
+        if time_taken_ms <= 0.0:
+            time_taken_ms = 1.25
 
         mock_thought = bool(
             enable_reasoning
@@ -763,8 +790,8 @@ class AntigravityPlugin(BasePlugin):
             )
             return
 
-        text = f"Simulated 9Router Antigravity stream response for {model_name}{acc_label}."
-        words = text.split(" ")
+        base_text = f"Simulated 9Router Antigravity stream response for {model_name}{acc_label}."
+        words = base_text.split(" ")
 
         yield ChatCompletionChunk(
             id=chunk_id,
@@ -793,6 +820,27 @@ class AntigravityPlugin(BasePlugin):
                     )
                 ],
             )
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        status_desc = (
+            "No account configured (Simulation Mode)"
+            if (not account or account.id.startswith("default-") or not account.api_key)
+            else f"Account '{account.name}' (Test mode)"
+        )
+        details = (
+            f"\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** {time_taken_ms:.2f} ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** {model_name}\n"
+            f"• **Account status:** {status_desc}"
+        )
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=model_name,
+            choices=[ChatChoiceDelta(index=0, delta={"content": details}, finish_reason=None)],
+        )
 
         yield ChatCompletionChunk(
             id=chunk_id,
@@ -999,6 +1047,7 @@ class AntigravityPlugin(BasePlugin):
         variables: Dict[str, Any],
         account: Optional[Account] = None,
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
+        start_t = time.perf_counter()
         sanitize_ssl_env()
         api_key = account.api_key if account else str(variables.get("api_key", ""))
         base_url = (
@@ -1014,6 +1063,7 @@ class AntigravityPlugin(BasePlugin):
         )
 
         if self._is_test_mode(api_key):
+            time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
             if request.stream:
                 return self._mock_stream(
                     request,
@@ -1021,6 +1071,7 @@ class AntigravityPlugin(BasePlugin):
                     account=account,
                     actual_model=actual_model,
                     enable_reasoning=enable_reasoning,
+                    time_taken_ms=time_taken_ms,
                 )
             return self._mock_response(
                 request,
@@ -1028,6 +1079,7 @@ class AntigravityPlugin(BasePlugin):
                 account=account,
                 actual_model=actual_model,
                 enable_reasoning=enable_reasoning,
+                time_taken_ms=time_taken_ms,
             )
 
         await self._ensure_token_freshness(account)

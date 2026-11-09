@@ -2717,17 +2717,27 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     const isEditing = Boolean(idInput && idInput.value);
     const selectedProvider = provSelect ? provSelect.value : "";
     const isAg = selectedProvider === "antigravity";
+    const isCodex = selectedProvider === "codex";
 
     const agSection = document.getElementById("antigravity-oauth-section");
+    const codexSection = document.getElementById("codex-oauth-section");
     const keyGroup = document.getElementById("account-key-group");
 
     if (agSection) {
       agSection.style.display = (isAg && !isEditing) ? "block" : "none";
     }
 
+    if (codexSection) {
+      codexSection.style.display = (isCodex && !isEditing) ? "block" : "none";
+    }
+
     if (keyGroup) {
-      // Hide API Key / Token selection entirely when adding or managing a Google Antigravity account
-      keyGroup.style.display = isAg ? "none" : "block";
+      // Hide API Key / Token selection entirely when adding or managing a Google Antigravity or Codex account
+      if (isCodex && !isEditing) {
+        keyGroup.style.display = "none";
+      } else {
+        keyGroup.style.display = isAg ? "none" : "block";
+      }
     }
   }
 
@@ -2847,6 +2857,143 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
   }
 
+  function resetCodexOAuthUI() {
+    const flowBox = document.getElementById("codex-oauth-flow-box");
+    const statusText = document.getElementById("codex-oauth-status-text");
+    const pasteInput = document.getElementById("codex-callback-url-paste");
+    const startBtn = document.getElementById("btn-start-codex-oauth");
+
+    if (flowBox) flowBox.style.display = "none";
+    if (statusText) statusText.textContent = "Waiting for OpenAI / ChatGPT authorization...";
+    if (pasteInput) pasteInput.value = "";
+    if (startBtn) {
+      startBtn.disabled = false;
+      startBtn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+        <span>Sign in with ChatGPT (OAuth)</span>
+      `;
+    }
+  }
+
+  const btnStartCodexOAuth = document.getElementById("btn-start-codex-oauth");
+  if (btnStartCodexOAuth) {
+    btnStartCodexOAuth.addEventListener("click", async () => {
+      const flowBox = document.getElementById("codex-oauth-flow-box");
+      const authLink = document.getElementById("btn-open-codex-auth");
+      const statusText = document.getElementById("codex-oauth-status-text");
+
+      try {
+        btnStartCodexOAuth.disabled = true;
+        btnStartCodexOAuth.innerHTML = `<span>Starting OAuth Flow...</span>`;
+        const flow = await api("/api/codex/oauth/start", { method: "POST" });
+        btnStartCodexOAuth.disabled = false;
+        btnStartCodexOAuth.innerHTML = `<span>Restart ChatGPT Sign-In</span>`;
+
+        if (flowBox) flowBox.style.display = "block";
+        if (authLink) authLink.href = flow.auth_url;
+        if (statusText) {
+          statusText.innerHTML = `
+            <span class="status-dot"></span>
+            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
+          `;
+        }
+
+        try {
+          window.open(flow.auth_url, "_blank");
+        } catch (_) {}
+
+        stopOAuthPolling();
+        currentOAuthPollInterval = setInterval(async () => {
+          try {
+            const check = await api(`/api/codex/oauth/status/${flow.flow_id}`);
+            if (check.status === "complete") {
+              stopOAuthPolling();
+              showToast(`Codex account '${check.account.name}' connected!`);
+              closeModal(el.modalAccount);
+              await fetchAccounts();
+              if (state.currentFullscreenPluginId) {
+                renderFullscreenAccounts(state.currentFullscreenPluginId);
+              }
+            } else if (check.status === "error") {
+              stopOAuthPolling();
+              showToast(`OAuth error: ${check.error}`, "error");
+              if (statusText) statusText.textContent = `Error: ${check.error}`;
+            }
+          } catch (_) {}
+        }, 2000);
+      } catch (err) {
+        btnStartCodexOAuth.disabled = false;
+        btnStartCodexOAuth.innerHTML = `<span>Sign in with ChatGPT (OAuth)</span>`;
+        showToast(`Failed to start Codex OAuth: ${err.message}`, "error");
+      }
+    });
+  }
+
+  const btnImportLocalCodex = document.getElementById("btn-import-local-codex");
+  if (btnImportLocalCodex) {
+    btnImportLocalCodex.addEventListener("click", async () => {
+      try {
+        btnImportLocalCodex.disabled = true;
+        btnImportLocalCodex.textContent = "Importing...";
+        const res = await api("/api/codex/oauth/import-local", { method: "POST" });
+        showToast(res.message || "Codex account imported!");
+        closeModal(el.modalAccount);
+        await fetchAccounts();
+        if (state.currentFullscreenPluginId) {
+          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        }
+      } catch (err) {
+        showToast(`Import failed: ${err.message}`, "error");
+      } finally {
+        btnImportLocalCodex.disabled = false;
+        btnImportLocalCodex.textContent = "⟳ Auto-Import";
+      }
+    });
+  }
+
+  const btnCopyCodexUrl = document.getElementById("btn-copy-codex-url");
+  if (btnCopyCodexUrl) {
+    btnCopyCodexUrl.addEventListener("click", () => {
+      const authLink = document.getElementById("btn-open-codex-auth");
+      if (authLink && authLink.href) {
+        navigator.clipboard.writeText(authLink.href);
+        showToast("ChatGPT sign-in URL copied to clipboard!");
+      }
+    });
+  }
+
+  const btnSubmitCodexCallbackPaste = document.getElementById("btn-submit-codex-callback-paste");
+  if (btnSubmitCodexCallbackPaste) {
+    btnSubmitCodexCallbackPaste.addEventListener("click", async () => {
+      const pasteInput = document.getElementById("codex-callback-url-paste");
+      const val = pasteInput ? pasteInput.value.trim() : "";
+      if (!val) {
+        showToast("Please paste the callback URL or code first", "error");
+        return;
+      }
+      try {
+        btnSubmitCodexCallbackPaste.disabled = true;
+        btnSubmitCodexCallbackPaste.textContent = "Connecting...";
+        const res = await api("/api/codex/oauth/callback", {
+          method: "POST",
+          body: JSON.stringify({ callback_url: val }),
+        });
+        showToast(`Connected Codex account '${res.account.name}'!`);
+        stopOAuthPolling();
+        closeModal(el.modalAccount);
+        await fetchAccounts();
+        if (state.currentFullscreenPluginId) {
+          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        }
+      } catch (err) {
+        showToast(`Connection failed: ${err.message}`, "error");
+      } finally {
+        btnSubmitCodexCallbackPaste.disabled = false;
+        btnSubmitCodexCallbackPaste.textContent = "Connect";
+      }
+    });
+  }
+
   // Account Modal
   function openAccountModal(account = null, defaultProviderId = null) {
     const idInput = document.getElementById("account-form-id");
@@ -2871,6 +3018,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     enhanceSelect(provSelect);
 
     resetGoogleOAuthUI();
+    resetCodexOAuthUI();
 
     if (account) {
       title.textContent = "Edit Provider Account";
@@ -2917,12 +3065,17 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
         return;
       }
 
+      if (!isEditing && provId === "codex" && !keyInput.value.trim()) {
+        showToast("Please use 'Sign in with ChatGPT (OAuth)' or 'Auto-Import' to connect an OpenAI Codex account", "warning");
+        return;
+      }
+
       if (!name) {
         showToast("Account name is required", "error");
         return;
       }
 
-      if (!isEditing && provId !== "antigravity" && !keyInput.value.trim()) {
+      if (!isEditing && provId !== "antigravity" && provId !== "codex" && !keyInput.value.trim()) {
         showToast("API Key / Token is required", "error");
         return;
       }

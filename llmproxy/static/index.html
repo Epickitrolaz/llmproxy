@@ -737,6 +737,44 @@
           </div>
         </div>
 
+        <!-- OpenAI Codex OAuth Connection Section -->
+        <div id="codex-oauth-section" style="margin-bottom: 20px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); display: none;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+            <div>
+              <div style="font-weight: 600; font-size: 13px; color: var(--ink-primary); display: flex; align-items: center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l5.58-5.58c.94-.94.94-2.48 0-3.42L12 2Z"/><path d="M7 7h.01"/></svg>
+                OpenAI Codex Connection
+              </div>
+              <div style="font-size: 11.5px; color: var(--ink-muted); margin-top: 2px;">ChatGPT OAuth 2.0 PKCE loopback redirect with auto-refreshing tokens</div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-local-codex" title="Auto-detect local Codex session (~/.codex/auth.json)">⟳ Auto-Import</button>
+          </div>
+
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-start-codex-oauth" style="display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+              <span>Sign in with ChatGPT (OAuth)</span>
+            </button>
+          </div>
+
+          <div id="codex-oauth-flow-box" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle);">
+            <div id="codex-oauth-status-text" style="font-size: 12px; color: var(--ink-secondary); margin-bottom: 8px;">
+              Waiting for OpenAI / ChatGPT authorization...
+            </div>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+              <a href="#" target="_blank" class="btn btn-secondary btn-sm" id="btn-open-codex-auth" style="text-decoration: none; flex: 1; text-align: center;">Open Sign-In Tab ↗</a>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-codex-url">Copy Link</button>
+            </div>
+            <div style="margin-top: 8px;">
+              <span class="form-hint" style="margin-bottom: 4px; display: block;">Paste browser redirect URL here if running headless or in Docker:</span>
+              <div style="display: flex; gap: 8px;">
+                <input type="text" class="form-input" id="codex-callback-url-paste" placeholder="http://127.0.0.1:.../auth/callback?code=..." style="font-size: 11.5px; font-family: var(--font-mono);">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-submit-codex-callback-paste">Connect</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label class="form-label">Account Name / Label <span style="color: var(--accent-red);">*</span></label>
           <input type="text" class="form-input" id="account-name" placeholder="e.g. Primary Key, Secondary Backup">
