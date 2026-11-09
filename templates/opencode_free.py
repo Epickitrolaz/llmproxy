@@ -500,15 +500,22 @@ class OpenCodeFreePlugin(BasePlugin):
         variables: Dict[str, Any],
         target_model: str,
     ) -> ChatCompletionResponse:
-        """Execute non-streaming POST /chat/completions with retry, proxy, and limit bypass support."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        """Execute non-streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
+        proxy = str(variables.get("proxy") or "").strip()
+        is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
+        client_kwargs = {"timeout": timeout}
+        if proxy and not is_relay:
+            client_kwargs["proxy"] = proxy
+
+        url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
         max_retries = int(variables.get("max_retries") or 2)
         bypass_enabled = self._is_limit_bypass_active(variables)
-        client_kwargs = self._get_client_kwargs(timeout, variables)
 
         for attempt in range(max_retries + 1):
             session_id, project_id = self._get_or_rotate_session(rotate=False)
             headers = self._build_upstream_headers(session_id, project_id)
+            if is_relay:
+                headers["x-relay-target"] = f"{base_url.rstrip('/')}/chat/completions"
 
             try:
                 async with httpx.AsyncClient(**client_kwargs) as client:
@@ -556,16 +563,23 @@ class OpenCodeFreePlugin(BasePlugin):
         variables: Dict[str, Any],
         target_model: str,
     ) -> AsyncIterator[ChatCompletionChunk]:
-        """Execute streaming POST /chat/completions with retry, proxy, and limit bypass support."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        """Execute streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
+        proxy = str(variables.get("proxy") or "").strip()
+        is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
+        client_kwargs = {"timeout": timeout}
+        if proxy and not is_relay:
+            client_kwargs["proxy"] = proxy
+
+        url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
         bypass_enabled = self._is_limit_bypass_active(variables)
         max_retries = int(variables.get("max_retries") or 2)
-        client_kwargs = self._get_client_kwargs(timeout, variables)
 
         async def sse_generator() -> AsyncIterator[ChatCompletionChunk]:
             for attempt in range(max_retries + 1):
                 session_id, project_id = self._get_or_rotate_session(rotate=False)
                 headers = self._build_upstream_headers(session_id, project_id)
+                if is_relay:
+                    headers["x-relay-target"] = f"{base_url.rstrip('/')}/chat/completions"
 
                 try:
                     async with httpx.AsyncClient(**client_kwargs) as client:
