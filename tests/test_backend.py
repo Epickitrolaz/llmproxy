@@ -18,6 +18,7 @@ def setup_backend():
     """Ensure plugins and test credentials are initialized for backend tests."""
     plugin_manager.discover_and_load_all()
     plugin_manager.accounts.clear()
+    plugin_manager.logs.clear()
     # Configure test API keys so variable validation succeeds
     plugin_manager.update_plugin_config("antigravity", enabled=True, variables={"api_key": "test-key", "timeout": 60})
     plugin_manager.update_plugin_config("codex", enabled=True, variables={"api_key": "test-key"})
