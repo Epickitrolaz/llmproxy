@@ -65,6 +65,7 @@ def test_templates_gallery_and_install_to_plugins(tmp_path, monkeypatch):
     assert "codex" in template_ids
     assert "claude_code" in template_ids
     assert "openai_compatible" in template_ids
+    assert "opencode_free" in template_ids
 
     # Check antigravity template defaults in code/metadata
     ag_tpl = next(t for t in templates if t["id"] == "antigravity")
