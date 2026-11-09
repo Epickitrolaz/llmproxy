@@ -2,8 +2,9 @@
 Tests for OpenCode Free Models Provider Plugin and Starter Template:
 - Discovered in templates/ gallery and loadable via /api/templates/opencode_free/add
 - Zero authentication / anonymous execution (no account or API key required)
-- Automatic model exposure: scans all models and strictly filters for those ending with '-free'
-- Manual model exposure: allows explicitly configured exposed models
+- Model list managed via Models tab (not in configuration variables)
+- Automatic model exposure mode removed
+- Outbound proxy configuration support
 - Rate limit handling and reset requirement documentation
 - Limit bypassing controlled by ENABLE_LIMIT_BYPASS const variable (disabled by default)
 - Session and project rotation when limit bypass is enabled
@@ -33,7 +34,6 @@ from templates.opencode_free import (
     generate_session_id,
     generate_request_id,
     generate_project_id,
-    scan_upstream_models,
 )
 
 
@@ -45,7 +45,7 @@ def test_const_limit_bypass_disabled_by_default():
 
 
 def test_opencode_free_template_discovered_in_gallery():
-    """Verify that the opencode_free template appears in /api/templates."""
+    """Verify that the opencode_free template appears in /api/templates without model config variables."""
     client = TestClient(app)
     res = client.get("/api/templates")
     assert res.status_code == 200
@@ -57,8 +57,9 @@ def test_opencode_free_template_discovered_in_gallery():
     assert oc_tpl["name"] == "OpenCode Free"
     assert oc_tpl["filename"] == "opencode_free.py"
     assert "ENABLE_LIMIT_BYPASS" in oc_tpl["code"]
-    assert "automatic" in oc_tpl["code"]
-    assert "manual" in oc_tpl["code"]
+    # Model exposure modes must not be in variables/configuration
+    assert 'name="model_exposure"' not in oc_tpl["code"]
+    assert 'name="manual_models"' not in oc_tpl["code"]
 
 
 def test_install_template_to_plugins(tmp_path, monkeypatch):
@@ -103,82 +104,72 @@ def test_zero_auth_no_credentials_required():
     assert "opencode" in headers["User-Agent"]
     assert headers["x-opencode-client"] == "cli"
     assert headers["x-opencode-session"] == "ses_123"
+    assert headers["x-opencode-session-id"] == "ses_123"
+    assert headers["x-session-affinity"] == "ses_123"
+    assert headers["x-session-id"] == "ses_123"
     assert headers["x-opencode-project"] == "global"
     assert headers["x-opencode-request"].startswith("msg_")
 
 
-def test_automatic_model_exposure_filters_free_suffix():
-    """Verify automatic mode scans models and strictly exposes ONLY those ending with -free."""
-    mock_upstream_models = [
-        {"id": "deepseek-v4-flash-free"},
-        {"id": "gpt-4o"},                     # not free, should be excluded
-        {"id": "minimax-m2.5-free"},
-        {"id": "claude-3-7-sonnet"},           # not free, should be excluded
-        {"id": "qwen3.6-plus-free"},
-        {"id": "big-pickle"},                 # does not end with -free, excluded
-        {"id": "nemotron-3-super-free"},
-    ]
-
-    def mock_handler(request: httpx.Request):
-        if request.url.path.endswith("/models"):
-            return httpx.Response(200, json={"object": "list", "data": mock_upstream_models})
-        return httpx.Response(404)
-
-    transport = httpx.MockTransport(mock_handler)
-    with patch("httpx.Client", return_value=httpx.Client(transport=transport)):
-        scanned = scan_upstream_models("https://opencode.ai/zen/v1")
-        scanned_ids = [m.id for m in scanned]
-
-        # Verify only models ending with -free are retained
-        assert "deepseek-v4-flash-free" in scanned_ids
-        assert "minimax-m2.5-free" in scanned_ids
-        assert "qwen3.6-plus-free" in scanned_ids
-        assert "nemotron-3-super-free" in scanned_ids
-        assert "gpt-4o" not in scanned_ids
-        assert "claude-3-7-sonnet" not in scanned_ids
-        assert "big-pickle" not in scanned_ids
-
-        # Ensure all exposed models end with -free
-        for mid in scanned_ids:
-            assert mid.endswith("-free")
-
-
-def test_automatic_model_exposure_on_plugin(monkeypatch):
-    """Verify plugin.metadata in automatic mode dynamically exposes -free models."""
+def test_models_managed_via_models_tab(tmp_path, monkeypatch):
+    """Verify models are managed directly via Models tab, not in configuration variables."""
     plugin = OpenCodeFreePlugin()
-    plugin.set_exposure_mode("automatic")
 
-    mock_models = [
-        PluginModelConfig(id="m1-free", name="M1 Free"),
-        PluginModelConfig(id="m2-free", name="M2 Free"),
-    ]
-    monkeypatch.setattr(plugin, "scan_models", lambda base_url=None: mock_models)
+    # 1. Variables do NOT contain model_exposure or manual_models
+    var_names = {v.name for v in plugin.metadata.variables}
+    assert "model_exposure" not in var_names
+    assert "manual_models" not in var_names
+    assert "proxy" in var_names
 
-    models = plugin.get_exposed_models(exposure_mode="automatic")
-    assert [m.id for m in models] == ["m1-free", "m2-free"]
+    # 2. Default models are populated in metadata.models
+    default_ids = {m.id for m in plugin.metadata.models}
+    assert "mimo-v2.6-flash-free" in default_ids
+    assert "deepseek-v4.1-flash-free" in default_ids
+    assert "glm-5.3-flash-free" in default_ids
+    assert "big-pickle" in default_ids
 
-    # Also reflected in metadata.models
-    assert [m.id for m in plugin.metadata.models] == ["m1-free", "m2-free"]
+    # 3. Models tab integration: adding and editing custom models in plugin_manager
+    temp_plugins = tmp_path / "plugins"
+    temp_data = tmp_path / "data"
+    temp_plugins.mkdir(parents=True, exist_ok=True)
+    temp_data.mkdir(parents=True, exist_ok=True)
 
+    monkeypatch.setattr(plugin_manager, "plugins_dir", temp_plugins)
+    monkeypatch.setattr(plugin_manager, "data_dir", temp_data)
+    monkeypatch.setattr(plugin_manager, "plugins", {"opencode_free": plugin})
+    monkeypatch.setattr(plugin_manager, "configs", {})
 
-def test_manual_model_exposure_allows_custom_models():
-    """Verify manual mode allows setting and exposing specific models."""
-    plugin = OpenCodeFreePlugin()
-    plugin.set_exposure_mode("manual")
-
-    # 1. Via manual_models variable string
-    exposed = plugin.get_exposed_models(
-        exposure_mode="manual",
-        variables={"manual_models": "deepseek-v4-flash-free, custom-enterprise-model, special-preview"},
+    # User adds a new model in Models tab
+    plugin_manager.add_custom_model(
+        "opencode_free",
+        PluginModelConfig(
+            id="my-custom-model",
+            name="My Custom Model",
+            upstream_model="mimo-v2.6-flash-free",
+        ),
     )
-    exposed_ids = [m.id for m in exposed]
-    assert exposed_ids == ["deepseek-v4-flash-free", "custom-enterprise-model", "special-preview"]
+    active_models = plugin_manager.get_plugin_models("opencode_free")
+    active_ids = {m.id for m in active_models}
+    assert "my-custom-model" in active_ids
+    assert "mimo-v2.6-flash-free" in active_ids
 
-    # 2. Via programmatic set_manual_models
-    plugin.set_manual_models(["model-alpha", "model-beta"])
-    exposed_prog = plugin.get_exposed_models(exposure_mode="manual")
-    assert [m.id for m in exposed_prog] == ["model-alpha", "model-beta"]
-    assert [m.id for m in plugin.metadata.models] == ["model-alpha", "model-beta"]
+
+def test_proxy_configuration_passed_to_client():
+    """Verify outbound proxy URL is configured and passed to httpx client."""
+    plugin = OpenCodeFreePlugin()
+
+    # Empty proxy returns no proxy in kwargs
+    kwargs_no_proxy = plugin._get_client_kwargs(timeout=30.0, variables={})
+    assert "proxy" not in kwargs_no_proxy
+    assert kwargs_no_proxy["timeout"] == 30.0
+
+    # Configured proxy is included in client kwargs
+    kwargs_with_proxy = plugin._get_client_kwargs(
+        timeout=45.0,
+        variables={"proxy": "http://127.0.0.1:8888"},
+    )
+    assert kwargs_with_proxy["proxy"] == "http://127.0.0.1:8888"
+    assert kwargs_with_proxy["timeout"] == 45.0
 
 
 @pytest.mark.anyio
@@ -190,7 +181,7 @@ async def test_non_streaming_upstream_success():
         "id": "chatcmpl-oc-test123",
         "object": "chat.completion",
         "created": 1779000000,
-        "model": "deepseek-v4-flash-free",
+        "model": "mimo-v2.6-flash-free",
         "choices": [
             {
                 "index": 0,
@@ -212,12 +203,12 @@ async def test_non_streaming_upstream_success():
     orig_client = httpx.AsyncClient
     with patch("httpx.AsyncClient", side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs)):
         req = ChatCompletionRequest(
-            model="deepseek-v4-flash-free",
+            model="mimo-v2.6-flash-free",
             messages=[ChatMessage(role="user", content="hello")],
             stream=False,
         )
-        model_cfg = PluginModelConfig(id="deepseek-v4-flash-free", name="DeepSeek Free")
-        res = await plugin.chat_completion(req, model_cfg, variables={"base_url": "https://opencode.ai/zen/v1"})
+        model_cfg = PluginModelConfig(id="mimo-v2.6-flash-free", name="MiMo Free")
+        res = await plugin.chat_completion(req, model_cfg, variables={"base_url": "https://opencode.ai/inference/openai/v1"})
 
         assert res.id == "chatcmpl-oc-test123"
         assert res.choices[0].message.content == "Hello from OpenCode free tier!"
@@ -245,11 +236,11 @@ async def test_streaming_upstream_success():
     orig_client = httpx.AsyncClient
     with patch("httpx.AsyncClient", side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs)):
         req = ChatCompletionRequest(
-            model="minimax-m2.5-free",
+            model="deepseek-v4.1-flash-free",
             messages=[ChatMessage(role="user", content="stream test")],
             stream=True,
         )
-        model_cfg = PluginModelConfig(id="minimax-m2.5-free", name="MiniMax Free")
+        model_cfg = PluginModelConfig(id="deepseek-v4.1-flash-free", name="DeepSeek Free")
         stream_gen = await plugin.chat_completion(req, model_cfg, variables={})
 
         chunks = []
@@ -279,11 +270,11 @@ async def test_rate_limit_without_bypass_raises_429():
     orig_client = httpx.AsyncClient
     with patch("httpx.AsyncClient", side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs)):
         req = ChatCompletionRequest(
-            model="deepseek-v4-flash-free",
+            model="mimo-v2.6-flash-free",
             messages=[ChatMessage(role="user", content="hi")],
             stream=False,
         )
-        model_cfg = PluginModelConfig(id="deepseek-v4-flash-free", name="DeepSeek Free")
+        model_cfg = PluginModelConfig(id="mimo-v2.6-flash-free", name="MiMo Free")
 
         with pytest.raises(RuntimeError) as exc_info:
             await plugin.chat_completion(req, model_cfg, variables={"bypass_rate_limits": False})
@@ -319,7 +310,7 @@ async def test_rate_limit_bypass_rotates_session_and_retries_non_streaming():
             json={
                 "id": "chatcmpl-bypassed",
                 "object": "chat.completion",
-                "model": "deepseek-v4-flash-free",
+                "model": "mimo-v2.6-flash-free",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "Bypass success!"}}],
             },
         )
@@ -328,11 +319,11 @@ async def test_rate_limit_bypass_rotates_session_and_retries_non_streaming():
     orig_client = httpx.AsyncClient
     with patch("httpx.AsyncClient", side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs)):
         req = ChatCompletionRequest(
-            model="deepseek-v4-flash-free",
+            model="mimo-v2.6-flash-free",
             messages=[ChatMessage(role="user", content="bypass test")],
             stream=False,
         )
-        model_cfg = PluginModelConfig(id="deepseek-v4-flash-free", name="DeepSeek Free")
+        model_cfg = PluginModelConfig(id="mimo-v2.6-flash-free", name="MiMo Free")
 
         res = await plugin.chat_completion(req, model_cfg, variables={})
         assert res.id == "chatcmpl-bypassed"
@@ -371,11 +362,11 @@ async def test_rate_limit_bypass_rotates_session_and_retries_streaming():
     orig_client = httpx.AsyncClient
     with patch("httpx.AsyncClient", side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs)):
         req = ChatCompletionRequest(
-            model="qwen3.6-plus-free",
+            model="glm-5.3-flash-free",
             messages=[ChatMessage(role="user", content="stream bypass")],
             stream=True,
         )
-        model_cfg = PluginModelConfig(id="qwen3.6-plus-free", name="Qwen Free")
+        model_cfg = PluginModelConfig(id="glm-5.3-flash-free", name="GLM Free")
         stream_gen = await plugin.chat_completion(req, model_cfg, variables={})
 
         chunks = [c async for c in stream_gen]
@@ -391,11 +382,11 @@ async def test_simulation_mode_with_test_key():
     """Verify offline simulation mode triggers when test API key is provided."""
     plugin = OpenCodeFreePlugin()
     req = ChatCompletionRequest(
-        model="deepseek-v4-flash-free",
+        model="mimo-v2.6-flash-free",
         messages=[ChatMessage(role="user", content="sim test")],
         stream=False,
     )
-    model_cfg = PluginModelConfig(id="deepseek-v4-flash-free", name="DeepSeek Free")
+    model_cfg = PluginModelConfig(id="mimo-v2.6-flash-free", name="MiMo Free")
 
     # Non-streaming simulation
     res = await plugin.chat_completion(req, model_cfg, variables={"api_key": "test-key-mock"})
@@ -404,7 +395,7 @@ async def test_simulation_mode_with_test_key():
 
     # Streaming simulation
     req_stream = ChatCompletionRequest(
-        model="deepseek-v4-flash-free",
+        model="mimo-v2.6-flash-free",
         messages=[ChatMessage(role="user", content="sim test stream")],
         stream=True,
     )
