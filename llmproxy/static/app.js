@@ -1758,9 +1758,55 @@ curl -X POST ${baseUrl}/chat/completions \\
           </label>
         </td>
         <td>
-          <button class="btn btn-danger btn-sm btn-fs-del-model" data-mid="${m.id}">Delete</button>
+          <div style="display: flex; gap: 6px; align-items: center;">
+            <button class="btn btn-secondary btn-sm btn-test btn-fs-test-model" data-mid="${m.id}" title="Test model response">Test</button>
+            <button class="btn btn-danger btn-sm btn-fs-del-model" data-mid="${m.id}">Delete</button>
+          </div>
         </td>
       `;
+
+      const testBtn = tr.querySelector(".btn-fs-test-model");
+      if (testBtn) {
+        testBtn.addEventListener("click", async () => {
+          testBtn.disabled = true;
+          testBtn.classList.remove("is-success", "is-error");
+          testBtn.classList.add("is-testing");
+          testBtn.textContent = "Testing...";
+
+          const startT = performance.now();
+          try {
+            const res = await api("/api/test-chat", {
+              method: "POST",
+              body: JSON.stringify({
+                model: m.id,
+                prompt: "ping",
+                max_tokens: 5,
+              }),
+            });
+            const latency = Math.round(performance.now() - startT);
+            testBtn.classList.remove("is-testing");
+            testBtn.classList.add("is-success");
+            testBtn.textContent = "✓ OK";
+            testBtn.title = `Responded in ${res.latency_ms || latency}ms`;
+            showToast(`Model '${m.id}' responded in ${res.latency_ms || latency}ms`);
+          } catch (err) {
+            testBtn.classList.remove("is-testing");
+            testBtn.classList.add("is-error");
+            testBtn.textContent = "✕ Fail";
+            testBtn.title = `Error: ${err.message}`;
+            showToast(`Model '${m.id}' test failed: ${err.message}`, "error");
+          } finally {
+            testBtn.disabled = false;
+            setTimeout(() => {
+              if (testBtn.classList.contains("is-success") || testBtn.classList.contains("is-error")) {
+                testBtn.classList.remove("is-success", "is-error");
+                testBtn.textContent = "Test";
+                testBtn.title = "Test model response";
+              }
+            }, 4000);
+          }
+        });
+      }
 
       tr.querySelector(".fs-model-toggle").addEventListener("change", async (e) => {
         try {
