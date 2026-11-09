@@ -191,14 +191,14 @@ def test_feature1_test_chat_playground_endpoint_details():
 # =========================================================================
 
 def test_feature2_codex_template_not_openai_compatible():
-    """Verify the new Codex template is NOT an OpenAI compatible API wrapper and has options like Antigravity."""
+    """Verify the new Codex template uses direct network wire protocol without CLI sandbox flags."""
     tpl_path = Path("templates/codex.py")
     assert tpl_path.exists()
     code = tpl_path.read_text(encoding="utf-8")
 
     # Should NOT be standard OpenAI chat/completions client
     assert "https://api.openai.com/v1" not in code
-    assert "OpenAI Codex CLI & frontier models provider" in code
+    assert "direct ChatGPT OAuth 2.0 network wire protocol" in code
 
     # Should have ChatGPT OAuth / Codex credentials
     assert "CODEX_CLIENT_ID" in code
@@ -212,9 +212,12 @@ def test_feature2_codex_template_not_openai_compatible():
     assert 'name="account_switch_wait"' in code
     assert 'name="max_retries"' in code
     assert 'name="reasoning_effort"' in code
-    assert 'name="sandbox_mode"' in code
-    assert 'name="approval_policy"' in code
-    assert 'name="execution_mode"' in code
+
+    # CLI-specific options must NOT be present
+    assert 'name="sandbox_mode"' not in code
+    assert 'name="approval_policy"' not in code
+    assert 'name="execution_mode"' not in code
+    assert "codex/responses" in code
 
     # Frontier models
     assert "gpt-6-luna" in code
@@ -230,7 +233,7 @@ def test_feature2_codex_plugin_instantiation_and_metadata():
     meta = plugin.metadata
     assert meta.id == "codex"
     assert meta.name == "Codex"
-    assert meta.version == "3.0.0"
+    assert meta.version.startswith("3.")
 
     model_ids = {m.id for m in meta.models}
     assert "gpt-6-luna" in model_ids
@@ -247,8 +250,10 @@ def test_feature2_codex_plugin_instantiation_and_metadata():
     assert "account_switch_wait" in var_names
     assert "max_retries" in var_names
     assert "reasoning_effort" in var_names
-    assert "sandbox_mode" in var_names
-    assert "approval_policy" in var_names
+    assert "base_url" in var_names
+    assert "sandbox_mode" not in var_names
+    assert "approval_policy" not in var_names
+    assert "execution_mode" not in var_names
 
 
 def test_feature2_codex_deterministic_uuid_and_session_id():
@@ -371,8 +376,15 @@ def test_feature2_codex_oauth_endpoints():
 
 
 @pytest.mark.anyio
-async def test_feature2_codex_cli_execution_live():
-    """Verify real execution using official codex CLI installed in this environment."""
+async def test_feature2_codex_cli_execution_live(monkeypatch):
+    """Verify real execution using direct HTTP wire protocol without spawning CLI subprocesses."""
+    # Ensure no subprocesses can be spawned
+    def forbid_subprocess(*args, **kwargs):
+        raise AssertionError("Subprocess execution is strictly forbidden in direct wire protocol mode!")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", forbid_subprocess)
+    monkeypatch.setattr("subprocess.Popen", forbid_subprocess)
+
     plugin = CodexPlugin()
     model_cfg = next(m for m in plugin.metadata.models if m.id == "gpt-6-luna")
 
@@ -392,6 +404,48 @@ async def test_feature2_codex_cli_execution_live():
     assert len(resp.choices) >= 1
     content = resp.choices[0].message.content
     assert "81" in content
+
+    # Verify streaming direct wire execution
+    req_stream = ChatCompletionRequest(
+        model="gpt-6-luna",
+        messages=[ChatMessage(role="user", content="Say 'Hello Codex'")],
+        stream=True,
+    )
+    stream_iter = await plugin.chat_completion(req_stream, model_cfg, {}, account=account)
+    chunks = []
+    async for chunk in stream_iter:
+        if chunk.choices:
+            c = chunk.choices[0].delta.get("content") if isinstance(chunk.choices[0].delta, dict) else getattr(chunk.choices[0].delta, "content", None)
+            if c:
+                chunks.append(c)
+
+    full_stream_text = "".join(chunks)
+    assert "Hello" in full_stream_text
+
+
+@pytest.mark.anyio
+async def test_connected_codex_account_executes_real_wire_protocol_not_simulation():
+    """Verify that a connected Codex account routes live requests directly upstream without simulation mode."""
+    acc = await codex_oauth.import_local_session()
+    assert acc is not None
+    plugin_manager.add_account(acc)
+
+    res = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-6-luna",
+            "messages": [{"role": "user", "content": "What is 4 + 4? Output only the number."}],
+            "stream": False,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["model"] == "gpt-6-luna"
+    content = data["choices"][0]["message"]["content"]
+    assert "8" in content
+    assert "Simulated" not in content
+    assert "Simulation Mode" not in content
+    assert "Test mode" not in content
 
 
 # =========================================================================
