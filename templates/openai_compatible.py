@@ -162,9 +162,30 @@ class OpenAICompatiblePlugin(BasePlugin):
                 ),
             )
 
-        content = f"Simulated response from OpenAI Compatible ({model_name}){acc_label}."
+        base_content = f"Simulated response from OpenAI Compatible ({model_name}){acc_label}."
         if any(m.role == "tool" for m in request.messages):
-            content = f"Simulated response from OpenAI Compatible ({model_name}){acc_label} with tool output processed."
+            base_content = f"Simulated response from OpenAI Compatible ({model_name}){acc_label} with tool output processed."
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        status_desc = (
+            "No account configured (Simulation Mode)"
+            if (not account or account.id.startswith("default-") or not account.api_key)
+            else f"Account '{account.name}' (Test mode)"
+        )
+        prompt_tokens = 10
+        completion_tokens = 20
+        total_tokens = prompt_tokens + completion_tokens
+
+        details = (
+            f"\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** 1.10 ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** {model_name}\n"
+            f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+            f"• **Account status:** {status_desc}"
+        )
+        content = base_content + details
 
         return ChatCompletionResponse(
             id=f"chatcmpl-oai-{uuid.uuid4().hex[:12]}",
@@ -178,9 +199,9 @@ class OpenAICompatiblePlugin(BasePlugin):
                 )
             ],
             usage=CompletionUsage(
-                prompt_tokens=10,
-                completion_tokens=20,
-                total_tokens=30,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
             ),
         )
 
@@ -294,6 +315,27 @@ class OpenAICompatiblePlugin(BasePlugin):
                     )
                 ],
             )
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        status_desc = (
+            "No account configured (Simulation Mode)"
+            if (not account or account.id.startswith("default-") or not account.api_key)
+            else f"Account '{account.name}' (Test mode)"
+        )
+        details = (
+            f"\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** 1.10 ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** {model_name}\n"
+            f"• **Account status:** {status_desc}"
+        )
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=model_name,
+            choices=[ChatChoiceDelta(index=0, delta={"content": details}, finish_reason=None)],
+        )
 
         yield ChatCompletionChunk(
             id=chunk_id,

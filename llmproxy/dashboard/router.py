@@ -16,6 +16,12 @@ from llmproxy.core.antigravity_oauth import (
     CLOUDCODE_PA_ENDPOINTS,
     antigravity_oauth,
 )
+from llmproxy.core.codex_oauth import (
+    CODEX_BACKEND_API,
+    CODEX_CLIENT_ID,
+    CODEX_SCOPES,
+    codex_oauth,
+)
 from llmproxy.core.manager import plugin_manager
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
@@ -861,6 +867,148 @@ async def get_antigravity_all_status():
             "tier": acc.extra_config.get("tier", "free-tier"),
             "rate_limited": not acc.is_available(),
             "quota": quota_data,
+        })
+    return {"accounts": results}
+
+
+# =========================================================================
+# Codex OAuth & Account Management
+# =========================================================================
+
+class CodexCallbackRequest(BaseModel):
+    callback_url: Optional[str] = None
+    code: Optional[str] = None
+    redirect_uri: Optional[str] = None
+    flow_id: Optional[str] = None
+
+
+@router.post("/codex/oauth/start")
+async def start_codex_oauth():
+    """Start OpenAI Codex OAuth consent flow with PKCE and loopback redirect listener."""
+    flow = codex_oauth.start_flow()
+    return flow
+
+
+@router.get("/codex/oauth/status/{flow_id}")
+async def check_codex_oauth_status(flow_id: str):
+    """Check loopback callback status for a pending Codex OAuth flow."""
+    res = await codex_oauth.check_flow_status(flow_id)
+    if res.get("status") == "complete" and res.get("account"):
+        saved = plugin_manager.add_account(res["account"])
+        res["account"] = saved
+    return res
+
+
+@router.post("/codex/oauth/callback")
+async def complete_codex_oauth_callback(payload: CodexCallbackRequest):
+    """
+    Complete Codex OAuth via manual callback URL or authorization code paste
+    (useful for remote/docker/headless instances where loopback isn't reachable).
+    """
+    code = payload.code
+    redirect_uri = payload.redirect_uri or "http://127.0.0.1:45124/auth/callback"
+    code_verifier = None
+
+    if payload.flow_id and payload.flow_id in codex_oauth.active_flows:
+        flow = codex_oauth.active_flows[payload.flow_id]
+        code_verifier = flow.get("code_verifier")
+        redirect_uri = flow.get("redirect_uri", redirect_uri)
+
+    if payload.callback_url:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(payload.callback_url)
+        params = urllib.parse.parse_qs(parsed.query)
+        code = params.get("code", [None])[0]
+        redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        state = params.get("state", [None])[0]
+        if state:
+            for fid, f in codex_oauth.active_flows.items():
+                if f.get("state") == state:
+                    code_verifier = f.get("code_verifier")
+                    break
+
+    if not code:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract Codex authorization code from input",
+        )
+
+    try:
+        account = await codex_oauth.exchange_code_and_create_account(
+            code=code, redirect_uri=redirect_uri, code_verifier=code_verifier
+        )
+        saved = plugin_manager.add_account(account)
+        return {"status": "complete", "account": saved}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Codex OAuth completion failed: {e}")
+
+
+@router.post("/codex/oauth/import-local")
+async def import_local_codex_session():
+    """Auto-detect and import local Codex session (~/.codex/auth.json) credentials from the environment."""
+    account = await codex_oauth.import_local_session()
+    if not account:
+        raise HTTPException(
+            status_code=404,
+            detail="No local Codex session (~/.codex/auth.json) found on this machine",
+        )
+    saved = plugin_manager.add_account(account)
+    return {
+        "status": "ok",
+        "message": f"Successfully imported Codex account '{saved.name}'",
+        "account": saved,
+    }
+
+
+async def fetch_codex_status(account: Account) -> Dict[str, Any]:
+    """Fetch status, plan, and token validity for a Codex account."""
+    if account.extra_config.get("refresh_token"):
+        expires_at = account.extra_config.get("expires_at", 0)
+        if expires_at - time.time() < 120:
+            refreshed = await codex_oauth.refresh_account_token(account)
+            if refreshed:
+                plugin_manager._save_accounts()
+
+    return {
+        "account_id": account.id,
+        "account_name": account.name,
+        "email": account.extra_config.get("email", ""),
+        "plan_type": account.extra_config.get("plan_type", "standard"),
+        "chatgpt_account_id": account.extra_config.get("account_id", ""),
+        "expires_at": account.extra_config.get("expires_at"),
+        "authenticated": bool(account.api_key),
+    }
+
+
+@router.get("/codex/status/{account_id}")
+async def get_codex_account_status(account_id: str):
+    """Fetch live status for a specific Codex account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    if account.provider_id != "codex":
+        raise HTTPException(status_code=400, detail="Account is not a Codex account")
+    return await fetch_codex_status(account)
+
+
+@router.get("/codex/status")
+async def get_codex_all_status():
+    """Fetch live status for all connected Codex accounts."""
+    accounts = [a for a in plugin_manager.get_accounts() if a.provider_id == "codex"]
+    if not accounts:
+        return {"accounts": [], "message": "No Codex accounts configured"}
+
+    results = []
+    for acc in accounts:
+        status_data = await fetch_codex_status(acc)
+        results.append({
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "enabled": acc.enabled,
+            "email": acc.extra_config.get("email", ""),
+            "plan_type": acc.extra_config.get("plan_type", "standard"),
+            "rate_limited": not acc.is_available(),
+            "status": status_data,
         })
     return {"accounts": results}
 
