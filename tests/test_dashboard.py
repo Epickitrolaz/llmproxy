@@ -461,4 +461,58 @@ def test_dashboard_emoji_and_exit_clean_modal(client):
     assert "if (isFullscreenDirty()) {" in res_js.text
 
 
+def test_google_antigravity_official_svg_and_oauth_ui(client):
+    """Verify that the official Google SVG is used, oauth button is wired, and API token input is hidden for Antigravity."""
+    res_html = client.get("/static/index.html")
+    assert res_html.status_code == 200
+    html_text = res_html.text
+
+    # Official Google SVG paths should be present
+    assert "M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92" in html_text
+    assert "M12 23c2.97 0 5.46-.98 7.28-2.66" in html_text
+    assert "M5.84 14.09c-.22-.66-.35-1.36-.35-2.09" in html_text
+    assert "M12 5.38c1.62 0 3.06.56 4.21 1.64" in html_text
+
+    # Deformed / weird old SVG path should not exist
+    assert "M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15s.7 5.3 1.9 7.7" not in html_text
+
+    # account-key-group should be an identifiable form element in modal
+    assert 'id="account-key-group"' in html_text
+
+    res_js = client.get("/static/app.js")
+    assert res_js.status_code == 200
+    js_text = res_js.text
+
+    # OAuth handlers wired up
+    assert "btnStartGoogleOAuth" in js_text
+    assert "btnImportLocalGoogle" in js_text
+    assert "btnSubmitCallbackPaste" in js_text
+    assert "/api/antigravity/oauth/start" in js_text
+    assert "/api/antigravity/oauth/status" in js_text
+
+    # API token field hidden for Antigravity
+    assert "updateAccountModalVisibility" in js_text
+    assert 'keyGroup.style.display = isAg ? "none" : "block"' in js_text
+
+
+def test_docker_configuration_and_compose_volumes():
+    """Verify Dockerfile bundles proxy code and templates, and docker-compose only mounts plugins and data."""
+    compose_path = Path("docker-compose.yml")
+    assert compose_path.exists()
+    compose_content = compose_path.read_text()
+
+    assert "- ./plugins:/app/plugins" in compose_content
+    assert "- ./data:/app/data" in compose_content
+    assert "- ./llmproxy:/app/llmproxy" not in compose_content
+    assert "- ./templates:/app/templates" not in compose_content
+
+    dockerfile_path = Path("Dockerfile")
+    assert dockerfile_path.exists()
+    dockerfile_content = dockerfile_path.read_text()
+
+    assert "COPY llmproxy/ /app/llmproxy/" in dockerfile_content
+    assert "COPY templates/ /app/templates/" in dockerfile_content
+
+
+
 
