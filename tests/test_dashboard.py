@@ -494,11 +494,12 @@ def test_google_antigravity_official_svg_and_oauth_ui(client):
     assert "updateAccountModalVisibility" in js_text
     assert 'keyGroup.style.display = isAg ? "none" : "block"' in js_text
 
-    # Provider card and modal buttons for Google Antigravity
-    assert "btn-provider-google-auth" in js_text
+    # Accounts tab has the Google Sign-in button for Antigravity
     assert "btn-fs-google-oauth" in js_text
-    assert "fs-provider-header-actions" in html_text
     assert "fs-accounts-toolbar" in html_text
+    # No duplicate buttons on provider card or header
+    assert "btn-provider-google-auth" not in js_text
+    assert "fs-provider-header-actions" not in html_text
 
 
 def test_docker_configuration_and_compose_volumes():
