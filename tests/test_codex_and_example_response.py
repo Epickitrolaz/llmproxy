@@ -510,3 +510,22 @@ def test_ui_dynamic_url_detection_and_test_model_default():
     assert 'test-model' in js_text
     assert "gemini-3.8-flash-high" not in js_text or "allModels.push(\"gemini-3.8-flash-high\")" not in js_text
 
+
+def test_provider_menu_model_test_button():
+    """Verify provider models menu includes a Test button with success and error visual states."""
+    res_css = client.get("/static/style.css")
+    assert res_css.status_code == 200
+    css_text = res_css.text
+    assert ".btn-test" in css_text
+    assert ".btn-test.is-success" in css_text
+    assert ".btn-test.is-error" in css_text
+
+    res_js = client.get("/static/app.js")
+    assert res_js.status_code == 200
+    js_text = res_js.text
+    assert "btn-fs-test-model" in js_text
+    assert "is-success" in js_text
+    assert "is-error" in js_text
+    assert "/api/test-chat" in js_text
+
+
