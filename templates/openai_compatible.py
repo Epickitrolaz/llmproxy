@@ -90,6 +90,35 @@ class OpenAICompatiblePlugin(BasePlugin):
                     default="{}",
                     description="JSON dictionary of default custom HTTP headers",
                 ),
+                PluginVariable(
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
+                    type="string",
+                    default="",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
+                ),
             ],
             models=[
                 PluginModelConfig(
@@ -358,9 +387,10 @@ class OpenAICompatiblePlugin(BasePlugin):
         model_config: PluginModelConfig,
         request: ChatCompletionRequest,
         account: Optional[Account] = None,
+        proxy: Optional[str] = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, proxy=proxy) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -439,13 +469,14 @@ class OpenAICompatiblePlugin(BasePlugin):
             body["stop"] = request.stop
 
         url = f"{base_url}/chat/completions"
+        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
 
         if request.stream:
-            return self._stream_request(url, headers, body, model_config, request, account=account)
+            return self._stream_request(url, headers, body, model_config, request, account=account, proxy=proxy)
 
         try:
             timeout = float(variables.get("timeout") or 60.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
                 resp = await client.post(url, headers=headers, json=body)
                 resp.raise_for_status()
                 data = resp.json()

@@ -126,6 +126,8 @@ class Account(BaseModel):
     error_count: int = 0
     success_count: int = 0
     last_used_at: Optional[float] = None
+    proxy_id: Optional[str] = None
+    proxy_url: Optional[str] = None
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
     def is_available(self, now: Optional[float] = None) -> bool:
@@ -146,6 +148,8 @@ class AccountCreate(BaseModel):
     weight: int = 1
     enabled: bool = True
     pinned: bool = False
+    proxy_id: Optional[str] = None
+    proxy_url: Optional[str] = None
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -157,7 +161,50 @@ class AccountUpdate(BaseModel):
     weight: Optional[int] = None
     enabled: Optional[bool] = None
     pinned: Optional[bool] = None
+    proxy_id: Optional[str] = None
+    proxy_url: Optional[str] = None
     extra_config: Optional[Dict[str, Any]] = None
+
+
+# ==========================================
+# External Proxy Schemas
+# ==========================================
+
+class Proxy(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(default_factory=lambda: f"proxy_{uuid.uuid4().hex[:8]}")
+    name: str
+    url: str  # e.g. "http://user:pass@host:port" or "socks5://host:port"
+    enabled: bool = True
+    rate_limited_until: Optional[float] = None
+    error_count: int = 0
+    success_count: int = 0
+    last_used_at: Optional[float] = None
+    tags: List[str] = Field(default_factory=list)
+
+    def is_available(self, now: Optional[float] = None) -> bool:
+        if not self.enabled:
+            return False
+        current_time = now if now is not None else time.time()
+        if self.rate_limited_until is not None and self.rate_limited_until > current_time:
+            return False
+        return True
+
+
+class ProxyCreate(BaseModel):
+    name: str
+    url: str
+    enabled: bool = True
+    tags: List[str] = Field(default_factory=list)
+
+
+class ProxyUpdate(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
+    tags: Optional[List[str]] = None
+    rate_limited_until: Optional[float] = None
 
 
 class PluginVariable(BaseModel):

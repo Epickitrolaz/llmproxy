@@ -37,6 +37,35 @@ class MockProviderPlugin(BasePlugin):
                     required=False,
                     description="Prefix prepended to every generated response",
                 ),
+                PluginVariable(
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
+                    type="string",
+                    default="",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
+                ),
             ],
             models=[
                 PluginModelConfig(

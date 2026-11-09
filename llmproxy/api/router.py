@@ -377,7 +377,16 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
 
     cooldown_sec = _safe_float(variables.get("account_switch_cooldown"), 10.0)
 
-    # 4. Handle Streaming vs Non-Streaming
+    # 4. Resolve External Proxy (off by default)
+    init_proxy_url, current_proxy = plugin_manager.resolve_request_proxy(
+        variables=variables,
+        account=account,
+        provider_id=plugin.metadata.id,
+    )
+    if init_proxy_url:
+        variables["proxy"] = init_proxy_url
+
+    # 5. Handle Streaming vs Non-Streaming
     if request.stream:
         async def sse_event_stream() -> AsyncIterator[str]:
             completion_tokens = 0
@@ -405,6 +414,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 latency_ms = round((time.time() - start_time) * 1000, 2)
                 if current_account:
                     plugin_manager.mark_account_result(current_account.id, success=True)
+                if current_proxy:
+                    plugin_manager.mark_proxy_result(current_proxy.id, success=True)
                 if matched_api_key:
                     plugin_manager.record_api_key_usage(
                         matched_api_key.id,
@@ -431,6 +442,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 if current_account:
                     plugin_manager.mark_account_result(
                         current_account.id,
+                        success=False,
+                        is_rate_limit=is_rate_limit,
+                        cooldown_seconds=cooldown_sec,
+                    )
+                if current_proxy:
+                    plugin_manager.mark_proxy_result(
+                        current_proxy.id,
                         success=False,
                         is_rate_limit=is_rate_limit,
                         cooldown_seconds=cooldown_sec,
@@ -464,13 +482,28 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             },
         )
 
-    # Non-streaming with account failover
+    # Non-streaming with account failover and proxy switching on limit
     max_retries = max(1, _safe_int(variables.get("max_retries"), 2))
     switch_wait = _safe_float(variables.get("account_switch_wait"), 0.0)
     current_account = account
     last_exception: Optional[Exception] = None
+    excluded_proxies: Set[str] = set()
 
     for attempt in range(max_retries):
+        # Resolve proxy for current attempt
+        proxy_url, attempt_proxy = plugin_manager.resolve_request_proxy(
+            variables=variables,
+            account=current_account,
+            exclude_proxy_ids=excluded_proxies,
+            provider_id=plugin.metadata.id,
+        )
+        if proxy_url:
+            variables["proxy"] = proxy_url
+        elif "proxy" in variables and not bool(variables.get("proxy_enabled", False)):
+            pass
+        else:
+            variables.pop("proxy", None)
+
         try:
             response = await _invoke_plugin_completion(
                 plugin, request, model_config, variables, current_account
@@ -497,6 +530,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
 
             if current_account:
                 plugin_manager.mark_account_result(current_account.id, success=True)
+            if attempt_proxy:
+                plugin_manager.mark_proxy_result(attempt_proxy.id, success=True)
             if matched_api_key:
                 plugin_manager.record_api_key_usage(
                     matched_api_key.id,
@@ -521,6 +556,14 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         except Exception as e:
             last_exception = e
             is_rate_limit = _is_rate_limit_error(e)
+            if attempt_proxy:
+                plugin_manager.mark_proxy_result(
+                    attempt_proxy.id,
+                    success=False,
+                    is_rate_limit=is_rate_limit,
+                    cooldown_seconds=cooldown_sec,
+                )
+                excluded_proxies.add(attempt_proxy.id)
             if current_account:
                 plugin_manager.mark_account_result(
                     current_account.id,
@@ -529,14 +572,29 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     cooldown_seconds=cooldown_sec,
                 )
 
-            # Try to failover to next account if retries remain
-            if attempt < max_retries - 1 and accounts:
-                if switch_wait > 0:
-                    await asyncio.sleep(switch_wait)
-                next_acc = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
-                if next_acc and next_acc.id != current_account.id:
-                    current_account = next_acc
-                    continue
+            # Try to failover to next proxy or next account if retries remain
+            if attempt < max_retries - 1:
+                # Check if proxy switching on limit applies
+                proxy_enabled = bool(variables.get("proxy_enabled", False))
+                if proxy_enabled:
+                    next_proxy_url, next_p = plugin_manager.resolve_request_proxy(
+                        variables=variables,
+                        account=current_account,
+                        exclude_proxy_ids=excluded_proxies,
+                        provider_id=plugin.metadata.id,
+                    )
+                    if next_p:
+                        if switch_wait > 0:
+                            await asyncio.sleep(switch_wait)
+                        continue
+
+                if accounts:
+                    if switch_wait > 0:
+                        await asyncio.sleep(switch_wait)
+                    next_acc = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
+                    if next_acc and next_acc.id != current_account.id:
+                        current_account = next_acc
+                        continue
             break
 
     # If all attempts failed

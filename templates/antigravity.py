@@ -347,6 +347,35 @@ class AntigravityPlugin(BasePlugin):
                     options=["high", "medium", "low", "none"],
                     description="Default reasoning effort mapped to model suffix (-high, -medium, -low, or none)",
                 ),
+                PluginVariable(
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
+                    type="string",
+                    default="",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
+                ),
             ],
             models=[
                 PluginModelConfig(
@@ -1095,6 +1124,8 @@ class AntigravityPlugin(BasePlugin):
 
         url = f"{base_url}/v1internal:streamGenerateContent?alt=sse"
 
+        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
+
         if request.stream:
             async def sse_stream_generator() -> AsyncIterator[ChatCompletionChunk]:
                 chunk_id = f"chatcmpl-ag-{uuid.uuid4().hex[:12]}"
@@ -1112,7 +1143,7 @@ class AntigravityPlugin(BasePlugin):
                     choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
                 )
 
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
                     async def get_stream():
                         async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
                             if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
@@ -1238,7 +1269,7 @@ class AntigravityPlugin(BasePlugin):
         completion_tokens = 0
         total_tokens = 0
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async def get_stream():
                 async with client.stream("POST", url, headers=headers, json=body) as stream_resp:
                     if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
