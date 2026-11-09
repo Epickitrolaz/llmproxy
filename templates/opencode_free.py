@@ -305,7 +305,7 @@ class OpenCodeFreePlugin(BasePlugin):
         """Validate operational variables. OpenCode free tier requires zero credentials."""
         errors: List[str] = []
         timeout = variables.get("timeout")
-        if timeout is not None:
+        if timeout not in (None, ""):
             try:
                 if float(timeout) <= 0:
                     errors.append("Timeout must be a positive number.")
@@ -501,14 +501,19 @@ class OpenCodeFreePlugin(BasePlugin):
         target_model: str,
     ) -> ChatCompletionResponse:
         """Execute non-streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
-        proxy = str(variables.get("proxy") or "").strip()
+        proxy_raw = str(variables.get("proxy") or "").strip()
+        proxy = proxy_raw.split("#")[0].rstrip("/") if ("workers.dev" in proxy_raw or "relay" in proxy_raw) else proxy_raw
         is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
-        client_kwargs = {"timeout": timeout}
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
         if proxy and not is_relay:
             client_kwargs["proxy"] = proxy
 
         url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
-        max_retries = int(variables.get("max_retries") or 2)
+        retries_val = variables.get("max_retries")
+        try:
+            max_retries = int(retries_val) if retries_val not in (None, "") else 2
+        except (ValueError, TypeError):
+            max_retries = 2
         bypass_enabled = self._is_limit_bypass_active(variables)
 
         for attempt in range(max_retries + 1):
@@ -546,6 +551,23 @@ class OpenCodeFreePlugin(BasePlugin):
                     data.setdefault("id", f"chatcmpl-oc-{uuid.uuid4().hex[:12]}")
                     return ChatCompletionResponse.model_validate(data)
 
+            except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as conn_err:
+                logger.warning(
+                    "Proxy/connection failed (%s). Attempt %d/%d...",
+                    conn_err,
+                    attempt + 1,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    if "proxy" in client_kwargs:
+                        client_kwargs.pop("proxy", None)
+                    if is_relay:
+                        url = f"{base_url.rstrip('/')}/chat/completions"
+                        is_relay = False
+                    await asyncio.sleep(0.2)
+                    continue
+                raise
+
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and bypass_enabled and attempt < max_retries:
                     self._get_or_rotate_session(rotate=True)
@@ -564,17 +586,23 @@ class OpenCodeFreePlugin(BasePlugin):
         target_model: str,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Execute streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
-        proxy = str(variables.get("proxy") or "").strip()
+        proxy_raw = str(variables.get("proxy") or "").strip()
+        proxy = proxy_raw.split("#")[0].rstrip("/") if ("workers.dev" in proxy_raw or "relay" in proxy_raw) else proxy_raw
         is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
-        client_kwargs = {"timeout": timeout}
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
         if proxy and not is_relay:
             client_kwargs["proxy"] = proxy
 
         url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
         bypass_enabled = self._is_limit_bypass_active(variables)
-        max_retries = int(variables.get("max_retries") or 2)
+        retries_val = variables.get("max_retries")
+        try:
+            max_retries = int(retries_val) if retries_val not in (None, "") else 2
+        except (ValueError, TypeError):
+            max_retries = 2
 
         async def sse_generator() -> AsyncIterator[ChatCompletionChunk]:
+            nonlocal is_relay, url
             for attempt in range(max_retries + 1):
                 session_id, project_id = self._get_or_rotate_session(rotate=False)
                 headers = self._build_upstream_headers(session_id, project_id)
@@ -630,6 +658,23 @@ class OpenCodeFreePlugin(BasePlugin):
                                         continue
                             return
 
+                except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as conn_err:
+                    logger.warning(
+                        "Streaming proxy/connection failed (%s). Attempt %d/%d...",
+                        conn_err,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    if attempt < max_retries:
+                        if "proxy" in client_kwargs:
+                            client_kwargs.pop("proxy", None)
+                        if is_relay:
+                            url = f"{base_url.rstrip('/')}/chat/completions"
+                            is_relay = False
+                        await asyncio.sleep(0.2)
+                        continue
+                    raise
+
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 429 and bypass_enabled and attempt < max_retries:
                         self._get_or_rotate_session(rotate=True)
@@ -655,12 +700,17 @@ class OpenCodeFreePlugin(BasePlugin):
         Directly executes upstream without requiring an account or API key.
         """
         start_t = time.perf_counter()
+        base_url_val = variables.get("base_url")
         base_url = (
             account.base_url
             if (account and account.base_url)
-            else str(variables.get("base_url") or DEFAULT_BASE_URL)
+            else (str(base_url_val).strip() if base_url_val else DEFAULT_BASE_URL)
         ).rstrip("/")
-        timeout = float(variables.get("timeout") or 60.0)
+        timeout_val = variables.get("timeout")
+        try:
+            timeout = float(timeout_val) if timeout_val not in (None, "") else 60.0
+        except (ValueError, TypeError):
+            timeout = 60.0
 
         # Simulation mode when test key is provided
         api_key = account.api_key if account else str(variables.get("api_key") or "")
