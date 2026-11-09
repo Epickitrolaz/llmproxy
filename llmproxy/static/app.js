@@ -1019,6 +1019,10 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       const modelsCount = p.models ? p.models.length : 0;
       const connectedAccounts = (state.accounts || []).filter((a) => a.provider_id === p.id);
       const isPinned = !!p.pinned;
+      const isAg = p.id === "antigravity";
+      const googleBtnHtml = isAg
+        ? `<button class="btn btn-primary btn-sm btn-provider-google-auth" data-id="${p.id}" style="display: inline-flex; align-items: center; gap: 6px;">${GOOGLE_SVG} <span>Sign in with Google</span></button>`
+        : "";
 
       card.innerHTML = `
         <div>
@@ -1046,12 +1050,22 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
         <div class="provider-footer">
           <span style="font-size: 12px; color: var(--ink-muted); font-family: var(--font-mono);">${escapeHtml(p.id)}</span>
           <div class="provider-actions">
+            ${googleBtnHtml}
             <button class="btn btn-primary btn-sm btn-provider-edit" data-id="${p.id}">Edit</button>
             <button class="btn btn-secondary btn-sm btn-provider-refresh" data-id="${p.id}" title="Hot reload plugin">Refresh</button>
             <button class="btn btn-danger btn-sm btn-provider-delete" data-id="${p.id}" title="Delete plugin">Delete</button>
           </div>
         </div>
       `;
+
+      if (isAg) {
+        const gBtn = card.querySelector(".btn-provider-google-auth");
+        if (gBtn) {
+          gBtn.addEventListener("click", () => {
+            openAccountModal(null, p.id);
+          });
+        }
+      }
 
       // Event: Enable toggle
       const toggle = card.querySelector(".provider-enable-toggle");
@@ -1186,6 +1200,24 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
           showToast(`Update failed: ${err.message}`, "error");
         }
       };
+    }
+
+    const headerActions = document.getElementById("fs-provider-header-actions");
+    if (headerActions) {
+      if (pluginId === "antigravity") {
+        headerActions.innerHTML = `
+          <button class="btn btn-primary btn-sm" id="fs-header-google-btn" style="display: inline-flex; align-items: center; gap: 6px;">
+            ${GOOGLE_SVG}
+            <span>Sign in with Google</span>
+          </button>
+        `;
+        const hBtn = headerActions.querySelector("#fs-header-google-btn");
+        if (hBtn) {
+          hBtn.addEventListener("click", () => openAccountModal(null, "antigravity"));
+        }
+      } else {
+        headerActions.innerHTML = "";
+      }
     }
 
     // Load code
@@ -1445,15 +1477,92 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     if (!tbody) return;
     tbody.innerHTML = "";
 
+    const isAg = pluginId === "antigravity";
+    const toolbar = document.getElementById("fs-accounts-toolbar");
+    if (toolbar) {
+      if (isAg) {
+        toolbar.innerHTML = `
+          <button class="btn btn-primary btn-sm btn-fs-google-oauth" style="display: inline-flex; align-items: center; gap: 6px;">
+            ${GOOGLE_SVG}
+            <span>Sign in with Google (OAuth)</span>
+          </button>
+          <button class="btn btn-secondary btn-sm btn-fs-google-import" title="Auto-detect local Antigravity session">⟳ Auto-Import</button>
+        `;
+        const gOauthBtn = toolbar.querySelector(".btn-fs-google-oauth");
+        if (gOauthBtn) gOauthBtn.addEventListener("click", () => openAccountModal(null, "antigravity"));
+        const gImportBtn = toolbar.querySelector(".btn-fs-google-import");
+        if (gImportBtn) {
+          gImportBtn.addEventListener("click", async () => {
+            try {
+              showToast("Importing local Google Antigravity session...");
+              const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
+              showToast(res.message || "Google Antigravity account imported!");
+              await fetchAccounts();
+              renderFullscreenAccounts("antigravity");
+            } catch (err) {
+              showToast(`Import failed: ${err.message}`, "error");
+            }
+          });
+        }
+      } else {
+        toolbar.innerHTML = `<button class="btn btn-primary btn-sm" id="fs-btn-add-account">+ Connect Account</button>`;
+        const btn = toolbar.querySelector("#fs-btn-add-account");
+        if (btn) btn.addEventListener("click", () => openAccountModal(null, pluginId));
+      }
+    }
+
     const accounts = (state.accounts || []).filter((a) => a.provider_id === pluginId);
     if (accounts.length === 0) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="8" style="text-align: center; color: var(--ink-muted); padding: 24px;">
-            No accounts connected for this provider. Add keys or tokens to enable load balancing.
-          </td>
-        </tr>
-      `;
+      if (isAg) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" style="padding: 36px 16px; text-align: center;">
+              <div style="display: inline-flex; flex-direction: column; align-items: center; gap: 10px;">
+                <div style="font-weight: 600; font-size: 14px; color: var(--ink-primary); display: flex; align-items: center; gap: 8px;">
+                  ${GOOGLE_SVG}
+                  <span>Google Antigravity Provider Connection</span>
+                </div>
+                <p style="font-size: 12px; color: var(--ink-secondary); max-width: 480px; margin: 0 auto;">
+                  No Google accounts connected yet. Connect your Google account using OAuth or auto-import your local Antigravity session. No API tokens required.
+                </p>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 6px;">
+                  <button class="btn btn-primary btn-sm btn-empty-google-oauth" style="display: inline-flex; align-items: center; gap: 6px;">
+                    ${GOOGLE_SVG}
+                    <span>Sign in with Google (OAuth)</span>
+                  </button>
+                  <button class="btn btn-secondary btn-sm btn-empty-google-import">⟳ Auto-Import</button>
+                </div>
+              </div>
+            </td>
+          </tr>
+        `;
+        const emptyOauthBtn = tbody.querySelector(".btn-empty-google-oauth");
+        if (emptyOauthBtn) {
+          emptyOauthBtn.addEventListener("click", () => openAccountModal(null, "antigravity"));
+        }
+        const emptyImportBtn = tbody.querySelector(".btn-empty-google-import");
+        if (emptyImportBtn) {
+          emptyImportBtn.addEventListener("click", async () => {
+            try {
+              showToast("Importing local Google Antigravity session...");
+              const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
+              showToast(res.message || "Google Antigravity account imported!");
+              await fetchAccounts();
+              renderFullscreenAccounts("antigravity");
+            } catch (err) {
+              showToast(`Import failed: ${err.message}`, "error");
+            }
+          });
+        }
+      } else {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" style="text-align: center; color: var(--ink-muted); padding: 24px;">
+              No accounts connected for this provider. Add keys or tokens to enable load balancing.
+            </td>
+          </tr>
+        `;
+      }
       return;
     }
 
@@ -1570,8 +1679,42 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     if (!container) return;
     container.innerHTML = "";
 
+    if (plugin.id === "antigravity") {
+      const authBanner = document.createElement("div");
+      authBanner.style.cssText = "margin-bottom: 16px; padding: 14px; background: rgba(66, 133, 244, 0.04); border: 1px solid rgba(66, 133, 244, 0.2); border-radius: var(--radius-card);";
+      authBanner.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div style="font-weight: 600; font-size: 13px; color: var(--ink-primary); display: flex; align-items: center; gap: 6px;">
+            ${GOOGLE_SVG}
+            <span>Google Antigravity OAuth</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm btn-cfg-import">⟳ Auto-Import</button>
+        </div>
+        <p style="font-size: 11.5px; color: var(--ink-secondary); margin: 0 0 10px;">
+          Connect your Google account to route requests through Google Cloud Code PA.
+        </p>
+        <button type="button" class="btn btn-primary btn-sm btn-cfg-oauth" style="width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 6px;">
+          ${GOOGLE_SVG}
+          <span>Sign in with Google (OAuth)</span>
+        </button>
+      `;
+      authBanner.querySelector(".btn-cfg-oauth").addEventListener("click", () => openAccountModal(null, "antigravity"));
+      authBanner.querySelector(".btn-cfg-import").addEventListener("click", async () => {
+        try {
+          showToast("Importing local Google session...");
+          const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
+          showToast(res.message || "Google Antigravity account imported!");
+          await fetchAccounts();
+          renderFullscreenAccounts("antigravity");
+        } catch (err) {
+          showToast(`Import failed: ${err.message}`, "error");
+        }
+      });
+      container.appendChild(authBanner);
+    }
+
     const declaredVars = (plugin.variables || []).filter((v) => !LOAD_BALANCING_VAR_NAMES.has(v.name));
-    if (declaredVars.length === 0) {
+    if (declaredVars.length === 0 && plugin.id !== "antigravity") {
       container.innerHTML = `<div style="color: var(--ink-muted); font-size: 13px;">This plugin does not declare custom variables beyond load balancing.</div>`;
       state.fullscreenOriginalVariables = {};
       return;
