@@ -32,6 +32,13 @@
       <div class="endpoint-chip">
         <span>Endpoint:</span>
         <strong id="header-endpoint-display">http://localhost:8000/v1</strong>
+        <script>
+          try {
+            if (window.location && window.location.origin) {
+              document.getElementById("header-endpoint-display").textContent = window.location.origin + "/v1";
+            }
+          } catch (_) {}
+        </script>
       </div>
       <button class="btn btn-secondary btn-sm" id="copy-endpoint-btn" title="Copy base URL">Copy URL</button>
     </div>

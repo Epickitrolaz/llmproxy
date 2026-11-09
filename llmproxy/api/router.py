@@ -13,6 +13,9 @@ from fastapi.responses import StreamingResponse
 from llmproxy.core.manager import plugin_manager
 from llmproxy.schemas import (
     Account,
+    ChatChoice,
+    ChatChoiceDelta,
+    ChatMessage,
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -151,6 +154,121 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     "code": "missing_api_key",
                 }
             },
+        )
+
+    # 1. Check for example test-model (not exposed in /models or provider settings)
+    if request.model == "test-model":
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        latency_ms = max(0.5, round((time.time() - start_time) * 1000, 2))
+        completion_tokens = 22
+        total_tokens = prompt_tokens + completion_tokens
+
+        reply_content = (
+            f"Simulated response from LLMProxy (test-model).\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** {latency_ms:.2f} ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** test-model\n"
+            f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+            f"• **Account status:** No account configured (Simulation Mode)"
+        )
+
+        if matched_api_key:
+            plugin_manager.record_api_key_usage(
+                matched_api_key.id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+        plugin_manager.add_log(
+            RequestLogEntry(
+                id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                model=request.model,
+                plugin_id=None,
+                api_key_id=matched_api_key.id if matched_api_key else None,
+                status="success",
+                status_code=200,
+                latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        )
+
+        if request.stream:
+            async def test_model_sse_stream() -> AsyncIterator[str]:
+                chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                created = int(time.time())
+
+                init_chunk = ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model="test-model",
+                    choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
+                )
+                yield f"data: {init_chunk.model_dump_json()}\n\n"
+
+                base_words = ["Simulated ", "response ", "from ", "LLMProxy ", "(test-model).\n\n"]
+                for w in base_words:
+                    c = ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model="test-model",
+                        choices=[ChatChoiceDelta(index=0, delta={"content": w})],
+                    )
+                    yield f"data: {c.model_dump_json()}\n\n"
+
+                details_text = (
+                    f"---\n"
+                    f"**Execution Details:**\n"
+                    f"• **Time taken:** {latency_ms:.2f} ms\n"
+                    f"• **Timestamp:** {now_str}\n"
+                    f"• **Model:** test-model\n"
+                    f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+                    f"• **Account status:** No account configured (Simulation Mode)"
+                )
+                details_chunk = ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model="test-model",
+                    choices=[ChatChoiceDelta(index=0, delta={"content": details_text})],
+                )
+                yield f"data: {details_chunk.model_dump_json()}\n\n"
+
+                final_chunk = ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model="test-model",
+                    choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
+                )
+                yield f"data: {final_chunk.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                test_model_sse_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            created=int(time.time()),
+            model="test-model",
+            choices=[
+                ChatChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=reply_content),
+                    finish_reason="stop",
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            ),
         )
 
     # 1. Resolve model to plugin, model config, and variables
