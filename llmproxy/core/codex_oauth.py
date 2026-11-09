@@ -62,7 +62,8 @@ CODEX_SCOPES = [
     "profile",
     "email",
     "offline_access",
-    "model.request",
+    "api.connectors.read",
+    "api.connectors.invoke",
 ]
 CODEX_ISSUER = "https://auth.openai.com"
 CODEX_AUTH_URI = "https://auth.openai.com/oauth/authorize"
@@ -167,15 +168,18 @@ class CodexOAuthManager:
         port = self._find_free_port()
         redirect_uri = f"http://127.0.0.1:{port}/auth/callback"
 
-        # Build OpenAI Codex OAuth URL with S256 PKCE
+        # Build OpenAI Codex OAuth URL with S256 PKCE matching official Codex CLI
         query = urllib.parse.urlencode({
+            "response_type": "code",
             "client_id": CODEX_CLIENT_ID,
             "redirect_uri": redirect_uri,
-            "response_type": "code",
             "scope": " ".join(CODEX_SCOPES),
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
+            "id_token_add_organizations": "true",
+            "codex_cli_simplified_flow": "true",
+            "originator": "codex_cli_rs",
         })
         auth_url = f"{CODEX_AUTH_URI}?{query}"
 

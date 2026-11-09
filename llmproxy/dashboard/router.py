@@ -1072,6 +1072,80 @@ async def test_chat(req: TestChatRequest):
     """Test endpoint that routes a test prompt through the router to a specific model."""
     _ensure_plugins_loaded()
 
+    # Handle example test-model (not exposed in /models or provider settings)
+    if req.model == "test-model":
+        messages: List[ChatMessage] = []
+        if req.messages:
+            messages = req.messages
+        elif req.prompt:
+            messages = [ChatMessage(role="user", content=req.prompt)]
+        else:
+            raise HTTPException(status_code=400, detail="Either 'prompt' or 'messages' must be provided")
+
+        latency_ms = 1.00
+        prompt_tokens = sum(len(str(m.content).split()) for m in messages)
+        completion_tokens = 22
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        reply_content = (
+            f"Simulated response from LLMProxy (test-model).\n\n---\n"
+            f"**Execution Details:**\n"
+            f"• **Time taken:** {latency_ms:.2f} ms\n"
+            f"• **Timestamp:** {now_str}\n"
+            f"• **Model:** test-model\n"
+            f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({prompt_tokens + completion_tokens} total)\n"
+            f"• **Account status:** No account configured (Simulation Mode)"
+        )
+
+        if req.stream:
+            async def event_generator():
+                chunk_obj = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                    "object": "chat.completion.chunk",
+                    "model": "test-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": reply_content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(chunk_obj)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+        log_entry = RequestLogEntry(
+            id=f"log-{uuid.uuid4().hex[:8]}",
+            timestamp=time.time(),
+            model="test-model",
+            plugin_id=None,
+            status="success",
+            status_code=200,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        plugin_manager.add_log(log_entry)
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "model": "test-model",
+            "created": int(time.time()),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": reply_content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            "latency_ms": latency_ms,
+        }
+
     # Model resolution
     found_model: Optional[PluginModelConfig] = None
     found_plugin = None

@@ -18,7 +18,7 @@
     logs: [],
     statusProviderFilter: "",
     activeSnippetLang: "python",
-    selectedSnippetModel: "gemini-3.8-flash-high",
+    selectedSnippetModel: "test-model",
     temporaryApiKey: null,
     rulesSearchQuery: "",
     fullscreenOriginalCode: "",
@@ -783,9 +783,17 @@
     }
   }
 
+  function getDetectedBaseUrl() {
+    if (typeof window !== "undefined" && window.location && window.location.origin) {
+      return `${window.location.origin}/v1`;
+    }
+    return "http://localhost:8000/v1";
+  }
+
   function updateSnippet() {
     if (!el.snippetCode) return;
-    const model = state.selectedSnippetModel || "gemini-3.8-flash-high";
+    const baseUrl = getDetectedBaseUrl();
+    const model = state.selectedSnippetModel || "test-model";
     const apiKey = state.temporaryApiKey || (state.apiKeys && state.apiKeys.length > 0 ? state.apiKeys[0].key : "sk-proxy-demo");
 
     if (state.activeSnippetLang === "python") {
@@ -793,7 +801,7 @@
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/v1",
+    base_url="${baseUrl}",
     api_key="${apiKey}"
 )
 
@@ -808,7 +816,7 @@ for chunk in response:
 print()`;
     } else if (state.activeSnippetLang === "curl") {
       el.snippetCode.textContent = `# Note: Using temporary testing key (expires in 30 min or 10 requests)
-curl -X POST http://localhost:8000/v1/chat/completions \\
+curl -X POST ${baseUrl}/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{
@@ -819,7 +827,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     } else if (state.activeSnippetLang === "cursor") {
       el.snippetCode.textContent = `// OpenCode / Cursor / Cline Settings (Testing key: valid for 30 min or 10 requests)
 {
-  "openai.baseURL": "http://localhost:8000/v1",
+  "openai.baseURL": "${baseUrl}",
   "openai.apiKey": "${apiKey}",
   "model": "${model}"
 }`;
@@ -987,6 +995,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
           (a) => a.rate_limited_until && a.rate_limited_until > now
         ).length;
       }
+      populateSnippetModels();
     } catch (_) {}
   }
 
@@ -1108,14 +1117,45 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     });
   }
 
+  let _snippetModelListenerAttached = false;
+
   function populateSnippetModels() {
     if (!el.snippetModelSelect) return;
     el.snippetModelSelect.innerHTML = "";
 
+    const connectedAccounts = (state.accounts || []).filter((a) => a.enabled);
+    const hasConnectedProvider = connectedAccounts.length > 0;
+
+    // If no provider account is connected, default to test-model
+    if (!hasConnectedProvider) {
+      state.selectedSnippetModel = "test-model";
+      const opt = document.createElement("option");
+      opt.value = "test-model";
+      opt.textContent = "test-model (Example)";
+      opt.selected = true;
+      el.snippetModelSelect.appendChild(opt);
+      enhanceSelect(el.snippetModelSelect);
+      updateSnippet();
+      return;
+    }
+
+    // Once a provider is connected, populate actual models
+    const connectedProvIds = new Set(connectedAccounts.map((a) => a.provider_id));
     const allModels = [];
+
+    // Prioritize models from connected providers
+    state.plugins.forEach((p) => {
+      if (connectedProvIds.has(p.id)) {
+        (p.models || []).forEach((m) => {
+          if (m.enabled && !allModels.includes(m.id)) allModels.push(m.id);
+        });
+      }
+    });
+
+    // Other enabled models
     state.plugins.forEach((p) => {
       (p.models || []).forEach((m) => {
-        if (m.enabled) allModels.push(m.id);
+        if (m.enabled && !allModels.includes(m.id)) allModels.push(m.id);
       });
     });
 
@@ -1125,7 +1165,13 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       }
     });
 
-    if (allModels.length === 0) allModels.push("gemini-3.8-flash-high");
+    if (allModels.length === 0) {
+      allModels.push("test-model");
+    }
+
+    if (!state.selectedSnippetModel || state.selectedSnippetModel === "test-model" || !allModels.includes(state.selectedSnippetModel)) {
+      state.selectedSnippetModel = allModels[0];
+    }
 
     allModels.forEach((mid) => {
       const opt = document.createElement("option");
@@ -1138,10 +1184,13 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     enhanceSelect(el.snippetModelSelect);
     updateSnippet();
 
-    el.snippetModelSelect.addEventListener("change", (e) => {
-      state.selectedSnippetModel = e.target.value;
-      updateSnippet();
-    });
+    if (!_snippetModelListenerAttached) {
+      el.snippetModelSelect.addEventListener("change", (e) => {
+        state.selectedSnippetModel = e.target.value;
+        updateSnippet();
+      });
+      _snippetModelListenerAttached = true;
+    }
   }
 
   // =========================================================================
@@ -2084,7 +2133,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
       }
     });
 
-    if (allModels.length === 0) allModels.push("gemini-3.8-flash-high");
+    if (allModels.length === 0) allModels.push("test-model");
 
     allModels.forEach((mid) => {
       const opt = document.createElement("option");
@@ -2131,7 +2180,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     const prompt = (el.playgroundPrompt ? el.playgroundPrompt.value : "").trim();
     if (!prompt) return;
 
-    const model = el.playgroundModelSelect ? el.playgroundModelSelect.value : "gemini-3.8-flash-high";
+    const model = el.playgroundModelSelect ? el.playgroundModelSelect.value : (state.selectedSnippetModel || "test-model");
     const temp = parseFloat(el.playgroundTempInput.value) || 1.0;
     const maxTokens = parseInt(el.playgroundTokensInput.value, 10) || undefined;
     const systemPrompt = (el.playgroundSystemInput.value || "").trim();
@@ -3194,6 +3243,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \\
     await fetchApiKeys();
     await fetchTemporaryApiKey();
     await fetchRules();
+    populateSnippetModels();
     updateSnippet();
   }
 

@@ -392,3 +392,121 @@ async def test_feature2_codex_cli_execution_live():
     assert len(resp.choices) >= 1
     content = resp.choices[0].message.content
     assert "81" in content
+
+
+# =========================================================================
+# Additional Follow-Up Tests (URL detection, Codex scopes, test-model)
+# =========================================================================
+
+def test_codex_oauth_scopes_no_model_request():
+    """Verify CODEX_SCOPES does not request illegal 'model.request' and matches official CLI."""
+    assert "model.request" not in CODEX_SCOPES
+    assert "openid" in CODEX_SCOPES
+    assert "profile" in CODEX_SCOPES
+    assert "email" in CODEX_SCOPES
+    assert "offline_access" in CODEX_SCOPES
+
+    flow = codex_oauth.start_flow()
+    assert "model.request" not in flow["auth_url"]
+    assert "id_token_add_organizations=true" in flow["auth_url"]
+    assert "codex_cli_simplified_flow=true" in flow["auth_url"]
+    assert "originator=codex_cli_rs" in flow["auth_url"]
+
+
+def test_test_model_completion_non_streaming():
+    """Verify 'test-model' returns test details without being in /models or provider settings."""
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Quick test"}],
+            "stream": False,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["model"] == "test-model"
+    content = data["choices"][0]["message"]["content"]
+    assert "Simulated response from LLMProxy (test-model)" in content
+    assert "Execution Details:" in content
+    assert "Time taken:" in content
+    assert "test-model" in content
+    assert "No account configured (Simulation Mode)" in content
+
+
+def test_test_model_completion_streaming():
+    """Verify 'test-model' streams test details via SSE."""
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Quick stream test"}],
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        full_text = ""
+        for line in resp.iter_lines():
+            line = line.strip()
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line[6:])
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta and delta["content"]:
+                    full_text += delta["content"]
+
+        assert "Simulated response from LLMProxy (test-model)" in full_text
+        assert "Execution Details:" in full_text
+        assert "test-model" in full_text
+
+
+def test_test_model_not_in_models_list_or_provider_settings():
+    """Verify 'test-model' is hidden from /v1/models and provider metadata."""
+    models_resp = client.get("/v1/models")
+    assert models_resp.status_code == 200
+    listed_model_ids = {m["id"] for m in models_resp.json()["data"]}
+    assert "test-model" not in listed_model_ids
+
+    # GET /v1/models/test-model should return 404
+    single_resp = client.get("/v1/models/test-model")
+    assert single_resp.status_code == 404
+
+    # None of the loaded plugins should have test-model in their models list
+    for p in plugin_manager.plugins.values():
+        plugin_model_ids = {m.id for m in p.metadata.models}
+        assert "test-model" not in plugin_model_ids
+
+
+def test_test_chat_supports_test_model():
+    """Verify /api/test-chat endpoint handles test-model and returns test details."""
+    resp = client.post(
+        "/api/test-chat",
+        json={
+            "model": "test-model",
+            "prompt": "Test from dashboard playground",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["model"] == "test-model"
+    content = data["choices"][0]["message"]["content"]
+    assert "Simulated response from LLMProxy (test-model)" in content
+    assert "Execution Details:" in content
+
+
+def test_ui_dynamic_url_detection_and_test_model_default():
+    """Verify index.html and app.js implement dynamic URL detection and default to test-model."""
+    res_html = client.get("/static/index.html")
+    assert res_html.status_code == 200
+    html_text = res_html.text
+    assert 'id="header-endpoint-display"' in html_text
+    assert "window.location.origin" in html_text
+
+    res_js = client.get("/static/app.js")
+    assert res_js.status_code == 200
+    js_text = res_js.text
+    assert "getDetectedBaseUrl" in js_text
+    assert "window.location.origin" in js_text
+    assert 'test-model' in js_text
+    assert "gemini-3.8-flash-high" not in js_text or "allModels.push(\"gemini-3.8-flash-high\")" not in js_text
+
