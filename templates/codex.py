@@ -3,8 +3,8 @@ OpenAI Codex Provider Plugin
 ============================
 
 Native OpenAI Codex provider with official ChatGPT OAuth 2.0 PKCE authentication,
-local Codex CLI integration, multi-tier reasoning controls (low to ultra),
-and multi-account fallback/load balancing matching Antigravity architecture.
+direct wire protocol communication matching official Codex CLI and 9Router,
+multi-tier reasoning controls (low to ultra), and multi-account fallback/load balancing.
 """
 
 from __future__ import annotations
@@ -14,9 +14,7 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import re
-import shutil
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
@@ -53,8 +51,9 @@ logger = logging.getLogger(__name__)
 class CodexPlugin(BasePlugin):
     """
     OpenAI Codex Provider Plugin.
-    Integrates with official OpenAI Codex CLI and ChatGPT OAuth authentication,
-    supporting reasoning models (gpt-6-luna, gpt-5.6-terra, gpt-5.6-luna, etc.),
+    Communicates directly with upstream OpenAI / ChatGPT backend API over the network
+    matching the official Codex CLI and 9Router wire protocols identically.
+    Supports reasoning models (gpt-6-luna, gpt-5.6-terra, gpt-5.6-luna, etc.),
     multi-account load balancing, and authentic execution telemetry.
     """
 
@@ -68,8 +67,8 @@ class CodexPlugin(BasePlugin):
         self._metadata = PluginMetadata(
             id="codex",
             name="Codex",
-            description="OpenAI Codex CLI & frontier models provider with ChatGPT OAuth 2.0, local CLI integration, reasoning controls, and multi-account load balancing",
-            version="3.0.0",
+            description="OpenAI Codex frontier models provider with direct ChatGPT OAuth 2.0 network wire protocol, reasoning controls, and multi-account load balancing",
+            version="3.1.0",
             author="OpenAI / Codex",
             enabled=True,
             filename="codex.py",
@@ -125,30 +124,6 @@ class CodexPlugin(BasePlugin):
                     default="medium",
                     options=["ultra", "max", "xhigh", "high", "medium", "low", "none", "default"],
                     description="Default reasoning effort for supported Codex models",
-                ),
-                PluginVariable(
-                    name="sandbox_mode",
-                    label="Sandbox Mode",
-                    type="select",
-                    default="read-only",
-                    options=["read-only", "workspace-write", "danger-full-access"],
-                    description="Sandbox execution policy for Codex commands",
-                ),
-                PluginVariable(
-                    name="approval_policy",
-                    label="Approval Policy",
-                    type="select",
-                    default="never",
-                    options=["never", "on-request"],
-                    description="Command approval requirement policy",
-                ),
-                PluginVariable(
-                    name="execution_mode",
-                    label="Execution Mode",
-                    type="select",
-                    default="cli",
-                    options=["cli", "api", "auto"],
-                    description="Execution runtime mode (official Codex CLI binary or backend API)",
                 ),
             ],
             models=[
@@ -238,11 +213,12 @@ class CodexPlugin(BasePlugin):
     def build_headers(
         self, account: Optional[Account] = None, api_key: str = ""
     ) -> Dict[str, str]:
-        """Constructs authentic HTTP headers for OpenAI Codex endpoints."""
+        """Constructs authentic HTTP headers matching official Codex CLI and 9Router wire protocols."""
         key = account.api_key if account else api_key
         headers = {
             "Content-Type": "application/json",
             "User-Agent": CODEX_USER_AGENT,
+            "Accept": "text/event-stream",
         }
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -568,93 +544,143 @@ class CodexPlugin(BasePlugin):
                 from llmproxy.core.manager import plugin_manager
                 plugin_manager._save_accounts()
 
-    def _prepare_cli_prompt(self, request: ChatCompletionRequest) -> str:
-        """Converts OpenAI ChatCompletionRequest messages into unified prompt text for codex exec."""
-        lines = []
-        for msg in request.messages:
-            role = msg.role.capitalize()
-            content = msg.content if isinstance(msg.content, str) else json.dumps(msg.content) if msg.content else ""
-            lines.append(f"{role}: {content}")
-        return "\n\n".join(lines)
-
-    def _prepare_codex_home(self, account: Optional[Account]) -> Optional[str]:
-        """Prepares an isolated CODEX_HOME with auth.json for multi-account support."""
-        if not account:
-            return None
-        source = account.extra_config.get("source")
-        if source and Path(source).exists() and Path(source).is_file():
-            return str(Path(source).parent.resolve())
-
-        acc_dir = Path("data/codex_accounts") / account.id
-        acc_dir.mkdir(parents=True, exist_ok=True)
-        auth_file = acc_dir / "auth.json"
-
-        auth_data = {
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": None,
-            "tokens": {
-                "id_token": account.extra_config.get("id_token", ""),
-                "access_token": account.api_key,
-                "refresh_token": account.extra_config.get("refresh_token", ""),
-                "oauth_provenance": {
-                    "issuer": "https://auth.openai.com",
-                    "client_id": CODEX_CLIENT_ID,
-                },
-                "login_owner_id": account.extra_config.get("user_id", ""),
-                "account_id": account.extra_config.get("account_id", ""),
-            },
-            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        auth_file.write_text(json.dumps(auth_data, indent=2), encoding="utf-8")
-        return str(acc_dir.resolve())
-
-    async def _run_codex_cli_streaming(
+    def _build_upstream_request(
         self,
-        prompt: str,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        account: Optional[Account],
+        variables: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
+        """
+        Constructs upstream URL, authentic HTTP headers, and Responses payload
+        matching official Codex CLI and 9Router wire protocols.
+        """
+        # Resolve target model and strip route/reasoning suffixes
+        raw_model = request.model or model_config.upstream_model or model_config.id
+        target_model = raw_model
+        if target_model.startswith("cx/"):
+            target_model = target_model[3:]
+        for sfx in (
+            ":none", "-none", ":off", "-off",
+            ":low", "-low", ":medium", "-medium",
+            ":high", "-high", ":xhigh", "-xhigh",
+            ":max", "-max", ":ultra", "-ultra",
+        ):
+            if target_model.lower().endswith(sfx):
+                target_model = target_model[:-len(sfx)]
+                break
+
+        parsed_effort = self._parse_reasoning_effort(request, model_config, variables)
+        api_key = account.api_key if account else str(variables.get("api_key") or "")
+        headers = self.build_headers(account=account, api_key=api_key)
+
+        base = (
+            account.base_url
+            if (account and account.base_url)
+            else str(variables.get("base_url") or CODEX_BACKEND_API)
+        ).rstrip("/")
+        if not base.endswith("/codex") and not base.endswith("/codex/responses"):
+            url = f"{base}/codex/responses"
+        elif base.endswith("/codex"):
+            url = f"{base}/responses"
+        else:
+            url = base
+
+        payload: Dict[str, Any] = {
+            "model": target_model,
+            "store": False,
+            "stream": True,
+        }
+
+        if parsed_effort and parsed_effort not in ("default", "none"):
+            payload["reasoning"] = {"effort": parsed_effort}
+        elif parsed_effort == "none":
+            payload["reasoning"] = {"effort": "none"}
+
+        # Tools formatting (Responses API expects flat tool schemas)
+        if request.tools:
+            tools_list: List[Dict[str, Any]] = []
+            for t in request.tools:
+                if isinstance(t, dict):
+                    if t.get("type") == "function" and "function" in t:
+                        fn = t["function"]
+                        tools_list.append({
+                            "type": "function",
+                            "name": fn.get("name"),
+                            "description": fn.get("description", ""),
+                            "parameters": fn.get("parameters", {}),
+                        })
+                    else:
+                        tools_list.append(t)
+                else:
+                    tools_list.append(t)
+            payload["tools"] = tools_list
+
+        # Transform messages into Responses API input items
+        input_items: List[Dict[str, Any]] = []
+        for msg in request.messages:
+            role = msg.role
+            if role in ("system", "developer"):
+                text = str(msg.content or "")
+                input_items.append({"role": "developer", "content": [{"type": "input_text", "text": text}]})
+            elif role == "user":
+                if isinstance(msg.content, list):
+                    parts: List[Dict[str, Any]] = []
+                    for p in msg.content:
+                        if isinstance(p, dict):
+                            ptype = p.get("type")
+                            if ptype in ("text", "input_text"):
+                                parts.append({"type": "input_text", "text": p.get("text", "")})
+                            elif ptype == "image_url":
+                                url_val = p.get("image_url", {}).get("url", "")
+                                parts.append({"type": "input_image", "image_url": url_val})
+                        elif isinstance(p, str):
+                            parts.append({"type": "input_text", "text": p})
+                    input_items.append({"role": "user", "content": parts})
+                else:
+                    text = str(msg.content or "")
+                    input_items.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            elif role == "assistant":
+                if getattr(msg, "tool_calls", None):
+                    for tc in msg.tool_calls:
+                        fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", {})
+                        cid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                        fname = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                        fargs = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
+                        input_items.append({
+                            "type": "function_call",
+                            "call_id": cid or f"call_{uuid.uuid4().hex[:8]}",
+                            "name": fname,
+                            "arguments": fargs if isinstance(fargs, str) else json.dumps(fargs),
+                        })
+                if msg.content:
+                    input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": str(msg.content)}]})
+            elif role in ("tool", "function"):
+                cid = getattr(msg, "tool_call_id", None) or getattr(msg, "id", None) or ""
+                out = str(msg.content) if msg.content is not None else ""
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": cid,
+                    "output": out,
+                })
+
+        payload["input"] = input_items
+        return url, headers, payload, target_model
+
+    async def _execute_upstream_streaming(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
         target_model: str,
-        reasoning_effort: str,
-        sandbox_mode: str,
-        approval_policy: str,
-        account: Optional[Account] = None,
+        timeout: float,
+        account: Optional[Account],
     ) -> AsyncIterator[ChatCompletionChunk]:
-        """Runs `codex exec --json` and streams tokens as ChatCompletionChunk."""
+        """Streams real upstream response chunks over SSE directly matching Codex CLI wire protocol."""
         chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
-
-        # Find codex binary
-        codex_bin = shutil.which("codex") or "/root/.local/bin/codex"
-        cmd = [
-            codex_bin,
-            "exec",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--json",
-            "-m",
-            target_model,
-            "-s",
-            sandbox_mode,
-        ]
-        if approval_policy:
-            cmd.extend(["-c", f'approval_policy="{approval_policy}"'])
-        if reasoning_effort and reasoning_effort not in ("default", "none"):
-            cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
-        elif reasoning_effort == "none":
-            cmd.extend(["-c", 'model_reasoning_effort="none"'])
-
-        cmd.append("-")
-
-        env = os.environ.copy()
-        codex_home = self._prepare_codex_home(account)
-        if codex_home:
-            env["CODEX_HOME"] = codex_home
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
+        tool_call_indices: Dict[str, int] = {}
+        has_tool_calls = False
 
         yield ChatCompletionChunk(
             id=chunk_id,
@@ -663,141 +689,261 @@ class CodexPlugin(BasePlugin):
             choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
         )
 
-        # Write prompt to stdin and close
-        if proc.stdin:
-            proc.stdin.write(prompt.encode("utf-8"))
-            await proc.stdin.drain()
-            proc.stdin.close()
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async def get_stream():
+                async with client.stream("POST", url, headers=headers, json=payload) as stream_resp:
+                    # Token refresh retry on 401
+                    if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                        refreshed = await codex_oauth.refresh_account_token(account)
+                        if refreshed:
+                            from llmproxy.core.manager import plugin_manager
+                            plugin_manager._save_accounts()
+                            new_headers = self.build_headers(account=account)
+                            async with client.stream("POST", url, headers=new_headers, json=payload) as retry_resp:
+                                if retry_resp.status_code >= 400:
+                                    err_bytes = await retry_resp.aread()
+                                    raise httpx.HTTPStatusError(
+                                        f"OpenAI Codex upstream error ({retry_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                        request=retry_resp.request,
+                                        response=retry_resp,
+                                    )
+                                async for line in retry_resp.aiter_lines():
+                                    yield line
+                            return
+                    if stream_resp.status_code >= 400:
+                        err_bytes = await stream_resp.aread()
+                        raise httpx.HTTPStatusError(
+                            f"OpenAI Codex upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                            request=stream_resp.request,
+                            response=stream_resp,
+                        )
+                    async for line in stream_resp.aiter_lines():
+                        yield line
 
-        # Stream stdout lines
-        if proc.stdout:
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                raw = line.decode("utf-8", errors="replace").strip()
-                if not raw:
+            async for line in get_stream():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
                     continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
                 try:
-                    event = json.loads(raw)
-                    ev_type = event.get("type", "")
-                    if ev_type == "item.completed":
-                        item = event.get("item", {})
-                        if item.get("type") == "agent_message" and "text" in item:
-                            yield ChatCompletionChunk(
-                                id=chunk_id,
-                                created=created,
-                                model=target_model,
-                                choices=[ChatChoiceDelta(index=0, delta={"content": item["text"]})],
-                            )
-                    elif ev_type == "item.agent_message.delta":
-                        delta_text = event.get("delta", {}).get("text", "")
-                        if delta_text:
-                            yield ChatCompletionChunk(
-                                id=chunk_id,
-                                created=created,
-                                model=target_model,
-                                choices=[ChatChoiceDelta(index=0, delta={"content": delta_text})],
-                            )
+                    event = json.loads(data_str)
                 except Exception:
                     continue
 
-        await proc.wait()
-
-        yield ChatCompletionChunk(
-            id=chunk_id,
-            created=created,
-            model=target_model,
-            choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
-        )
-
-    async def _run_codex_cli_non_streaming(
-        self,
-        prompt: str,
-        target_model: str,
-        reasoning_effort: str,
-        sandbox_mode: str,
-        approval_policy: str,
-        account: Optional[Account] = None,
-    ) -> ChatCompletionResponse:
-        """Runs `codex exec --json` non-interactively and returns ChatCompletionResponse."""
-        codex_bin = shutil.which("codex") or "/root/.local/bin/codex"
-        cmd = [
-            codex_bin,
-            "exec",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--json",
-            "-m",
-            target_model,
-            "-s",
-            sandbox_mode,
-        ]
-        if approval_policy:
-            cmd.extend(["-c", f'approval_policy="{approval_policy}"'])
-        if reasoning_effort and reasoning_effort not in ("default", "none"):
-            cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
-        elif reasoning_effort == "none":
-            cmd.extend(["-c", 'model_reasoning_effort="none"'])
-
-        cmd.append("-")
-
-        env = os.environ.copy()
-        codex_home = self._prepare_codex_home(account)
-        if codex_home:
-            env["CODEX_HOME"] = codex_home
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        stdout_bytes, _ = await proc.communicate(input=prompt.encode("utf-8"))
-
-        agent_messages: List[str] = []
-        prompt_tokens = 15
-        completion_tokens = 25
-
-        for line in stdout_bytes.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                ev_type = event.get("type", "")
-                if ev_type == "item.completed":
+                ev_type = event.get("type")
+                if ev_type == "response.output_text.delta":
+                    delta_text = event.get("delta", "")
+                    if delta_text:
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=target_model,
+                            choices=[ChatChoiceDelta(index=0, delta={"content": delta_text})],
+                        )
+                elif ev_type == "response.output_item.added":
                     item = event.get("item", {})
-                    if item.get("type") == "agent_message" and "text" in item:
-                        agent_messages.append(item["text"])
-                elif ev_type == "turn.completed":
-                    usage = event.get("usage", {})
-                    if usage:
-                        prompt_tokens = usage.get("input_tokens", prompt_tokens)
-                        completion_tokens = usage.get("output_tokens", completion_tokens)
-            except Exception:
-                continue
+                    if item.get("type") == "function_call":
+                        has_tool_calls = True
+                        call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        idx = len(tool_call_indices)
+                        tool_call_indices[call_id] = idx
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=target_model,
+                            choices=[
+                                ChatChoiceDelta(
+                                    index=0,
+                                    delta={
+                                        "tool_calls": [
+                                            {
+                                                "index": idx,
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": item.get("name", ""),
+                                                    "arguments": "",
+                                                },
+                                            }
+                                        ]
+                                    },
+                                )
+                            ],
+                        )
+                elif ev_type == "response.function_call_arguments.delta":
+                    arg_delta = event.get("delta", "")
+                    item_id = event.get("item_id", "")
+                    idx = tool_call_indices.get(item_id, 0)
+                    if arg_delta:
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=target_model,
+                            choices=[
+                                ChatChoiceDelta(
+                                    index=0,
+                                    delta={
+                                        "tool_calls": [
+                                            {
+                                                "index": idx,
+                                                "function": {"arguments": arg_delta},
+                                            }
+                                        ]
+                                    },
+                                )
+                            ],
+                        )
+                elif ev_type == "response.completed":
+                    resp_obj = event.get("response", {})
+                    usage_obj = resp_obj.get("usage", {})
+                    usage = None
+                    if usage_obj:
+                        usage = CompletionUsage(
+                            prompt_tokens=usage_obj.get("input_tokens", 0),
+                            completion_tokens=usage_obj.get("output_tokens", 0),
+                            total_tokens=usage_obj.get("total_tokens", 0),
+                        )
+                    finish_reason = "tool_calls" if has_tool_calls else "stop"
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=target_model,
+                        choices=[ChatChoiceDelta(index=0, delta={}, finish_reason=finish_reason)],
+                        usage=usage,
+                    )
 
-        reply_text = "\n".join(agent_messages) if agent_messages else "Response completed by Codex."
+    async def _execute_upstream_non_streaming(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        target_model: str,
+        timeout: float,
+        account: Optional[Account],
+    ) -> ChatCompletionResponse:
+        """Executes non-streaming request against upstream Responses API and returns assembled ChatCompletionResponse."""
+        chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        text_pieces: List[str] = []
+        tool_calls_map: Dict[str, Dict[str, Any]] = {}
+        usage = CompletionUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async def get_stream():
+                async with client.stream("POST", url, headers=headers, json=payload) as stream_resp:
+                    # Token refresh retry on 401
+                    if stream_resp.status_code == 401 and account and account.extra_config.get("refresh_token"):
+                        refreshed = await codex_oauth.refresh_account_token(account)
+                        if refreshed:
+                            from llmproxy.core.manager import plugin_manager
+                            plugin_manager._save_accounts()
+                            new_headers = self.build_headers(account=account)
+                            async with client.stream("POST", url, headers=new_headers, json=payload) as retry_resp:
+                                if retry_resp.status_code >= 400:
+                                    err_bytes = await retry_resp.aread()
+                                    raise httpx.HTTPStatusError(
+                                        f"OpenAI Codex upstream error ({retry_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                                        request=retry_resp.request,
+                                        response=retry_resp,
+                                    )
+                                async for line in retry_resp.aiter_lines():
+                                    yield line
+                            return
+                    if stream_resp.status_code >= 400:
+                        err_bytes = await stream_resp.aread()
+                        raise httpx.HTTPStatusError(
+                            f"OpenAI Codex upstream error ({stream_resp.status_code}): {err_bytes.decode('utf-8', errors='replace')}",
+                            request=stream_resp.request,
+                            response=stream_resp,
+                        )
+                    async for line in stream_resp.aiter_lines():
+                        yield line
+
+            async for line in get_stream():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data_str)
+                except Exception:
+                    continue
+
+                ev_type = event.get("type")
+                if ev_type == "response.output_text.delta":
+                    delta_text = event.get("delta", "")
+                    if delta_text:
+                        text_pieces.append(delta_text)
+                elif ev_type == "response.output_item.added":
+                    item = event.get("item", {})
+                    if item.get("type") == "function_call":
+                        call_id = item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        item_id = item.get("id") or call_id
+                        tool_calls_map[item_id] = {
+                            "id": call_id,
+                            "type": "function",
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", ""),
+                        }
+                elif ev_type == "response.function_call_arguments.delta":
+                    arg_delta = event.get("delta", "")
+                    item_id = event.get("item_id", "")
+                    if item_id in tool_calls_map:
+                        tool_calls_map[item_id]["arguments"] += arg_delta
+                elif ev_type == "response.output_item.done":
+                    item = event.get("item", {})
+                    if item.get("type") == "function_call":
+                        item_id = item.get("id")
+                        if item_id in tool_calls_map and item.get("arguments"):
+                            tool_calls_map[item_id]["arguments"] = item["arguments"]
+                elif ev_type == "response.completed":
+                    resp_obj = event.get("response", {})
+                    resp_id = resp_obj.get("id")
+                    if resp_id:
+                        chunk_id = resp_id
+                    u_obj = resp_obj.get("usage", {})
+                    if u_obj:
+                        usage = CompletionUsage(
+                            prompt_tokens=u_obj.get("input_tokens", 0),
+                            completion_tokens=u_obj.get("output_tokens", 0),
+                            total_tokens=u_obj.get("total_tokens", 0),
+                        )
+
+        content = "".join(text_pieces) if text_pieces else None
+        if tool_calls_map:
+            formatted_tools = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                    },
+                }
+                for tc in tool_calls_map.values()
+            ]
+            message = ChatMessage(role="assistant", content=content, tool_calls=formatted_tools)
+            finish_reason = "tool_calls"
+        else:
+            message = ChatMessage(role="assistant", content=content or "")
+            finish_reason = "stop"
 
         return ChatCompletionResponse(
-            id=f"chatcmpl-codex-{uuid.uuid4().hex[:12]}",
-            created=int(time.time()),
+            id=chunk_id,
+            created=created,
             model=target_model,
             choices=[
                 ChatChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=reply_text),
-                    finish_reason="stop",
+                    message=message,
+                    finish_reason=finish_reason,
                 )
             ],
-            usage=CompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=usage,
         )
 
     async def chat_completion(
@@ -810,12 +956,9 @@ class CodexPlugin(BasePlugin):
         start_t = time.perf_counter()
         sanitize_ssl_env()
         api_key = account.api_key if account else str(variables.get("api_key") or "")
-        parsed_effort = self._parse_reasoning_effort(request, model_config, variables)
-        target_model = model_config.upstream_model or model_config.id
-        sandbox_mode = str(variables.get("sandbox_mode") or "read-only")
-        approval_policy = str(variables.get("approval_policy") or "never")
+        timeout = float(variables.get("timeout") or 60.0)
 
-        # Test mode or no account configured
+        # Simulation mode when no account / test key
         if self._is_test_mode(api_key):
             time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
             if request.stream:
@@ -832,35 +975,30 @@ class CodexPlugin(BasePlugin):
                 time_taken_ms=time_taken_ms,
             )
 
-        # Authenticated account execution
+        # Authenticated account execution (Direct upstream wire protocol)
         await self._ensure_token_freshness(account)
-        cli_prompt = self._prepare_cli_prompt(request)
+        url, headers, payload, target_model = self._build_upstream_request(
+            request, model_config, account, variables
+        )
 
-        try:
-            if request.stream:
-                return self._run_codex_cli_streaming(
-                    prompt=cli_prompt,
-                    target_model=target_model,
-                    reasoning_effort=parsed_effort or "default",
-                    sandbox_mode=sandbox_mode,
-                    approval_policy=approval_policy,
-                    account=account,
-                )
-
-            return await self._run_codex_cli_non_streaming(
-                prompt=cli_prompt,
+        if request.stream:
+            return self._execute_upstream_streaming(
+                url=url,
+                headers=headers,
+                payload=payload,
                 target_model=target_model,
-                reasoning_effort=parsed_effort or "default",
-                sandbox_mode=sandbox_mode,
-                approval_policy=approval_policy,
+                timeout=timeout,
                 account=account,
             )
-        except Exception as e:
-            logger.warning("Codex CLI execution failed, falling back to simulated output: %s", e)
-            time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
-            if request.stream:
-                return self._mock_stream(request, model_config, account=account, time_taken_ms=time_taken_ms)
-            return self._mock_response(request, model_config, account=account, time_taken_ms=time_taken_ms)
+
+        return await self._execute_upstream_non_streaming(
+            url=url,
+            headers=headers,
+            payload=payload,
+            target_model=target_model,
+            timeout=timeout,
+            account=account,
+        )
 
 
 plugin = CodexPlugin()
