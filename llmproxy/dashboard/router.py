@@ -108,14 +108,34 @@ def _ensure_plugins_loaded() -> None:
 
 
 def _persist_plugin_metadata(plugin_id: str, meta: PluginMetadata) -> None:
-    """Save plugin configuration to persistent storage."""
-    saved_configs = read_persisted_configs(plugin_manager.data_dir)
-    saved_configs[plugin_id] = {
+    """Save plugin configuration to persistent storage in sync with plugin_manager."""
+    cfg = plugin_manager.configs.setdefault(plugin_id, {
         "enabled": meta.enabled,
-        "variables": {v.name: v.value for v in meta.variables},
-        "models": [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in meta.models],
-    }
-    write_persisted_configs(plugin_manager.data_dir, saved_configs)
+        "pinned": getattr(meta, "pinned", False),
+        "variables": {},
+        "custom_models": [],
+        "edited_models": {},
+        "deleted_models": [],
+    })
+    cfg["enabled"] = meta.enabled
+    cfg["pinned"] = getattr(meta, "pinned", False)
+
+    vars_dict = cfg.setdefault("variables", {})
+    for v in meta.variables:
+        if v.value is not None and v.value != "":
+            vars_dict[v.name] = v.value
+        elif v.name not in vars_dict and v.default is not None and v.default != "":
+            vars_dict[v.name] = v.default
+
+    cfg["models"] = [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in meta.models]
+    plugin_manager._save_configs()
+
+    try:
+        saved_configs = read_persisted_configs(plugin_manager.data_dir)
+        saved_configs[plugin_id] = cfg
+        write_persisted_configs(plugin_manager.data_dir, saved_configs)
+    except Exception:
+        pass
 
 
 # =========================================================================
@@ -1044,8 +1064,11 @@ async def import_local_codex_session():
     }
 
 
-async def fetch_codex_status(account: Account) -> Dict[str, Any]:
-    """Fetch status, plan, and token validity for a Codex account."""
+async def fetch_codex_quota(account: Account) -> Dict[str, Any]:
+    """Fetch live usage and rate limits for a Codex account from /backend-api/wham/usage."""
+    import httpx
+    from datetime import datetime, timezone
+
     if account.extra_config.get("refresh_token"):
         expires_at = account.extra_config.get("expires_at", 0)
         if expires_at - time.time() < 120:
@@ -1053,6 +1076,107 @@ async def fetch_codex_status(account: Account) -> Dict[str, Any]:
             if refreshed:
                 plugin_manager._save_accounts()
 
+    base_url = (account.base_url or "https://chatgpt.com/backend-api").rstrip("/")
+    if base_url.endswith("/responses") or base_url.endswith("/codex/responses"):
+        base_url = "https://chatgpt.com/backend-api"
+    url = f"{base_url}/wham/usage"
+
+    headers = {
+        "Authorization": f"Bearer {account.api_key}",
+        "User-Agent": "codex/cli/0.167.0 (linux; x86_64)",
+        "Accept": "application/json",
+    }
+    chatgpt_acc_id = account.extra_config.get("account_id")
+    if chatgpt_acc_id:
+        headers["ChatGPT-Account-Id"] = chatgpt_acc_id
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and account.extra_config.get("refresh_token"):
+                refreshed = await codex_oauth.refresh_account_token(account)
+                if refreshed:
+                    plugin_manager._save_accounts()
+                    headers["Authorization"] = f"Bearer {account.api_key}"
+                    resp = await client.get(url, headers=headers)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                rate_limit = data.get("rate_limit") or {}
+                buckets = []
+
+                def _build_bucket(window_data: Optional[Dict[str, Any]], default_name: str, bucket_id: str):
+                    if not window_data:
+                        return None
+                    used_pct = window_data.get("used_percent", 0)
+                    if used_pct is None:
+                        used_pct = 0
+                    window_sec = window_data.get("limit_window_seconds")
+                    name = default_name
+                    if window_sec:
+                        if abs(window_sec - 18000) < 1800:
+                            name = "5-Hour Limit"
+                        elif abs(window_sec - 604800) < 36000:
+                            name = "Weekly Limit"
+                        elif abs(window_sec - 2592000) < 86400:
+                            name = "Monthly Limit"
+
+                    reset_at = window_data.get("reset_at")
+                    reset_after = window_data.get("reset_after_seconds")
+                    reset_time_str = None
+                    if reset_at:
+                        reset_time_str = datetime.fromtimestamp(reset_at, tz=timezone.utc).isoformat()
+                    elif reset_after is not None:
+                        reset_time_str = datetime.fromtimestamp(time.time() + reset_after, tz=timezone.utc).isoformat()
+
+                    return {
+                        "bucketId": bucket_id,
+                        "displayName": name,
+                        "usedPercent": used_pct,
+                        "remainingFraction": round(max(0.0, (100 - used_pct) / 100.0), 4),
+                        "resetTime": reset_time_str,
+                    }
+
+                pw = _build_bucket(rate_limit.get("primary_window"), "Primary Limit", "primary_window")
+                if pw:
+                    buckets.append(pw)
+
+                sw = _build_bucket(rate_limit.get("secondary_window"), "Secondary Limit", "secondary_window")
+                if sw:
+                    buckets.append(sw)
+
+                plan_type = data.get("plan_type") or account.extra_config.get("plan_type", "standard")
+                email = data.get("email") or account.extra_config.get("email", "")
+
+                return {
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "email": email,
+                    "plan_type": plan_type,
+                    "groups": [
+                        {
+                            "displayName": "Codex Usage",
+                            "buckets": buckets,
+                        }
+                    ] if buckets else [],
+                    "raw": data,
+                }
+            else:
+                return {"error": f"Upstream error ({resp.status_code}): {resp.text[:200]}"}
+    except Exception as e:
+        return {"error": f"Failed to fetch Codex usage: {e}"}
+
+
+async def fetch_codex_status(account: Account) -> Dict[str, Any]:
+    """Fetch status, plan, token validity, and usage for a Codex account."""
+    if account.extra_config.get("refresh_token"):
+        expires_at = account.extra_config.get("expires_at", 0)
+        if expires_at - time.time() < 120:
+            refreshed = await codex_oauth.refresh_account_token(account)
+            if refreshed:
+                plugin_manager._save_accounts()
+
+    quota_data = await fetch_codex_quota(account)
     return {
         "account_id": account.id,
         "account_name": account.name,
@@ -1061,6 +1185,7 @@ async def fetch_codex_status(account: Account) -> Dict[str, Any]:
         "chatgpt_account_id": account.extra_config.get("account_id", ""),
         "expires_at": account.extra_config.get("expires_at"),
         "authenticated": bool(account.api_key),
+        "quota": quota_data,
     }
 
 
@@ -1073,6 +1198,17 @@ async def get_codex_account_status(account_id: str):
     if account.provider_id != "codex":
         raise HTTPException(status_code=400, detail="Account is not a Codex account")
     return await fetch_codex_status(account)
+
+
+@router.get("/codex/quota/{account_id}")
+async def get_codex_account_quota(account_id: str):
+    """Fetch live usage and rate limits for a specific Codex account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    if account.provider_id != "codex":
+        raise HTTPException(status_code=400, detail="Account is not a Codex account")
+    return await fetch_codex_quota(account)
 
 
 @router.get("/codex/status")
@@ -1092,6 +1228,7 @@ async def get_codex_all_status():
             "email": acc.extra_config.get("email", ""),
             "plan_type": acc.extra_config.get("plan_type", "standard"),
             "rate_limited": not acc.is_available(),
+            "quota": status_data.get("quota"),
             "status": status_data,
         })
     return {"accounts": results}
@@ -1287,14 +1424,23 @@ async def test_chat(req: TestChatRequest):
         stream=bool(req.stream),
     )
 
-    # Select Account for test chat
+    # Select Account for test chat with routing & failover rules
     strategy = str(matched_vars.get("load_balancing_strategy", "round_robin"))
     accounts = plugin_manager.get_accounts(matched_plugin.metadata.id)
-    account: Optional[Account] = None
+    max_retries = max(len(accounts), int(matched_vars.get("max_retries", 2) or 2)) if accounts else 1
+    cooldown_sec = float(matched_vars.get("account_switch_cooldown", 60.0) or 60.0)
+    switch_wait = float(matched_vars.get("account_switch_wait", 0.0) or 0.0)
+
+    excluded_accounts: Set[str] = set()
+    current_account: Optional[Account] = None
     if accounts:
-        account = plugin_manager.select_account(matched_plugin.metadata.id, strategy=strategy)
-    if not account:
-        account = Account(
+        current_account = plugin_manager.select_account(
+            matched_plugin.metadata.id,
+            strategy=strategy,
+            exclude_account_ids=excluded_accounts,
+        )
+    if not current_account:
+        current_account = Account(
             id=f"default-{matched_plugin.metadata.id}",
             provider_id=matched_plugin.metadata.id,
             name="Default Account",
@@ -1303,53 +1449,88 @@ async def test_chat(req: TestChatRequest):
         )
 
     start_time = time.perf_counter()
+    last_exception = None
 
-    try:
-        import inspect
-        sig = inspect.signature(matched_plugin.chat_completion)
-        if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            result = await matched_plugin.chat_completion(
-                chat_request, matched_model, matched_vars, account=account
+    for attempt in range(max_retries):
+        try:
+            init_proxy_url, current_p = plugin_manager.resolve_request_proxy(
+                variables=matched_vars,
+                account=current_account,
+                provider_id=matched_plugin.metadata.id,
             )
-        else:
-            result = await matched_plugin.chat_completion(
-                chat_request, matched_model, matched_vars
-            )
-        latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            attempt_vars = dict(matched_vars)
+            if init_proxy_url:
+                attempt_vars["proxy"] = init_proxy_url
 
-        # Handle streaming responses
-        if req.stream:
-            async def event_generator():
-                if hasattr(result, "__aiter__"):
-                    async for chunk in result:
-                        chunk_json = (
-                            chunk.model_dump_json()
-                            if hasattr(chunk, "model_dump_json")
-                            else json.dumps(chunk)
+            import inspect
+            sig = inspect.signature(matched_plugin.chat_completion)
+            if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                result = await matched_plugin.chat_completion(
+                    chat_request, matched_model, attempt_vars, account=current_account
+                )
+            else:
+                result = await matched_plugin.chat_completion(
+                    chat_request, matched_model, attempt_vars
+                )
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+
+            if current_account and not current_account.id.startswith("default-"):
+                plugin_manager.mark_account_result(current_account.id, success=True)
+            if current_p:
+                plugin_manager.mark_proxy_result(current_p.id, success=True)
+
+            # Handle streaming responses
+            if req.stream:
+                async def event_generator():
+                    if hasattr(result, "__aiter__"):
+                        async for chunk in result:
+                            chunk_json = (
+                                chunk.model_dump_json()
+                                if hasattr(chunk, "model_dump_json")
+                                else json.dumps(chunk)
+                            )
+                            yield f"data: {chunk_json}\n\n"
+                    else:
+                        content = (
+                            result.choices[0].message.content
+                            if result.choices and result.choices[0].message
+                            else ""
                         )
-                        yield f"data: {chunk_json}\n\n"
-                else:
-                    content = (
-                        result.choices[0].message.content
-                        if result.choices and result.choices[0].message
-                        else ""
-                    )
-                    chunk_obj = {
-                        "id": getattr(result, "id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-                        "object": "chat.completion.chunk",
-                        "model": req.model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": content},
-                                "finish_reason": "stop",
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk_obj)}\n\n"
-                yield "data: [DONE]\n\n"
+                        chunk_obj = {
+                            "id": getattr(result, "id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
+                            "object": "chat.completion.chunk",
+                            "model": req.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": content},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(chunk_obj)}\n\n"
+                    yield "data: [DONE]\n\n"
 
-            prompt_tokens = sum(len(str(m.content).split()) for m in messages)
+                prompt_tokens = sum(len(str(m.content).split()) for m in messages)
+                log_entry = RequestLogEntry(
+                    id=f"log-{uuid.uuid4().hex[:8]}",
+                    timestamp=time.time(),
+                    model=req.model,
+                    plugin_id=matched_plugin.metadata.id,
+                    status="success",
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=20,
+                )
+                plugin_manager.add_log(log_entry)
+
+                return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+            # Non-streaming response
+            prompt_tokens = result.usage.prompt_tokens if result.usage else sum(len(str(m.content).split()) for m in messages)
+            completion_tokens = result.usage.completion_tokens if result.usage else 20
+
             log_entry = RequestLogEntry(
                 id=f"log-{uuid.uuid4().hex[:8]}",
                 timestamp=time.time(),
@@ -1359,48 +1540,65 @@ async def test_chat(req: TestChatRequest):
                 status_code=200,
                 latency_ms=latency_ms,
                 prompt_tokens=prompt_tokens,
-                completion_tokens=20,
+                completion_tokens=completion_tokens,
             )
             plugin_manager.add_log(log_entry)
 
-            return StreamingResponse(event_generator(), media_type="text/event-stream")
+            resp_dict = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+            resp_dict["latency_ms"] = latency_ms
+            return resp_dict
 
-        # Non-streaming response
-        prompt_tokens = result.usage.prompt_tokens if result.usage else sum(len(str(m.content).split()) for m in messages)
-        completion_tokens = result.usage.completion_tokens if result.usage else 20
+        except Exception as e:
+            last_exception = e
+            msg = str(e).lower()
+            is_rate_limit = (
+                "rate limit" in msg
+                or "429" in msg
+                or "quota" in msg
+                or "too many requests" in msg
+                or "resource_exhausted" in msg
+            )
+            if current_account and not current_account.id.startswith("default-"):
+                plugin_manager.mark_account_result(
+                    current_account.id,
+                    success=False,
+                    is_rate_limit=is_rate_limit,
+                    cooldown_seconds=cooldown_sec,
+                )
+                excluded_accounts.add(current_account.id)
 
-        log_entry = RequestLogEntry(
-            id=f"log-{uuid.uuid4().hex[:8]}",
-            timestamp=time.time(),
-            model=req.model,
-            plugin_id=matched_plugin.metadata.id,
-            status="success",
-            status_code=200,
-            latency_ms=latency_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-        plugin_manager.add_log(log_entry)
+            if attempt < max_retries - 1 and accounts:
+                if switch_wait > 0:
+                    await asyncio.sleep(switch_wait)
+                next_acc = plugin_manager.select_account(
+                    matched_plugin.metadata.id,
+                    strategy=strategy,
+                    exclude_account_ids=excluded_accounts,
+                )
+                if not next_acc and len(excluded_accounts) < len(accounts):
+                    rem = [a for a in accounts if a.id not in excluded_accounts]
+                    if rem:
+                        next_acc = rem[0]
+                if next_acc and next_acc.id != current_account.id:
+                    current_account = next_acc
+                    continue
+            break
 
-        resp_dict = result.model_dump() if hasattr(result, "model_dump") else result.dict()
-        resp_dict["latency_ms"] = latency_ms
-        return resp_dict
-
-    except Exception as e:
-        latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
-        plugin_id = getattr(matched_plugin, "metadata", None) and matched_plugin.metadata.id
-        log_entry = RequestLogEntry(
-            id=f"log-{uuid.uuid4().hex[:8]}",
-            timestamp=time.time(),
-            model=req.model,
-            plugin_id=plugin_id,
-            status="error",
-            status_code=500,
-            latency_ms=latency_ms,
-            error_message=str(e),
-        )
-        plugin_manager.add_log(log_entry)
-        raise HTTPException(status_code=500, detail=f"Chat completion error: {e}") from e
+    # If all attempts failed
+    latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+    plugin_id = getattr(matched_plugin, "metadata", None) and matched_plugin.metadata.id
+    log_entry = RequestLogEntry(
+        id=f"log-{uuid.uuid4().hex[:8]}",
+        timestamp=time.time(),
+        model=req.model,
+        plugin_id=plugin_id,
+        status="error",
+        status_code=500,
+        latency_ms=latency_ms,
+        error_message=str(last_exception),
+    )
+    plugin_manager.add_log(log_entry)
+    raise HTTPException(status_code=500, detail=f"Chat completion error: {last_exception}") from last_exception
 
 
 # =========================================================================

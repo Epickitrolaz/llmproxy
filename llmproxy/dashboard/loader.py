@@ -83,8 +83,10 @@ def apply_persisted_config_to_plugin(plugin: BasePlugin, saved_config: Dict[str,
     saved_vars = saved_config.get("variables", {})
     if isinstance(saved_vars, dict):
         for var in meta.variables:
-            if var.name in saved_vars:
+            if var.name in saved_vars and saved_vars[var.name] is not None and saved_vars[var.name] != "":
                 var.value = saved_vars[var.name]
+            elif var.default is not None and var.default != "":
+                var.value = var.default
 
     if "models" in saved_config and isinstance(saved_config["models"], list):
         parsed_models = []

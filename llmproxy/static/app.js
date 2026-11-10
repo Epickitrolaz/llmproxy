@@ -1652,7 +1652,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       const grp = document.createElement("div");
       grp.className = "form-group";
 
-      const val = (v.value !== undefined && v.value !== null) ? v.value : (v.default || "");
+      const val = (v.value !== undefined && v.value !== null && v.value !== "") ? v.value : (v.default !== undefined && v.default !== null ? v.default : "");
       if (v.type === "boolean") {
         grp.innerHTML = `
           <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1797,13 +1797,6 @@ curl -X POST ${baseUrl}/chat/completions \\
             showToast(`Model '${m.id}' test failed: ${err.message}`, "error");
           } finally {
             testBtn.disabled = false;
-            setTimeout(() => {
-              if (testBtn.classList.contains("is-success") || testBtn.classList.contains("is-error")) {
-                testBtn.classList.remove("is-success", "is-error");
-                testBtn.textContent = "Test";
-                testBtn.title = "Test model response";
-              }
-            }, 4000);
           }
         });
       }
@@ -2396,6 +2389,27 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (bar) bar.remove();
   }
 
+  function formatTimeRemaining(resetTime) {
+    if (!resetTime) return "Rolling";
+    const target = new Date(resetTime).getTime();
+    if (isNaN(target)) return "Rolling";
+    const now = Date.now();
+    const diffMs = target - now;
+    if (diffMs <= 0) return "Ready";
+    const diffSec = Math.floor(diffMs / 1000);
+    const days = Math.floor(diffSec / 86400);
+    const hours = Math.floor((diffSec % 86400) / 3600);
+    const minutes = Math.floor((diffSec % 3600) / 60);
+
+    if (days > 0) {
+      return hours > 0 ? `${days}d ${hours}h left` : `${days}d left`;
+    }
+    if (hours > 0) {
+      return `${hours}h ${minutes}m left`;
+    }
+    return `${Math.max(1, minutes)}m left`;
+  }
+
   async function renderStatusAccountsGrid(fetchFreshQuota = false) {
     if (!el.statusAccountsGrid) return;
     
@@ -2451,16 +2465,33 @@ curl -X POST ${baseUrl}/chat/completions \\
       return a.name.localeCompare(b.name);
     });
 
-    // Fetch live quota for Antigravity accounts if requested fresh or not cached yet
+    // Fetch live quota for Antigravity and Codex accounts if requested fresh or not cached yet
     if (fetchFreshQuota || !state.cachedQuotaData) {
+      if (!state.cachedQuotaData) state.cachedQuotaData = {};
+
       const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
       if (antigravityAccounts.length > 0) {
         try {
           const agStatusRes = await api("/api/antigravity/status");
           if (agStatusRes && agStatusRes.accounts) {
-            state.cachedQuotaData = {};
             agStatusRes.accounts.forEach((item) => {
-              state.cachedQuotaData[item.account_id] = item.quota;
+              if (item.quota) {
+                state.cachedQuotaData[item.account_id] = item.quota;
+              }
+            });
+          }
+        } catch (_) {}
+      }
+
+      const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
+      if (codexAccounts.length > 0) {
+        try {
+          const codexStatusRes = await api("/api/codex/status");
+          if (codexStatusRes && codexStatusRes.accounts) {
+            codexStatusRes.accounts.forEach((item) => {
+              if (item.quota) {
+                state.cachedQuotaData[item.account_id] = item.quota;
+              }
             });
           }
         } catch (_) {}
@@ -2488,22 +2519,38 @@ curl -X POST ${baseUrl}/chat/completions \\
       let limitsHtml = "";
       const quota = quotaDataMap[acc.id];
 
-      if (quota && quota.groups) {
+      if (quota && quota.groups && quota.groups.length > 0) {
         quota.groups.forEach((grp) => {
           (grp.buckets || []).forEach((b) => {
             const bucketKey = b.bucketId || b.displayName || "limit";
             const isHidden = hiddenSet.has(bucketKey);
-            const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
-            const pct = Math.round(frac * 100);
-            const color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
-            const resetStr = b.resetTime ? new Date(b.resetTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "Rolling";
+
+            let pct = 0;
+            let color = "#34d399";
+            let label = "";
+
+            if (b.usedPercent !== undefined && b.usedPercent !== null) {
+              // Usage meter (e.g. Codex) - 0% to 100% used
+              pct = Math.min(100, Math.max(0, Math.round(b.usedPercent)));
+              color = pct < 60 ? "#34d399" : pct < 85 ? "#fbbf24" : "#f43f5e";
+              label = `${pct}%`;
+            } else {
+              // Remaining quota meter (e.g. Antigravity) - 100% to 0% remaining
+              const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
+              pct = Math.min(100, Math.max(0, Math.round(frac * 100)));
+              color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+              label = `${pct}%`;
+            }
+
+            const resetStr = formatTimeRemaining(b.resetTime);
+            const groupName = grp.displayName || (b.usedPercent !== undefined ? "Usage" : "Quota");
 
             limitsHtml += `
               <div class="limit-item ${isHidden ? 'hidden-limit' : ''}" data-key="${escapeHtml(bucketKey)}">
                 <div class="limit-header">
                   <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">${escapeHtml(b.displayName || bucketKey)}</span>
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: ${color};">${pct}%</span>
+                    <span style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: ${color};">${label}</span>
                     <button class="btn-hide-limit" data-acc="${acc.id}" data-key="${escapeHtml(bucketKey)}" title="Hide this limit">✕</button>
                   </div>
                 </div>
@@ -2511,7 +2558,7 @@ curl -X POST ${baseUrl}/chat/completions \\
                   <div style="background: ${color}; height: 100%; width: ${pct}%;"></div>
                 </div>
                 <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
-                  <span>${escapeHtml(grp.displayName || "Quota")}</span>
+                  <span>${escapeHtml(groupName)}</span>
                   <span>Resets: ${escapeHtml(resetStr)}</span>
                 </div>
               </div>
@@ -3130,10 +3177,17 @@ curl -X POST ${baseUrl}/chat/completions \\
       nameInput.value = "";
       keyInput.value = "";
       baseInput.value = "";
-      priorityInput.value = 1;
+      const initialProvId = defaultProviderId || (provSelect.value || (state.plugins[0] ? state.plugins[0].id : ""));
+      priorityInput.value = getNextAvailablePriority(initialProvId);
       weightInput.value = 1;
       enabledInput.checked = true;
     }
+
+    provSelect.onchange = () => {
+      if (!idInput.value) {
+        priorityInput.value = getNextAvailablePriority(provSelect.value);
+      }
+    };
 
     updateAccountModalVisibility();
     openModal(el.modalAccount);
@@ -3175,13 +3229,24 @@ curl -X POST ${baseUrl}/chat/completions \\
         return;
       }
 
+      let chosenPriority = parseInt(priorityInput.value, 10) || 1;
+      const conflicting = (state.accounts || []).find(
+        (a) => a.provider_id === provId && a.id !== idInput.value && parseInt(a.priority, 10) === chosenPriority
+      );
+      if (conflicting) {
+        const nextP = getNextAvailablePriority(provId, idInput.value);
+        showToast(`Priority ${chosenPriority} is already in use by '${conflicting.name}'. Automatically changed to ${nextP}`, "warning");
+        chosenPriority = nextP;
+        priorityInput.value = nextP;
+      }
+
       try {
         if (isEditing) {
           // Edit
           const updatePayload = {
             name,
             base_url: baseInput.value || undefined,
-            priority: parseInt(priorityInput.value, 10) || 1,
+            priority: chosenPriority,
             weight: parseInt(weightInput.value, 10) || 1,
             enabled: enabledInput.checked,
           };
@@ -3203,7 +3268,7 @@ curl -X POST ${baseUrl}/chat/completions \\
               name,
               api_key: keyInput.value,
               base_url: baseInput.value || undefined,
-              priority: parseInt(priorityInput.value, 10) || 1,
+              priority: chosenPriority,
               weight: parseInt(weightInput.value, 10) || 1,
               enabled: enabledInput.checked,
             }),
