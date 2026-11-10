@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import json
 import logging
+import os
 import random
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -64,12 +68,47 @@ class PluginManager:
         self.proxy_rr_indices: Dict[str, int] = {}
         self.logs: List[RequestLogEntry] = []
 
+        # Write optimization state
+        self._write_lock = threading.Lock()
+        self._logs_dirty = False
+        self._logs_timer: Optional[threading.Timer] = None
+        self._api_keys_dirty = False
+        self._api_keys_timer: Optional[threading.Timer] = None
+        self._flush_interval: float = 3.0
+
+        atexit.register(self.flush)
+
         self._load_configs()
         self._load_accounts()
         self._load_api_keys()
         self._load_rules()
         self._load_logs()
         self._load_proxies()
+
+    def _atomic_write(self, target_file: Path, content: str) -> None:
+        """Write content to target_file safely using an atomic temporary file replacement."""
+        try:
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=str(target_file.parent),
+                prefix=f".{target_file.stem}_",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, target_file)
+            except Exception:
+                if os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
+                raise
+        except Exception as e:
+            logger.error("Failed to write to %s: %s", target_file, e)
 
     def _load_configs(self) -> None:
         """Load persisted plugin configurations from disk."""
@@ -85,11 +124,7 @@ class PluginManager:
 
     def _save_configs(self) -> None:
         """Persist current plugin configurations to disk."""
-        try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            self.config_file.write_text(json.dumps(self.configs, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save plugin configs to %s: %s", self.config_file, e)
+        self._atomic_write(self.config_file, json.dumps(self.configs, indent=2))
 
     def _load_accounts(self) -> None:
         """Load connected accounts from disk."""
@@ -108,12 +143,8 @@ class PluginManager:
 
     def _save_accounts(self) -> None:
         """Persist accounts to disk."""
-        try:
-            self.accounts_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [acc.model_dump() for acc in self.accounts.values()]
-            self.accounts_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save accounts to %s: %s", self.accounts_file, e)
+        serialized = [acc.model_dump() for acc in self.accounts.values()]
+        self._atomic_write(self.accounts_file, json.dumps(serialized, indent=2))
 
     def _load_api_keys(self) -> None:
         """Load API keys from disk."""
@@ -132,12 +163,36 @@ class PluginManager:
 
     def _save_api_keys(self) -> None:
         """Persist API keys to disk (excluding temporary test keys)."""
-        try:
-            self.api_keys_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [k.model_dump() for k in self.api_keys.values() if not k.is_temporary]
-            self.api_keys_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save API keys to %s: %s", self.api_keys_file, e)
+        with self._write_lock:
+            self._api_keys_dirty = False
+            if self._api_keys_timer:
+                self._api_keys_timer.cancel()
+                self._api_keys_timer = None
+        serialized = [k.model_dump() for k in self.api_keys.values() if not k.is_temporary]
+        self._atomic_write(self.api_keys_file, json.dumps(serialized, indent=2))
+
+    def _schedule_api_keys_save(self) -> None:
+        """Debounce API keys persistence."""
+        with self._write_lock:
+            self._api_keys_dirty = True
+            if self._api_keys_timer is not None:
+                return
+            timer = threading.Timer(self._flush_interval, self._flush_api_keys)
+            timer.daemon = True
+            self._api_keys_timer = timer
+            timer.start()
+
+    def _flush_api_keys(self) -> None:
+        """Flush pending API keys writes to disk."""
+        with self._write_lock:
+            if not self._api_keys_dirty:
+                return
+            self._api_keys_dirty = False
+            if self._api_keys_timer:
+                self._api_keys_timer.cancel()
+                self._api_keys_timer = None
+        serialized = [k.model_dump() for k in self.api_keys.values() if not k.is_temporary]
+        self._atomic_write(self.api_keys_file, json.dumps(serialized, indent=2))
 
     def _load_rules(self) -> None:
         """Load custom load balancing rules from disk."""
@@ -156,12 +211,8 @@ class PluginManager:
 
     def _save_rules(self) -> None:
         """Persist custom load balancing rules to disk."""
-        try:
-            self.rules_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [r.model_dump() for r in self.rules.values()]
-            self.rules_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save rules to %s: %s", self.rules_file, e)
+        serialized = [r.model_dump() for r in self.rules.values()]
+        self._atomic_write(self.rules_file, json.dumps(serialized, indent=2))
 
     def _load_logs(self) -> None:
         """Load request logs from disk."""
@@ -176,13 +227,42 @@ class PluginManager:
             self.logs = []
 
     def _save_logs(self) -> None:
-        """Persist request logs to disk."""
-        try:
-            self.logs_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [log.model_dump() for log in self.logs[:1000]]
-            self.logs_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save request logs to %s: %s", self.logs_file, e)
+        """Persist request logs to disk immediately."""
+        with self._write_lock:
+            self._logs_dirty = False
+            if self._logs_timer:
+                self._logs_timer.cancel()
+                self._logs_timer = None
+            logs_snapshot = [log.model_dump() for log in self.logs[:1000]]
+        self._atomic_write(self.logs_file, json.dumps(logs_snapshot, indent=2))
+
+    def _schedule_logs_save(self) -> None:
+        """Debounce request logs persistence to reduce disk write frequency."""
+        with self._write_lock:
+            self._logs_dirty = True
+            if self._logs_timer is not None:
+                return
+            timer = threading.Timer(self._flush_interval, self._flush_logs)
+            timer.daemon = True
+            self._logs_timer = timer
+            timer.start()
+
+    def _flush_logs(self) -> None:
+        """Flush pending log writes to disk."""
+        with self._write_lock:
+            if not self._logs_dirty:
+                return
+            self._logs_dirty = False
+            if self._logs_timer:
+                self._logs_timer.cancel()
+                self._logs_timer = None
+            logs_snapshot = [log.model_dump() for log in self.logs[:1000]]
+        self._atomic_write(self.logs_file, json.dumps(logs_snapshot, indent=2))
+
+    def flush(self) -> None:
+        """Flush any pending dirty data (logs, usage counters) to disk immediately."""
+        self._flush_logs()
+        self._flush_api_keys()
 
     def _load_proxies(self) -> None:
         """Load external proxies from disk."""
@@ -201,12 +281,8 @@ class PluginManager:
 
     def _save_proxies(self) -> None:
         """Persist external proxies to disk."""
-        try:
-            self.proxies_file.parent.mkdir(parents=True, exist_ok=True)
-            serialized = [p.model_dump() for p in self.proxies.values()]
-            self.proxies_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error("Failed to save proxies to %s: %s", self.proxies_file, e)
+        serialized = [p.model_dump() for p in self.proxies.values()]
+        self._atomic_write(self.proxies_file, json.dumps(serialized, indent=2))
 
     # ==========================================
     # Accounts Management & Load Balancing
@@ -352,7 +428,9 @@ class PluginManager:
         key.last_used_at = time.time()
         if key.max_requests is not None and key.total_requests >= key.max_requests:
             key.enabled = False
-        self._save_api_keys()
+            self._save_api_keys()
+        else:
+            self._schedule_api_keys_save()
 
     # ==========================================
     # Custom Load Balancing Rules Management
@@ -1116,11 +1194,11 @@ class PluginManager:
         return None
 
     def add_log(self, entry: RequestLogEntry) -> None:
-        """Add a request log entry and persist to disk."""
+        """Add a request log entry and persist to disk (debounced)."""
         self.logs.insert(0, entry)
         if len(self.logs) > 1000:
             self.logs.pop()
-        self._save_logs()
+        self._schedule_logs_save()
 
     def get_logs(self, limit: Optional[int] = None) -> List[RequestLogEntry]:
         """Retrieve recent request logs."""
