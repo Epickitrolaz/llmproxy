@@ -577,7 +577,7 @@ class PluginManager:
         elif strat == "random":
             return random.choice(available)
         elif strat in ("fallback", "priority"):
-            return sorted(available, key=lambda a: (a.priority, a.last_used_at or 0))[0]
+            return sorted(available, key=lambda a: (a.priority, a.id))[0]
         else:
             # Default: round_robin
             idx = self.rr_indices.get(provider_id, 0)

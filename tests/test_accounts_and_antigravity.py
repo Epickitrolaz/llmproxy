@@ -142,6 +142,13 @@ def test_accounts_crud_and_load_balancing():
     priority_pick = plugin_manager.select_account("antigravity", strategy="fallback")
     assert priority_pick.id == acc1.id
 
+    # Repeated calls with fallback must consistently stay on the highest-priority available account
+    # and NOT cycle through accounts after an account is marked with success (last_used_at updated)
+    plugin_manager.mark_account_result(acc1.id, success=True)
+    assert plugin_manager.select_account("antigravity", strategy="fallback").id == acc1.id
+    plugin_manager.mark_account_result(acc1.id, success=True)
+    assert plugin_manager.select_account("antigravity", strategy="fallback").id == acc1.id
+
     # 5. Cooldown / Rate Limit Test
     # Mark acc1 as rate-limited for 60 seconds
     plugin_manager.mark_account_result(acc1.id, success=False, is_rate_limit=True, cooldown_seconds=60)
