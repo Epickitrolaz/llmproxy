@@ -47,6 +47,35 @@ class AnthropicProxyPlugin(BasePlugin):
                     required=False,
                     description="Anthropic API version header",
                 ),
+                PluginVariable(
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
+                    type="string",
+                    default="",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
+                ),
             ],
             models=[
                 PluginModelConfig(
@@ -71,9 +100,11 @@ class AnthropicProxyPlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         variables: dict,
+        account: Optional[Account] = None,
     ) -> ChatCompletionResponse:
-        api_key = variables.get("anthropic_api_key") or ""
+        api_key = (account.api_key if account else None) or variables.get("anthropic_api_key") or ""
         version = variables.get("anthropic_version") or "2023-06-01"
+        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
 
         headers = {
             "x-api-key": api_key,
@@ -99,7 +130,7 @@ class AnthropicProxyPlugin(BasePlugin):
         if system_prompt:
             payload["system"] = system_prompt
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, proxy=proxy) as client:
             resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()

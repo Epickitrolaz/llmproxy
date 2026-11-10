@@ -24,6 +24,9 @@ from llmproxy.schemas import (
     PluginMetadata,
     PluginModelConfig,
     PluginVariable,
+    Proxy,
+    ProxyCreate,
+    ProxyUpdate,
     RequestLogEntry,
 )
 
@@ -47,6 +50,7 @@ class PluginManager:
         self.api_keys_file = self.data_dir / "api_keys.json"
         self.rules_file = self.data_dir / "load_balancing_rules.json"
         self.logs_file = self.data_dir / "request_logs.json"
+        self.proxies_file = self.data_dir / "proxies.json"
 
         self.plugins: Dict[str, BasePlugin] = {}
         self.plugin_files: Dict[str, Path] = {}
@@ -54,8 +58,10 @@ class PluginManager:
         self.accounts: Dict[str, Account] = {}
         self.api_keys: Dict[str, APIKey] = {}
         self.rules: Dict[str, LoadBalancingRule] = {}
+        self.proxies: Dict[str, Proxy] = {}
         self.rr_indices: Dict[str, int] = {}
         self.rule_rr_indices: Dict[str, int] = {}
+        self.proxy_rr_indices: Dict[str, int] = {}
         self.logs: List[RequestLogEntry] = []
 
         self._load_configs()
@@ -63,6 +69,7 @@ class PluginManager:
         self._load_api_keys()
         self._load_rules()
         self._load_logs()
+        self._load_proxies()
 
     def _load_configs(self) -> None:
         """Load persisted plugin configurations from disk."""
@@ -177,6 +184,30 @@ class PluginManager:
         except Exception as e:
             logger.error("Failed to save request logs to %s: %s", self.logs_file, e)
 
+    def _load_proxies(self) -> None:
+        """Load external proxies from disk."""
+        if self.proxies_file.exists():
+            try:
+                data = json.loads(self.proxies_file.read_text(encoding="utf-8"))
+                self.proxies = {
+                    item["id"]: Proxy.model_validate(item)
+                    for item in data
+                }
+            except Exception as e:
+                logger.warning("Failed to load proxies from %s: %s", self.proxies_file, e)
+                self.proxies = {}
+        else:
+            self.proxies = {}
+
+    def _save_proxies(self) -> None:
+        """Persist external proxies to disk."""
+        try:
+            self.proxies_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = [p.model_dump() for p in self.proxies.values()]
+            self.proxies_file.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("Failed to save proxies to %s: %s", self.proxies_file, e)
+
     # ==========================================
     # Accounts Management & Load Balancing
     # ==========================================
@@ -206,6 +237,8 @@ class PluginManager:
                 weight=account_data.weight,
                 enabled=account_data.enabled,
                 pinned=account_data.pinned,
+                proxy_id=account_data.proxy_id,
+                proxy_url=account_data.proxy_url,
                 extra_config=account_data.extra_config,
             )
         else:
@@ -493,6 +526,207 @@ class PluginManager:
             if is_rate_limit:
                 account.rate_limited_until = time.time() + cooldown_seconds
         self._save_accounts()
+
+    # ==========================================
+    # External Proxy Management & Routing
+    # ==========================================
+
+    def get_proxies(self, tag: Optional[str] = None) -> List[Proxy]:
+        """Return all proxies, optionally filtered by tag."""
+        if tag:
+            return [p for p in self.proxies.values() if tag in p.tags]
+        return list(self.proxies.values())
+
+    def get_proxy(self, proxy_id: str) -> Optional[Proxy]:
+        """Retrieve a proxy by ID."""
+        return self.proxies.get(proxy_id)
+
+    def add_proxy(self, proxy_data: Union[Proxy, ProxyCreate, Dict[str, Any]]) -> Proxy:
+        """Add and persist a new external proxy."""
+        if isinstance(proxy_data, Proxy):
+            proxy = proxy_data
+        elif isinstance(proxy_data, ProxyCreate):
+            proxy = Proxy(
+                id=f"proxy_{uuid.uuid4().hex[:8]}",
+                name=proxy_data.name,
+                url=proxy_data.url,
+                enabled=proxy_data.enabled,
+                tags=proxy_data.tags,
+            )
+        else:
+            p_dict = dict(proxy_data)
+            if "id" not in p_dict:
+                p_dict["id"] = f"proxy_{uuid.uuid4().hex[:8]}"
+            proxy = Proxy.model_validate(p_dict)
+
+        self.proxies[proxy.id] = proxy
+        self._save_proxies()
+        return proxy
+
+    def update_proxy(
+        self, proxy_id: str, updates: Union[ProxyUpdate, Dict[str, Any]]
+    ) -> Optional[Proxy]:
+        """Update properties of a proxy."""
+        proxy = self.proxies.get(proxy_id)
+        if not proxy:
+            return None
+
+        upd = updates.model_dump(exclude_unset=True) if isinstance(updates, ProxyUpdate) else updates
+        for k, v in upd.items():
+            if v is not None and hasattr(proxy, k):
+                setattr(proxy, k, v)
+
+        self._save_proxies()
+        return proxy
+
+    def delete_proxy(self, proxy_id: str) -> bool:
+        """Delete a proxy."""
+        if proxy_id in self.proxies:
+            del self.proxies[proxy_id]
+            self._save_proxies()
+            return True
+        return False
+
+    def reset_proxy_cooldown(self, proxy_id: str) -> bool:
+        """Clear rate limit / cooldown status on a proxy."""
+        proxy = self.proxies.get(proxy_id)
+        if not proxy:
+            return False
+        proxy.rate_limited_until = None
+        self._save_proxies()
+        return True
+
+    def mark_proxy_result(
+        self,
+        proxy_id: str,
+        success: bool,
+        is_rate_limit: bool = False,
+        cooldown_seconds: float = 60.0,
+    ) -> None:
+        """Record success or rate-limit result for a proxy."""
+        proxy = self.proxies.get(proxy_id)
+        if not proxy:
+            return
+        if success:
+            proxy.success_count += 1
+            proxy.last_used_at = time.time()
+        else:
+            proxy.error_count += 1
+            if is_rate_limit:
+                proxy.rate_limited_until = time.time() + cooldown_seconds
+        self._save_proxies()
+
+    def select_proxy(
+        self,
+        strategy: str = "sequential",
+        specific_proxy: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        exclude_ids: Optional[Set[str]] = None,
+    ) -> Optional[Proxy]:
+        """
+        Select an active proxy from the pool according to the strategy:
+        - specific: routes to a specific proxy by ID, URL, name, or matching tag
+        - random: randomly selects an available proxy
+        - sequential / round_robin / switch_on_limit: sequentially rotates through available proxies
+        """
+        exclude = exclude_ids or set()
+        candidates = [p for p in self.proxies.values() if p.is_available() and p.id not in exclude]
+
+        # 1. Specific routing
+        if strategy == "specific" or specific_proxy:
+            target = (specific_proxy or "").strip()
+            # Match by ID
+            if target in self.proxies:
+                p = self.proxies[target]
+                if p.is_available() and p.id not in exclude:
+                    return p
+            # Match by URL, name, or tag
+            for p in candidates:
+                if p.url == target or p.name == target or target in p.tags:
+                    return p
+            return None
+
+        if not candidates:
+            return None
+
+        # 2. Random routing
+        if strategy == "random":
+            return random.choice(candidates)
+
+        # 3. Sequential / Round Robin / Switch on limit
+        key = provider_id or "global"
+        curr_idx = self.proxy_rr_indices.get(key, 0)
+        selected = candidates[curr_idx % len(candidates)]
+        self.proxy_rr_indices[key] = (curr_idx + 1) % len(candidates)
+        return selected
+
+    def resolve_request_proxy(
+        self,
+        variables: Dict[str, Any],
+        account: Optional[Account] = None,
+        exclude_proxy_ids: Optional[Set[str]] = None,
+        provider_id: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[Proxy]]:
+        """
+        Resolve the proxy URL and proxy instance for an outgoing request:
+        1. Routing some accounts through a proxy always:
+           If account specifies proxy_url, proxy_id, or extra_config['proxy'], always route through that proxy.
+        2. Provider external proxy routing (off by default):
+           If variables['proxy_enabled'] is True:
+             Selects from proxy pool using proxy_strategy (random, sequential, specific, switch_on_limit).
+           If static variables['proxy'] is provided, use it directly.
+        """
+        # 1. Account-level dedicated proxy (always route this account through proxy)
+        if account:
+            acc_proxy = (
+                getattr(account, "proxy_url", None)
+                or getattr(account, "proxy_id", None)
+                or (account.extra_config.get("proxy") if account.extra_config else None)
+                or (account.extra_config.get("proxy_url") if account.extra_config else None)
+                or (account.extra_config.get("proxy_id") if account.extra_config else None)
+            )
+            if acc_proxy:
+                acc_proxy_str = str(acc_proxy).strip()
+                # Check if it's an ID in self.proxies
+                if acc_proxy_str in self.proxies:
+                    p = self.proxies[acc_proxy_str]
+                    if p.is_available():
+                        return (p.url, p)
+                # Check if it's a tag or name in self.proxies
+                for p in self.proxies.values():
+                    if p.is_available() and (acc_proxy_str in p.tags or p.name == acc_proxy_str):
+                        return (p.url, p)
+                # Direct proxy URL
+                if "://" in acc_proxy_str:
+                    return (acc_proxy_str, None)
+
+        # 2. Provider external proxy configuration (off by default)
+        proxy_enabled = bool(variables.get("proxy_enabled", False))
+        static_proxy = str(variables.get("proxy") or "").strip()
+
+        if not proxy_enabled:
+            # If external proxy routing is off, but a direct static proxy is set on the provider:
+            if static_proxy:
+                return (static_proxy, None)
+            return (None, None)
+
+        # External proxy routing is enabled for this provider
+        strategy = str(variables.get("proxy_strategy") or "sequential").lower().strip()
+        specific_target = str(variables.get("specific_proxy_id") or "").strip()
+
+        p = self.select_proxy(
+            strategy=strategy,
+            specific_proxy=specific_target if (strategy == "specific" or specific_target) else None,
+            provider_id=provider_id,
+            exclude_ids=exclude_proxy_ids,
+        )
+        if p:
+            return (p.url, p)
+
+        if static_proxy:
+            return (static_proxy, None)
+
+        return (None, None)
 
     def discover_and_load_all(self) -> None:
         """Scan plugins_dir and load all valid python plugin files."""

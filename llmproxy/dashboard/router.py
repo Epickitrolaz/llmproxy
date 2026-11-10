@@ -50,6 +50,9 @@ from llmproxy.schemas import (
     PluginMetadata,
     PluginModelConfig,
     PluginSourceUpdate,
+    Proxy,
+    ProxyCreate,
+    ProxyUpdate,
     RequestLogEntry,
 )
 
@@ -692,6 +695,87 @@ async def toggle_account_pin(account_id: str):
     account.pinned = new_pinned
     plugin_manager._save_accounts()
     return {"status": "ok", "pinned": new_pinned, "account_id": account_id}
+
+
+# =========================================================================
+# External Proxy Management Endpoints
+# =========================================================================
+
+@router.get("/proxies", response_model=List[Proxy])
+async def list_proxies(tag: Optional[str] = Query(default=None)):
+    """List all external proxies in the proxy pool, optionally filtered by tag."""
+    return plugin_manager.get_proxies(tag=tag)
+
+
+@router.post("/proxies", response_model=Proxy)
+async def create_proxy(proxy_in: ProxyCreate):
+    """Add a new external proxy to the pool."""
+    return plugin_manager.add_proxy(proxy_in)
+
+
+@router.get("/proxies/{proxy_id}", response_model=Proxy)
+async def get_proxy_detail(proxy_id: str):
+    """Get details for a specific proxy."""
+    p = plugin_manager.get_proxy(proxy_id)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Proxy '{proxy_id}' not found")
+    return p
+
+
+@router.put("/proxies/{proxy_id}", response_model=Proxy)
+async def update_proxy_endpoint(proxy_id: str, updates: ProxyUpdate):
+    """Update properties of an existing proxy."""
+    p = plugin_manager.update_proxy(proxy_id, updates)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Proxy '{proxy_id}' not found")
+    return p
+
+
+@router.delete("/proxies/{proxy_id}")
+async def delete_proxy_endpoint(proxy_id: str):
+    """Delete a proxy from the pool."""
+    success = plugin_manager.delete_proxy(proxy_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Proxy '{proxy_id}' not found")
+    return {"status": "ok", "message": f"Proxy '{proxy_id}' deleted successfully"}
+
+
+@router.post("/proxies/{proxy_id}/reset-cooldown")
+async def reset_proxy_cooldown_endpoint(proxy_id: str):
+    """Reset rate limit status / cooldown on a proxy."""
+    success = plugin_manager.reset_proxy_cooldown(proxy_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Proxy '{proxy_id}' not found")
+    p = plugin_manager.get_proxy(proxy_id)
+    return {"status": "ok", "message": f"Cooldown reset for proxy '{proxy_id}'", "proxy": p}
+
+
+class ProxyTestRequest(BaseModel):
+    url: str
+    target_url: Optional[str] = "https://httpbin.org/ip"
+
+
+@router.post("/proxies/test")
+async def test_proxy_connectivity(req: ProxyTestRequest):
+    """Test connectivity through an external proxy URL."""
+    start_t = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(proxy=req.url, timeout=10.0) as client:
+            resp = await client.get(req.target_url or "https://httpbin.org/ip")
+            latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
+            return {
+                "status": "ok",
+                "status_code": resp.status_code,
+                "latency_ms": latency_ms,
+                "response": resp.text[:200],
+            }
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
+        return {
+            "status": "error",
+            "error": str(exc),
+            "latency_ms": latency_ms,
+        }
 
 
 class AntigravityCallbackRequest(BaseModel):

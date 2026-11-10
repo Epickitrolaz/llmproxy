@@ -125,6 +125,35 @@ class CodexPlugin(BasePlugin):
                     options=["ultra", "max", "xhigh", "high", "medium", "low", "none", "default"],
                     description="Default reasoning effort for supported Codex models",
                 ),
+                PluginVariable(
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
+                    type="string",
+                    default="",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
+                ),
             ],
             models=[
                 PluginModelConfig(
@@ -675,6 +704,7 @@ class CodexPlugin(BasePlugin):
         target_model: str,
         timeout: float,
         account: Optional[Account],
+        proxy: Optional[str] = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Streams real upstream response chunks over SSE directly matching Codex CLI wire protocol."""
         chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
@@ -689,7 +719,7 @@ class CodexPlugin(BasePlugin):
             choices=[ChatChoiceDelta(index=0, delta={"role": "assistant", "content": ""})],
         )
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async def get_stream():
                 async with client.stream("POST", url, headers=headers, json=payload) as stream_resp:
                     # Token refresh retry on 401
@@ -822,6 +852,7 @@ class CodexPlugin(BasePlugin):
         target_model: str,
         timeout: float,
         account: Optional[Account],
+        proxy: Optional[str] = None,
     ) -> ChatCompletionResponse:
         """Executes non-streaming request against upstream Responses API and returns assembled ChatCompletionResponse."""
         chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
@@ -830,7 +861,7 @@ class CodexPlugin(BasePlugin):
         tool_calls_map: Dict[str, Dict[str, Any]] = {}
         usage = CompletionUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async def get_stream():
                 async with client.stream("POST", url, headers=headers, json=payload) as stream_resp:
                     # Token refresh retry on 401
@@ -981,6 +1012,8 @@ class CodexPlugin(BasePlugin):
             request, model_config, account, variables
         )
 
+        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
+
         if request.stream:
             return self._execute_upstream_streaming(
                 url=url,
@@ -989,6 +1022,7 @@ class CodexPlugin(BasePlugin):
                 target_model=target_model,
                 timeout=timeout,
                 account=account,
+                proxy=proxy,
             )
 
         return await self._execute_upstream_non_streaming(
@@ -998,6 +1032,7 @@ class CodexPlugin(BasePlugin):
             target_model=target_model,
             timeout=timeout,
             account=account,
+            proxy=proxy,
         )
 
 

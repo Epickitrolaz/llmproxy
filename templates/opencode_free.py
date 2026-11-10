@@ -243,11 +243,33 @@ class OpenCodeFreePlugin(BasePlugin):
                     description="OpenCode Zen inference base URL",
                 ),
                 PluginVariable(
-                    name="proxy",
-                    label="Outbound Proxy URL",
+                    name="proxy_enabled",
+                    label="Enable External Proxy",
+                    type="boolean",
+                    default=False,
+                    description="Route provider requests through external proxies (off by default)",
+                ),
+                PluginVariable(
+                    name="proxy_strategy",
+                    label="Proxy Strategy",
+                    type="select",
+                    default="sequential",
+                    options=["sequential", "random", "specific", "switch_on_limit"],
+                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                ),
+                PluginVariable(
+                    name="specific_proxy_id",
+                    label="Specific Proxy ID / Tag",
                     type="string",
                     default="",
-                    description="Optional HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080 or socks5://proxy:1080) for routing requests through external IPs",
+                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                ),
+                PluginVariable(
+                    name="proxy",
+                    label="Direct Proxy URL",
+                    type="string",
+                    default="",
+                    description="Direct HTTP or SOCKS5 proxy URL to route through",
                 ),
                 PluginVariable(
                     name="timeout",
@@ -283,7 +305,7 @@ class OpenCodeFreePlugin(BasePlugin):
         """Validate operational variables. OpenCode free tier requires zero credentials."""
         errors: List[str] = []
         timeout = variables.get("timeout")
-        if timeout is not None:
+        if timeout not in (None, ""):
             try:
                 if float(timeout) <= 0:
                     errors.append("Timeout must be a positive number.")
@@ -478,15 +500,27 @@ class OpenCodeFreePlugin(BasePlugin):
         variables: Dict[str, Any],
         target_model: str,
     ) -> ChatCompletionResponse:
-        """Execute non-streaming POST /chat/completions with retry, proxy, and limit bypass support."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
-        max_retries = int(variables.get("max_retries") or 2)
+        """Execute non-streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
+        proxy_raw = str(variables.get("proxy") or "").strip()
+        proxy = proxy_raw.split("#")[0].rstrip("/") if ("workers.dev" in proxy_raw or "relay" in proxy_raw) else proxy_raw
+        is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if proxy and not is_relay:
+            client_kwargs["proxy"] = proxy
+
+        url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
+        retries_val = variables.get("max_retries")
+        try:
+            max_retries = int(retries_val) if retries_val not in (None, "") else 2
+        except (ValueError, TypeError):
+            max_retries = 2
         bypass_enabled = self._is_limit_bypass_active(variables)
-        client_kwargs = self._get_client_kwargs(timeout, variables)
 
         for attempt in range(max_retries + 1):
             session_id, project_id = self._get_or_rotate_session(rotate=False)
             headers = self._build_upstream_headers(session_id, project_id)
+            if is_relay:
+                headers["x-relay-target"] = f"{base_url.rstrip('/')}/chat/completions"
 
             try:
                 async with httpx.AsyncClient(**client_kwargs) as client:
@@ -517,6 +551,23 @@ class OpenCodeFreePlugin(BasePlugin):
                     data.setdefault("id", f"chatcmpl-oc-{uuid.uuid4().hex[:12]}")
                     return ChatCompletionResponse.model_validate(data)
 
+            except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as conn_err:
+                logger.warning(
+                    "Proxy/connection failed (%s). Attempt %d/%d...",
+                    conn_err,
+                    attempt + 1,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    if "proxy" in client_kwargs:
+                        client_kwargs.pop("proxy", None)
+                    if is_relay:
+                        url = f"{base_url.rstrip('/')}/chat/completions"
+                        is_relay = False
+                    await asyncio.sleep(0.2)
+                    continue
+                raise
+
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and bypass_enabled and attempt < max_retries:
                     self._get_or_rotate_session(rotate=True)
@@ -534,16 +585,29 @@ class OpenCodeFreePlugin(BasePlugin):
         variables: Dict[str, Any],
         target_model: str,
     ) -> AsyncIterator[ChatCompletionChunk]:
-        """Execute streaming POST /chat/completions with retry, proxy, and limit bypass support."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        """Execute streaming POST /chat/completions with retry, proxy/relay, and limit bypass support."""
+        proxy_raw = str(variables.get("proxy") or "").strip()
+        proxy = proxy_raw.split("#")[0].rstrip("/") if ("workers.dev" in proxy_raw or "relay" in proxy_raw) else proxy_raw
+        is_relay = bool(proxy and ("workers.dev" in proxy or "relay" in proxy))
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if proxy and not is_relay:
+            client_kwargs["proxy"] = proxy
+
+        url = proxy.rstrip("/") if is_relay else f"{base_url.rstrip('/')}/chat/completions"
         bypass_enabled = self._is_limit_bypass_active(variables)
-        max_retries = int(variables.get("max_retries") or 2)
-        client_kwargs = self._get_client_kwargs(timeout, variables)
+        retries_val = variables.get("max_retries")
+        try:
+            max_retries = int(retries_val) if retries_val not in (None, "") else 2
+        except (ValueError, TypeError):
+            max_retries = 2
 
         async def sse_generator() -> AsyncIterator[ChatCompletionChunk]:
+            nonlocal is_relay, url
             for attempt in range(max_retries + 1):
                 session_id, project_id = self._get_or_rotate_session(rotate=False)
                 headers = self._build_upstream_headers(session_id, project_id)
+                if is_relay:
+                    headers["x-relay-target"] = f"{base_url.rstrip('/')}/chat/completions"
 
                 try:
                     async with httpx.AsyncClient(**client_kwargs) as client:
@@ -594,6 +658,23 @@ class OpenCodeFreePlugin(BasePlugin):
                                         continue
                             return
 
+                except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as conn_err:
+                    logger.warning(
+                        "Streaming proxy/connection failed (%s). Attempt %d/%d...",
+                        conn_err,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    if attempt < max_retries:
+                        if "proxy" in client_kwargs:
+                            client_kwargs.pop("proxy", None)
+                        if is_relay:
+                            url = f"{base_url.rstrip('/')}/chat/completions"
+                            is_relay = False
+                        await asyncio.sleep(0.2)
+                        continue
+                    raise
+
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 429 and bypass_enabled and attempt < max_retries:
                         self._get_or_rotate_session(rotate=True)
@@ -619,12 +700,17 @@ class OpenCodeFreePlugin(BasePlugin):
         Directly executes upstream without requiring an account or API key.
         """
         start_t = time.perf_counter()
+        base_url_val = variables.get("base_url")
         base_url = (
             account.base_url
             if (account and account.base_url)
-            else str(variables.get("base_url") or DEFAULT_BASE_URL)
+            else (str(base_url_val).strip() if base_url_val else DEFAULT_BASE_URL)
         ).rstrip("/")
-        timeout = float(variables.get("timeout") or 60.0)
+        timeout_val = variables.get("timeout")
+        try:
+            timeout = float(timeout_val) if timeout_val not in (None, "") else 60.0
+        except (ValueError, TypeError):
+            timeout = 60.0
 
         # Simulation mode when test key is provided
         api_key = account.api_key if account else str(variables.get("api_key") or "")
