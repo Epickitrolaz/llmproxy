@@ -300,6 +300,7 @@ class AntigravityPlugin(BasePlugin):
                     label="Timeout (seconds)",
                     type="number",
                     default=60,
+                    value=60,
                     required=True,
                     description="Request timeout in seconds",
                 ),

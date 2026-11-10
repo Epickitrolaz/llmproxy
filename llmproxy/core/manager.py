@@ -127,6 +127,10 @@ class PluginManager:
 
     def _save_configs(self) -> None:
         """Persist current plugin configurations to disk."""
+        for plugin_id, cfg in self.configs.items():
+            models = self.get_plugin_models(plugin_id)
+            if models:
+                cfg["models"] = [m.model_dump() for m in models]
         self._atomic_write(self.config_file, json.dumps(self.configs, indent=2))
 
     def _load_accounts(self) -> None:
@@ -143,6 +147,11 @@ class PluginManager:
                 self.accounts = {}
         else:
             self.accounts = {}
+
+        # Ensure unique priorities across all loaded providers
+        providers = {a.provider_id for a in self.accounts.values()}
+        for p_id in providers:
+            self._ensure_unique_priorities(p_id)
 
     def _save_accounts(self) -> None:
         """Persist accounts to disk."""
@@ -322,6 +331,34 @@ class PluginManager:
         """Retrieve an account by ID."""
         return self.accounts.get(account_id)
 
+    def _ensure_unique_priorities(self, provider_id: str, preferred_account_id: Optional[str] = None) -> None:
+        """Ensure no two accounts for the same provider share the same priority.
+        If duplicates exist, reassign them sequentially starting from priority 1 or adjust automatically."""
+        provider_accounts = [a for a in self.accounts.values() if a.provider_id == provider_id]
+        if len(provider_accounts) <= 1:
+            return
+
+        def sort_key(a: Account):
+            is_pref = 0 if (preferred_account_id and a.id == preferred_account_id) else 1
+            return (a.priority, is_pref, a.id)
+
+        sorted_accs = sorted(provider_accounts, key=sort_key)
+        used_priorities = set()
+        changed = False
+
+        for acc in sorted_accs:
+            if acc.priority in used_priorities or acc.priority < 1:
+                # Find lowest unused positive integer priority >= 1
+                new_p = 1
+                while new_p in used_priorities:
+                    new_p += 1
+                acc.priority = new_p
+                changed = True
+            used_priorities.add(acc.priority)
+
+        if changed:
+            self._save_accounts()
+
     def add_account(self, account_data: Union[Account, AccountCreate, Dict[str, Any]]) -> Account:
         """Add a new connected account."""
         if isinstance(account_data, Account):
@@ -348,6 +385,7 @@ class PluginManager:
             account = Account.model_validate(acc_dict)
 
         self.accounts[account.id] = account
+        self._ensure_unique_priorities(account.provider_id, preferred_account_id=account.id)
         self._save_accounts()
         return account
 
@@ -556,6 +594,9 @@ class PluginManager:
             if v is not None and hasattr(account, k):
                 setattr(account, k, v)
 
+        if "priority" in upd:
+            self._ensure_unique_priorities(account.provider_id, preferred_account_id=account.id)
+
         self._save_accounts()
         return account
 
@@ -577,7 +618,10 @@ class PluginManager:
         return True
 
     def select_account(
-        self, provider_id: str, strategy: Optional[str] = None
+        self,
+        provider_id: str,
+        strategy: Optional[str] = None,
+        exclude_account_ids: Optional[Set[str]] = None,
     ) -> Optional[Account]:
         """
         Select an available account based on load balancing strategy:
@@ -590,7 +634,8 @@ class PluginManager:
         if not all_accounts:
             return None
 
-        available = [a for a in all_accounts if a.is_available()]
+        exclude = exclude_account_ids or set()
+        available = [a for a in all_accounts if a.is_available() and a.id not in exclude]
         if not available:
             return None
 
@@ -910,12 +955,16 @@ class PluginManager:
         self.plugins[plugin_id] = plugin_instance
         self.plugin_files[plugin_id] = file_path
 
+        # Preserve original default models from the plugin code
+        if not hasattr(plugin_instance, "_default_models"):
+            setattr(plugin_instance, "_default_models", [m.model_copy() for m in plugin_instance.metadata.models])
+
         # Initialize config entry if missing
         if plugin_id not in self.configs:
             default_vars = {
                 v.name: v.default
                 for v in plugin_instance.metadata.variables
-                if v.default is not None
+                if v.default is not None and v.default != ""
             }
             self.configs[plugin_id] = {
                 "enabled": plugin_instance.metadata.enabled,
@@ -932,6 +981,16 @@ class PluginManager:
             cfg.setdefault("custom_models", [])
             cfg.setdefault("edited_models", {})
             cfg.setdefault("deleted_models", [])
+            for v in plugin_instance.metadata.variables:
+                if v.default is not None and v.default != "":
+                    if v.name not in cfg["variables"] or cfg["variables"][v.name] == "" or cfg["variables"][v.name] is None:
+                        cfg["variables"][v.name] = v.default
+
+        # Synchronize metadata with persisted configuration
+        cfg = self.configs[plugin_id]
+        plugin_instance.metadata.enabled = cfg.get("enabled", plugin_instance.metadata.enabled)
+        if "pinned" in cfg:
+            plugin_instance.metadata.pinned = cfg["pinned"]
 
         return plugin_instance
 
@@ -961,13 +1020,28 @@ class PluginManager:
 
         cfg = self.configs.get(plugin_id, {})
         deleted = set(cfg.get("deleted_models", []))
-        edited = cfg.get("edited_models", {})
-        custom = cfg.get("custom_models", [])
+        edited = dict(cfg.get("edited_models", {}))
+        custom = list(cfg.get("custom_models", []))
+
+        # If cfg has a direct "models" list (from dashboard persist) and deleted_models/edited_models was empty,
+        # reconstruct deleted and edited models from it!
+        if "models" in cfg and isinstance(cfg["models"], list) and not deleted and not edited and not custom:
+            persisted_models = [PluginModelConfig.model_validate(m) for m in cfg["models"]]
+            persisted_ids = {m.id for m in persisted_models}
+            default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+            for default_m in default_models:
+                if default_m.id not in persisted_ids:
+                    deleted.add(default_m.id)
+            for m in persisted_models:
+                edited[m.id] = m.model_dump()
+            cfg["deleted_models"] = list(deleted)
+            cfg["edited_models"] = edited
 
         result: List[PluginModelConfig] = []
         seen_ids = set()
 
-        for default_m in plugin.metadata.models:
+        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+        for default_m in default_models:
             if default_m.id in deleted:
                 continue
             if default_m.id in edited:
@@ -979,7 +1053,7 @@ class PluginManager:
 
         for c in custom:
             model_obj = PluginModelConfig.model_validate(c)
-            if model_obj.id not in seen_ids:
+            if model_obj.id not in seen_ids and model_obj.id not in deleted:
                 result.append(model_obj)
                 seen_ids.add(model_obj.id)
 

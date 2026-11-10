@@ -488,6 +488,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     current_account = account
     last_exception: Optional[Exception] = None
     excluded_proxies: Set[str] = set()
+    excluded_accounts: Set[str] = set()
 
     for attempt in range(max_retries):
         # Resolve proxy for current attempt
@@ -571,6 +572,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     is_rate_limit=is_rate_limit,
                     cooldown_seconds=cooldown_sec,
                 )
+                excluded_accounts.add(current_account.id)
 
             # Try to failover to next proxy or next account if retries remain
             if attempt < max_retries - 1:
@@ -591,7 +593,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 if accounts:
                     if switch_wait > 0:
                         await asyncio.sleep(switch_wait)
-                    next_acc = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
+                    next_acc = plugin_manager.select_account(
+                        plugin.metadata.id,
+                        strategy=strategy,
+                        exclude_account_ids=excluded_accounts,
+                    )
+                    if not next_acc:
+                        next_acc = plugin_manager.select_account(plugin.metadata.id, strategy=strategy)
                     if next_acc and next_acc.id != current_account.id:
                         current_account = next_acc
                         continue
