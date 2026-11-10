@@ -1,3 +1,4 @@
+import json
 import time
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from llmproxy.schemas import (
     ChatCompletionRequest,
     LoadBalancingRuleCreate,
     PluginModelConfig,
+    RequestLogEntry,
 )
 from plugins.codex import CodexPlugin
 from plugins.antigravity import AntigravityPlugin
@@ -271,3 +273,34 @@ def test_antigravity_reasoning_levels():
     actual_model, level, enabled = agy._parse_reasoning_level(req_claude_high, claude_cfg, {})
     assert actual_model == "claude-opus-4-6-thinking"
     assert enabled is True
+
+
+def test_write_optimization_and_debouncing():
+    """Verify that multiple add_log and record_api_key_usage calls debounce disk writes."""
+    import unittest.mock
+
+    with unittest.mock.patch.object(plugin_manager, "_atomic_write", wraps=plugin_manager._atomic_write) as mock_write:
+        # Initial call count
+        initial_writes = mock_write.call_count
+
+        # Multiple add_log calls in rapid succession
+        for i in range(10):
+            plugin_manager.add_log(
+                RequestLogEntry(
+                    id=f"perf-log-{i}",
+                    model="gpt-4o",
+                    status="success",
+                    status_code=200,
+                )
+            )
+
+        # No immediate atomic disk writes occurred because writes are debounced
+        assert mock_write.call_count == initial_writes
+
+        # Flush persists immediately
+        plugin_manager.flush()
+        assert mock_write.call_count > initial_writes
+
+        # Read back from disk to verify integrity
+        content = json.loads(plugin_manager.logs_file.read_text(encoding="utf-8"))
+        assert any(item["id"] == "perf-log-9" for item in content)

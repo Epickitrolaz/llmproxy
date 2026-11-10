@@ -131,6 +131,7 @@ def test_logs_persistence_across_restarts(tmp_path):
         completion_tokens=20,
     )
     plugin_manager.add_log(test_entry)
+    plugin_manager.flush()
 
     # Check file exists on disk
     assert plugin_manager.logs_file.exists()
