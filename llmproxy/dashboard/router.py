@@ -1112,10 +1112,11 @@ async def get_stats():
     """Return summary metrics for the router and dashboard."""
     _ensure_plugins_loaded()
     logs = plugin_manager.get_logs(limit=1000)
-    total_requests = len(logs)
+    sample_requests = len(logs)
+    total_requests = plugin_manager.get_total_requests()
     success_requests = sum(1 for log in logs if log.status == "success")
     success_rate = (
-        round((success_requests / total_requests) * 100.0, 1) if total_requests > 0 else 100.0
+        round((success_requests / sample_requests) * 100.0, 1) if sample_requests > 0 else 100.0
     )
 
     active_plugins = [p for p in plugin_manager.plugins.values() if p.metadata.enabled]
@@ -1127,8 +1128,8 @@ async def get_stats():
     ) + active_rules_count
 
     avg_latency = (
-        round(sum(log.latency_ms for log in logs) / total_requests, 1)
-        if total_requests > 0
+        round(sum(log.latency_ms for log in logs) / sample_requests, 1)
+        if sample_requests > 0
         else 0.0
     )
 

@@ -67,6 +67,8 @@ class PluginManager:
         self.rule_rr_indices: Dict[str, int] = {}
         self.proxy_rr_indices: Dict[str, int] = {}
         self.logs: List[RequestLogEntry] = []
+        self.stats_file = self.data_dir / "stats.json"
+        self.total_requests_count: int = 0
 
         # Write optimization state
         self._write_lock = threading.Lock()
@@ -83,6 +85,7 @@ class PluginManager:
         self._load_api_keys()
         self._load_rules()
         self._load_logs()
+        self._load_stats()
         self._load_proxies()
 
     def _atomic_write(self, target_file: Path, content: str) -> None:
@@ -226,8 +229,27 @@ class PluginManager:
         else:
             self.logs = []
 
+    def _load_stats(self) -> None:
+        """Load persistent router statistics from disk."""
+        if self.stats_file.exists():
+            try:
+                data = json.loads(self.stats_file.read_text(encoding="utf-8"))
+                self.total_requests_count = int(data.get("total_requests", len(self.logs)))
+            except Exception as e:
+                logger.warning("Failed to load stats from %s: %s", self.stats_file, e)
+                self.total_requests_count = len(self.logs)
+        else:
+            self.total_requests_count = len(self.logs)
+
+    def _save_stats(self) -> None:
+        """Persist stats counter to disk."""
+        self._atomic_write(
+            self.stats_file,
+            json.dumps({"total_requests": self.total_requests_count}, indent=2),
+        )
+
     def _save_logs(self) -> None:
-        """Persist request logs to disk immediately."""
+        """Persist request logs and stats to disk immediately."""
         with self._write_lock:
             self._logs_dirty = False
             if self._logs_timer:
@@ -235,6 +257,7 @@ class PluginManager:
                 self._logs_timer = None
             logs_snapshot = [log.model_dump() for log in self.logs[:1000]]
         self._atomic_write(self.logs_file, json.dumps(logs_snapshot, indent=2))
+        self._save_stats()
 
     def _schedule_logs_save(self) -> None:
         """Debounce request logs persistence to reduce disk write frequency."""
@@ -258,6 +281,7 @@ class PluginManager:
                 self._logs_timer = None
             logs_snapshot = [log.model_dump() for log in self.logs[:1000]]
         self._atomic_write(self.logs_file, json.dumps(logs_snapshot, indent=2))
+        self._save_stats()
 
     def flush(self) -> None:
         """Flush any pending dirty data (logs, usage counters) to disk immediately."""
@@ -1196,6 +1220,7 @@ class PluginManager:
     def add_log(self, entry: RequestLogEntry) -> None:
         """Add a request log entry and persist to disk (debounced)."""
         self.logs.insert(0, entry)
+        self.total_requests_count += 1
         if len(self.logs) > 1000:
             self.logs.pop()
         self._schedule_logs_save()
@@ -1205,6 +1230,10 @@ class PluginManager:
         if limit is not None:
             return self.logs[:limit]
         return list(self.logs)
+
+    def get_total_requests(self) -> int:
+        """Return all-time total requests count past in-memory log cap."""
+        return max(self.total_requests_count, len(self.logs))
 
 
 # Global singleton instance
