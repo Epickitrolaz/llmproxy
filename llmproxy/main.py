@@ -49,10 +49,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Startup: discover plugins
+# Startup & shutdown events
 @app.on_event("startup")
 async def startup_event():
     plugin_manager.discover_and_load_all()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    plugin_manager.flush()
 
 # Try to register API routers if available
 try:
