@@ -27,11 +27,15 @@ def clean_state():
     original_rules = dict(plugin_manager.rules)
     original_accounts = dict(plugin_manager.accounts)
     original_logs = list(plugin_manager.logs)
+    original_req_count = plugin_manager.total_requests_count
 
     plugin_manager.api_keys.clear()
     plugin_manager.rules.clear()
+    plugin_manager.logs.clear()
+    plugin_manager.total_requests_count = 0
     plugin_manager._save_api_keys()
     plugin_manager._save_rules()
+    plugin_manager._save_logs()
 
     yield
 
@@ -39,6 +43,7 @@ def clean_state():
     plugin_manager.rules = original_rules
     plugin_manager.accounts = original_accounts
     plugin_manager.logs = original_logs
+    plugin_manager.total_requests_count = original_req_count
     plugin_manager._save_api_keys()
     plugin_manager._save_rules()
     plugin_manager._save_accounts()

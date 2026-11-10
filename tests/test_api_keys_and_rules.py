@@ -21,11 +21,13 @@ def clean_keys_and_rules():
     original_keys = dict(plugin_manager.api_keys)
     original_rules = dict(plugin_manager.rules)
     original_logs = list(plugin_manager.logs)
+    original_req_count = plugin_manager.total_requests_count
 
     # Clear keys and rules for isolated test run
     plugin_manager.api_keys.clear()
     plugin_manager.rules.clear()
     plugin_manager.logs.clear()
+    plugin_manager.total_requests_count = 0
     plugin_manager._save_api_keys()
     plugin_manager._save_rules()
     plugin_manager._save_logs()
@@ -36,6 +38,7 @@ def clean_keys_and_rules():
     plugin_manager.api_keys = original_keys
     plugin_manager.rules = original_rules
     plugin_manager.logs = original_logs
+    plugin_manager.total_requests_count = original_req_count
     plugin_manager._save_api_keys()
     plugin_manager._save_rules()
     plugin_manager._save_logs()

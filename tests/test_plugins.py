@@ -293,9 +293,10 @@ def test_reload_plugin_nonexistent_and_syntax_error(tmp_path: Path):
 
 
 def test_log_retention_cap():
-    """Verify add_log caps in-memory logs to 1000 entries."""
+    """Verify add_log caps in-memory logs to 1000 entries while keeping total count past 1000."""
     mgr = PluginManager()
     mgr.logs.clear()
+    mgr.total_requests_count = 0
 
     for i in range(1050):
         mgr.add_log(
@@ -308,6 +309,7 @@ def test_log_retention_cap():
         )
 
     assert len(mgr.logs) == 1000
+    assert mgr.get_total_requests() == 1050
     assert mgr.logs[0].id == "log-1049"  # newest first
     assert mgr.logs[-1].id == "log-50"
 
