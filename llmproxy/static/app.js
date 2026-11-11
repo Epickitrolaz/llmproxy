@@ -3137,6 +3137,19 @@ curl -X POST ${baseUrl}/chat/completions \\
   }
 
   // Account Modal
+  // Returns the lowest unused positive priority for a provider's accounts.
+  // `excludeId` lets an edited account keep its own current priority when re-checking.
+  function getNextAvailablePriority(providerId, excludeId = null) {
+    const used = new Set(
+      (state.accounts || [])
+        .filter((a) => a.provider_id === providerId && a.id !== excludeId)
+        .map((a) => parseInt(a.priority, 10) || 1)
+    );
+    let next = 1;
+    while (used.has(next)) next += 1;
+    return next;
+  }
+
   function openAccountModal(account = null, defaultProviderId = null) {
     const idInput = document.getElementById("account-form-id");
     const provSelect = document.getElementById("account-provider-select");
