@@ -389,6 +389,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     # 5. Handle Streaming vs Non-Streaming
     if request.stream:
         async def sse_event_stream() -> AsyncIterator[str]:
+            nonlocal prompt_tokens
             completion_tokens = 0
             log_id = f"chatcmpl-stream-{uuid.uuid4().hex[:12]}"
             current_account = account
@@ -400,11 +401,16 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     if isinstance(chunk, ChatCompletionChunk):
                         if chunk.id:
                             log_id = chunk.id
+                        if chunk.usage:
+                            if chunk.usage.prompt_tokens:
+                                prompt_tokens = chunk.usage.prompt_tokens
+                            if chunk.usage.completion_tokens:
+                                completion_tokens = chunk.usage.completion_tokens
                         for choice in chunk.choices:
                             if choice.delta.get("content"):
-                                completion_tokens += _estimate_tokens(choice.delta["content"])
+                                completion_tokens += _estimate_tokens(choice.delta["content"]) if not chunk.usage else 0
                             if choice.delta.get("tool_calls"):
-                                completion_tokens += _estimate_tokens(choice.delta["tool_calls"])
+                                completion_tokens += _estimate_tokens(choice.delta["tool_calls"]) if not chunk.usage else 0
                         yield f"data: {chunk.model_dump_json()}\n\n"
                     elif isinstance(chunk, str):
                         yield f"data: {chunk}\n\n"

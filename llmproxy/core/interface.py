@@ -52,3 +52,11 @@ class BasePlugin(ABC):
             if var.required and not variables.get(var.name):
                 errors.append(f"Variable '{var.name}' ({var.label}) is required.")
         return errors
+
+    def get_usage(self, account: Optional[Account] = None, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Expose provider usage information when available. Templates may override this."""
+        return None
+
+    async def fetch_usage(self, account: Optional[Account] = None, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Async variant of get_usage for providers that need network calls."""
+        return self.get_usage(account=account, variables=variables)
