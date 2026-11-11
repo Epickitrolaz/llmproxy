@@ -2469,33 +2469,27 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (fetchFreshQuota || !state.cachedQuotaData) {
       if (!state.cachedQuotaData) state.cachedQuotaData = {};
 
-      const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
-      if (antigravityAccounts.length > 0) {
-        try {
-          const agStatusRes = await api("/api/antigravity/status");
-          if (agStatusRes && agStatusRes.accounts) {
-            agStatusRes.accounts.forEach((item) => {
-              if (item.quota) {
-                state.cachedQuotaData[item.account_id] = item.quota;
-              }
-            });
-          }
-        } catch (_) {}
-      }
+      const agPromise = (accountsToDisplay.some((a) => a.provider_id === "antigravity"))
+        ? api("/api/antigravity/status").then((agStatusRes) => {
+            if (agStatusRes && agStatusRes.accounts) {
+              agStatusRes.accounts.forEach((item) => {
+                if (item.quota) state.cachedQuotaData[item.account_id] = item.quota;
+              });
+            }
+          }).catch(() => {})
+        : Promise.resolve();
 
-      const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
-      if (codexAccounts.length > 0) {
-        try {
-          const codexStatusRes = await api("/api/codex/status");
-          if (codexStatusRes && codexStatusRes.accounts) {
-            codexStatusRes.accounts.forEach((item) => {
-              if (item.quota) {
-                state.cachedQuotaData[item.account_id] = item.quota;
-              }
-            });
-          }
-        } catch (_) {}
-      }
+      const codexPromise = (accountsToDisplay.some((a) => a.provider_id === "codex"))
+        ? api("/api/codex/status").then((codexStatusRes) => {
+            if (codexStatusRes && codexStatusRes.accounts) {
+              codexStatusRes.accounts.forEach((item) => {
+                if (item.quota) state.cachedQuotaData[item.account_id] = item.quota;
+              });
+            }
+          }).catch(() => {})
+        : Promise.resolve();
+
+      await Promise.all([agPromise, codexPromise]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
 
@@ -2530,9 +2524,9 @@ curl -X POST ${baseUrl}/chat/completions \\
             let label = "";
 
             if (b.usedPercent !== undefined && b.usedPercent !== null) {
-              // Usage meter (e.g. Codex) - 0% to 100% used
-              pct = Math.min(100, Math.max(0, Math.round(b.usedPercent)));
-              color = pct < 60 ? "#34d399" : pct < 85 ? "#fbbf24" : "#f43f5e";
+              // Usage meter (e.g. Codex) - flipped: 0% means used up
+              pct = Math.min(100, Math.max(0, Math.round(100 - b.usedPercent)));
+              color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
               label = `${pct}%`;
             } else {
               // Remaining quota meter (e.g. Antigravity) - 100% to 0% remaining
@@ -2727,7 +2721,7 @@ curl -X POST ${baseUrl}/chat/completions \\
           if (state.currentTab === "status" || state.currentTab === "logs") {
             fetchStatusData(true);
           }
-        }, 5000);
+        }, 3000);
       } else if (state.autoRefreshInterval) {
         clearInterval(state.autoRefreshInterval);
         state.autoRefreshInterval = null;

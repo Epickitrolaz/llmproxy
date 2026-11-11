@@ -122,7 +122,7 @@ class CodexPlugin(BasePlugin):
                     label="Reasoning Effort",
                     type="select",
                     default="medium",
-                    options=["ultra", "max", "xhigh", "high", "medium", "low", "none", "default"],
+                    options=["none", "low", "medium", "high", "xhigh", "max"],
                     description="Default reasoning effort for supported Codex models",
                 ),
                 PluginVariable(

@@ -409,6 +409,21 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     elif isinstance(chunk, str):
                         yield f"data: {chunk}\n\n"
 
+                include_usage = bool((request.stream_options or {}).get("include_usage"))
+                if include_usage:
+                    usage_chunk = ChatCompletionChunk(
+                        id=log_id,
+                        created=int(time.time()),
+                        model=request.model,
+                        choices=[],
+                        usage=CompletionUsage(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=prompt_tokens + completion_tokens,
+                        ),
+                    )
+                    yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
                 yield "data: [DONE]\n\n"
 
                 latency_ms = round((time.time() - start_time) * 1000, 2)
@@ -607,7 +622,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
 
     # If all attempts failed
     latency_ms = round((time.time() - start_time) * 1000, 2)
-    status_code = 429 if _is_rate_limit_error(last_exception) else 500
+    is_rate_limit = _is_rate_limit_error(last_exception)
+    status_code = 429 if is_rate_limit else 500
     plugin_manager.add_log(
         RequestLogEntry(
             id=f"req-{uuid.uuid4().hex[:12]}",
@@ -622,6 +638,17 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             error_message=str(last_exception),
         )
     )
+    if is_rate_limit:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": {
+                    "message": f"Usage limit reached: {last_exception}",
+                    "type": "rate_limit_error",
+                    "code": "usage_limit_reached",
+                }
+            },
+        )
     raise HTTPException(
         status_code=status_code,
         detail={

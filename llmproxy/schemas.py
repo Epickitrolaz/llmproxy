@@ -44,6 +44,7 @@ class ChatCompletionRequest(BaseModel):
     response_format: Optional[Dict[str, Any]] = None
     reasoning_effort: Optional[str] = None
     extra_body: Optional[Dict[str, Any]] = None
+    stream_options: Optional[Dict[str, Any]] = None
 
 
 class ChatChoice(BaseModel):

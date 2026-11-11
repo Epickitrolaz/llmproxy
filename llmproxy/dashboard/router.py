@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -960,10 +961,9 @@ async def get_antigravity_all_status():
     if not accounts:
         return {"accounts": [], "message": "No Google Antigravity accounts configured"}
 
-    results = []
-    for acc in accounts:
+    async def _fetch_one(acc):
         quota_data = await fetch_antigravity_quota(acc)
-        results.append({
+        return {
             "account_id": acc.id,
             "account_name": acc.name,
             "enabled": acc.enabled,
@@ -971,8 +971,10 @@ async def get_antigravity_all_status():
             "tier": acc.extra_config.get("tier", "free-tier"),
             "rate_limited": not acc.is_available(),
             "quota": quota_data,
-        })
-    return {"accounts": results}
+        }
+
+    results = await asyncio.gather(*[_fetch_one(acc) for acc in accounts])
+    return {"accounts": list(results)}
 
 
 # =========================================================================
@@ -1218,10 +1220,9 @@ async def get_codex_all_status():
     if not accounts:
         return {"accounts": [], "message": "No Codex accounts configured"}
 
-    results = []
-    for acc in accounts:
+    async def _fetch_one(acc):
         status_data = await fetch_codex_status(acc)
-        results.append({
+        return {
             "account_id": acc.id,
             "account_name": acc.name,
             "enabled": acc.enabled,
@@ -1230,8 +1231,10 @@ async def get_codex_all_status():
             "rate_limited": not acc.is_available(),
             "quota": status_data.get("quota"),
             "status": status_data,
-        })
-    return {"accounts": results}
+        }
+
+    results = await asyncio.gather(*[_fetch_one(acc) for acc in accounts])
+    return {"accounts": list(results)}
 
 
 # =========================================================================
