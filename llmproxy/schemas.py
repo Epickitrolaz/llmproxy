@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ==========================================
@@ -74,6 +74,50 @@ class CompletionUsage(BaseModel):
     cache_read_input_tokens: Optional[int] = None
     cache_creation_input_tokens: Optional[int] = None
     prompt_tokens_details: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _normalize_cache_counters(self) -> "CompletionUsage":
+        """Expose cache counters in both OpenAI and Anthropic shapes.
+
+        OpenAI-compatible providers report cached prompt tokens as
+        ``prompt_tokens_details.cached_tokens`` while Anthropic reports
+        ``cache_read_input_tokens``. Normalizing here keeps request logs,
+        dashboard statistics, and API clients consistent for every plugin.
+        """
+        details = self.prompt_tokens_details
+        if not isinstance(details, dict):
+            details = {}
+
+        cached_tokens = details.get("cached_tokens")
+        if cached_tokens is None:
+            cached_tokens = details.get("cache_read_input_tokens")
+
+        if self.cache_read_input_tokens is None:
+            try:
+                if cached_tokens is not None:
+                    self.cache_read_input_tokens = max(0, int(cached_tokens))
+            except (TypeError, ValueError):
+                pass
+        else:
+            try:
+                self.cache_read_input_tokens = max(
+                    0, int(self.cache_read_input_tokens)
+                )
+            except (TypeError, ValueError):
+                self.cache_read_input_tokens = None
+            if self.cache_read_input_tokens is not None:
+                details.setdefault("cached_tokens", self.cache_read_input_tokens)
+
+        if self.cache_creation_input_tokens is None:
+            created_tokens = details.get("cache_creation_input_tokens")
+            if created_tokens is not None:
+                try:
+                    self.cache_creation_input_tokens = max(0, int(created_tokens))
+                except (TypeError, ValueError):
+                    pass
+
+        self.prompt_tokens_details = details or None
+        return self
 
 
 class ChatCompletionResponse(BaseModel):

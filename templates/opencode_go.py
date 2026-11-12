@@ -658,8 +658,12 @@ class OpenCodeGoPlugin(BasePlugin):
         if effort:
             body["reasoning_effort"] = effort
 
-        if request.stream and request.stream_options:
-            body["stream_options"] = request.stream_options
+        if request.stream:
+            # Always request usage so prompt-cache counters reach the request
+            # log. The router strips it again unless the client opted in.
+            stream_options = dict(request.stream_options or {})
+            stream_options["include_usage"] = True
+            body["stream_options"] = stream_options
 
         self._apply_cache_fields(body, request)
         return body

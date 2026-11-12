@@ -369,9 +369,11 @@ class OpenRouterPlugin(BasePlugin):
             body["reasoning"] = {"effort": effort}
 
         if request.stream:
-            stream_options = request.stream_options or {}
-            if stream_options.get("include_usage"):
-                body["stream_options"] = {"include_usage": True}
+            # Always request usage so prompt-cache counters reach the request
+            # log. The router strips it again unless the client opted in.
+            stream_options = dict(request.stream_options or {})
+            stream_options["include_usage"] = True
+            body["stream_options"] = stream_options
 
         self._apply_cache_fields(body, request)
         return body

@@ -150,6 +150,27 @@ For the full contract, field tables, and examples, see
 - When a client needs a reasoning selector (for example OpenCode variants), build
   it from `reasoning_levels` instead of adding duplicate model IDs.
 
+## Provider caching
+
+Every provider plugin must support prompt/context caching whenever the upstream
+offers it, and the cache signal must reach the dashboard.
+
+- Forward the provider's native cache hints (`cache_control` breakpoints,
+  `cachedContent`, `prompt_cache_key` / `prompt_cache_retention`, or
+  session/affinity IDs) from message content and `extra_body`. Never drop them.
+- For streaming, always request upstream usage (for example
+  `stream_options.include_usage`) so cache counters are logged even when the
+  client does not ask for usage. The router forwards usage to the client only
+  when the client opts in.
+- Report cache counters through `CompletionUsage`: OpenAI-style
+  `prompt_tokens_details.cached_tokens` or Anthropic-style
+  `cache_read_input_tokens` / `cache_creation_input_tokens`. The schema
+  normalizes both shapes, and `prompt_tokens` must be the full prompt count
+  including cached tokens (OpenAI semantics).
+- Add a focused test proving the provider's usage reaches `RequestLogEntry` and
+  the dashboard cache statistics. A new provider is not complete until cache
+  hits appear in the dashboard log table and cache hit rate.
+
 ## Where to make changes
 
 | Task | Location |
@@ -231,9 +252,10 @@ Use the `llmproxy-plugin` skill. The short version:
 3. Implement `chat_completion` with non-streaming and streaming paths.
 4. Handle accounts, base URL, credentials, proxy, tools, usage, and errors.
 5. Keep a deterministic simulation mode for tests and offline use.
-6. Add a focused test.
-7. Run the validator and the stable test suite.
-8. Smoke test via the dashboard Playground or `curl`.
+6. Forward cache hints, request streaming usage, and report cache counters.
+7. Add a focused test, including cache telemetry through to the dashboard.
+8. Run the validator and the stable test suite.
+9. Smoke test via the dashboard Playground or `curl`.
 
 ## Definition of done
 
@@ -242,6 +264,8 @@ Use the `llmproxy-plugin` skill. The short version:
 - Focused tests pass; stable suite passes.
 - New behavior is documented in README or the relevant skill/reference when
   user-facing.
+- New or changed providers forward cache hints and surface cache counters in the
+  dashboard log table and cache hit rate.
 - No secrets, tokens, runtime data, or `plugins/` files are committed.
 - Existing API shapes and error codes remain compatible unless intentionally changed.
 - The dashboard still renders and the affected flows still work.

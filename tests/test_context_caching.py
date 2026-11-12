@@ -35,7 +35,7 @@ def test_anthropic_usage_includes_cache_counters():
             "cache_creation_input_tokens": 10,
         }
     )
-    assert usage.prompt_tokens == 120
+    assert usage.prompt_tokens == 220  # 120 input + 90 cache read + 10 cache write
     assert usage.completion_tokens == 30
     assert usage.prompt_tokens_details == {"cached_tokens": 90}
     assert usage.cache_read_input_tokens == 90
@@ -46,10 +46,10 @@ def test_anthropic_usage_includes_cache_counters():
     )
     merged = plugin._build_usage(
         {"output_tokens": 30},
-        default_prompt=120,
+        default_prompt=previous.prompt_tokens,
         previous=previous,
     )
-    assert merged.prompt_tokens == 120
+    assert merged.prompt_tokens == 210  # 120 input + 90 cache read
     assert merged.completion_tokens == 30
     assert merged.prompt_tokens_details == {"cached_tokens": 90}
 
@@ -77,6 +77,7 @@ def test_codex_forwards_prompt_cache_key_and_maps_usage():
     )
     assert usage.prompt_tokens == 200
     assert usage.prompt_tokens_details == {"cached_tokens": 160}
+    assert usage.cache_read_input_tokens == 160
     assert usage.completion_tokens_details == {"reasoning_tokens": 12}
 
 
@@ -180,6 +181,34 @@ def test_openai_compatible_forwards_cache_hints():
     plugin._apply_cache_fields(body, request)
     assert body["prompt_cache_key"] == "openai-cache-key"
     assert body["prompt_cache_retention"] == "24h"
+
+
+def test_openai_compatible_stream_requests_usage(monkeypatch):
+    captured = {}
+
+    def fake_stream(
+        url, headers, body, model_config, request, account=None, proxy=None
+    ):
+        captured["body"] = body
+
+        async def empty():
+            if False:  # pragma: no cover - keeps this an async generator
+                yield None
+
+        return empty()
+
+    plugin = OpenAICompatiblePlugin()
+    monkeypatch.setattr(plugin, "_stream_request", fake_stream)
+    model = PluginModelConfig(
+        id="default-model", name="Default", upstream_model="default-model"
+    )
+    request = ChatCompletionRequest(
+        model="default-model",
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+    )
+    asyncio.run(plugin.chat_completion(request, model, {"api_key": "sk-live-123"}))
+    assert captured["body"]["stream_options"]["include_usage"] is True
 
 
 def test_openai_compatible_request_body_contains_cache_hints(monkeypatch):
@@ -321,6 +350,7 @@ def test_openai_style_usage_details_survive_validation():
         }
     )
     assert response.usage.prompt_tokens_details == {"cached_tokens": 40}
+    assert response.usage.cache_read_input_tokens == 40
 
 
 def test_mock_provider_reports_simulated_cache_hits():
@@ -344,3 +374,4 @@ def test_mock_provider_reports_simulated_cache_hits():
     response = asyncio.run(plugin.chat_completion(request, model, {}))
     assert "Context cache" in response.choices[0].message.content
     assert response.usage.prompt_tokens_details["cached_tokens"] > 0
+    assert response.usage.cache_read_input_tokens > 0
