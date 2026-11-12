@@ -147,6 +147,27 @@ docker run -d --name llmproxy -p 8000:8000 -v $(pwd)/plugins:/app/plugins -v $(p
 - **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
 - **OpenAI API Base**: `http://localhost:8000/v1`
 
+### Dashboard Security
+
+Every `/api/*` dashboard route requires an admin token. The dashboard asks for
+it once and stores it in the browser's local storage.
+
+- Set `LLMPROXY_ADMIN_TOKEN` to a strong secret when the dashboard is reachable
+  from anything other than the local machine. This is required for non-loopback
+  clients: without it, remote `/api` requests are rejected even if a token file
+  exists.
+- When the variable is unset, the router generates a token once and writes it to
+  `data/admin_token` (mode `0600`). Local requests can use that value.
+- Credential fields in `GET /api/accounts` and `GET /api/keys` are masked.
+  Admin-authenticated clients can fetch literal values from
+  `/api/accounts/{id}/reveal` and `/api/keys/{id}/reveal`.
+- CORS is disabled by default. Set `LLMPROXY_CORS_ORIGINS` to a comma-separated
+  allowlist when a separate browser origin must call the API. A wildcard origin
+  is supported but always disables credentials.
+
+`/v1` client authentication is unchanged and remains independent of the
+dashboard admin token.
+
 ---
 
 ## Local Development (Without Docker)

@@ -6,6 +6,15 @@
 (function () {
   "use strict";
 
+  const ADMIN_TOKEN_STORAGE_KEY = "llmproxy_admin_token";
+  let adminToken = "";
+
+  try {
+    adminToken = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "";
+  } catch (_) {
+    adminToken = "";
+  }
+
   // Application State
   const state = {
     currentTab: "overview",
@@ -82,6 +91,11 @@
     headerEndpointDisplay: document.getElementById("header-endpoint-display"),
     copySnippetBtn: document.getElementById("copy-snippet-btn"),
     copyEndpointBtn: document.getElementById("copy-endpoint-btn"),
+    btnAdminLock: document.getElementById("btn-admin-lock"),
+    authGate: document.getElementById("auth-gate"),
+    authTokenInput: document.getElementById("auth-token-input"),
+    authSubmitBtn: document.getElementById("auth-submit-btn"),
+    authError: document.getElementById("auth-error"),
     // Providers
     statProvidersCount: document.getElementById("stat-providers-count"),
     statTotalAccounts: document.getElementById("stat-total-accounts"),
@@ -317,16 +331,66 @@
     }
   }
 
+  // =========================================================================
+  // Admin Authentication
+  // =========================================================================
+
+  function setAdminToken(token) {
+    adminToken = token || "";
+    try {
+      if (adminToken) {
+        localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, adminToken);
+      } else {
+        localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+      }
+    } catch (_) {}
+  }
+
+  function showAuthGate(message = "") {
+    if (el.authGate) el.authGate.hidden = false;
+    if (el.authError) el.authError.textContent = message;
+    if (el.authTokenInput) {
+      el.authTokenInput.value = adminToken;
+      el.authTokenInput.focus();
+    }
+  }
+
+  function hideAuthGate() {
+    if (el.authGate) el.authGate.hidden = true;
+    if (el.authError) el.authError.textContent = "";
+  }
+
+  async function verifyAdminToken(token) {
+    if (!token) return false;
+    try {
+      const res = await fetch("/api/auth/status", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return Boolean(data && data.authenticated);
+    } catch (_) {
+      return false;
+    }
+  }
+
   // API Client
   async function api(path, options = {}) {
     try {
-      const res = await fetch(path, {
-        headers: {
-          "Content-Type": "application/json",
-          ...options.headers,
-        },
-        ...options,
-      });
+      const headers = {
+        "Content-Type": "application/json",
+        ...options.headers,
+      };
+      if (adminToken) {
+        headers.Authorization = `Bearer ${adminToken}`;
+      }
+
+      const res = await fetch(path, { ...options, headers });
+
+      if (res.status === 401) {
+        showAuthGate("Your admin token is missing or no longer valid.");
+        throw new Error("Admin authentication required");
+      }
 
       if (!res.ok) {
         let errorDetail = `HTTP ${res.status}`;
@@ -647,9 +711,9 @@
 
     state.apiKeys.forEach((k) => {
       const tr = document.createElement("tr");
-      const maskedSecret = k.key.length > 14
-        ? `${k.key.slice(0, 7)}...${k.key.slice(-4)}`
-        : k.key;
+      // The API returns a masked secret; copy actions fetch the literal value
+      // through the admin-only reveal endpoint.
+      const maskedSecret = k.key || "";
       const lastUsed = k.last_used_at
         ? new Date(k.last_used_at * 1000).toLocaleString()
         : "Never";
@@ -659,7 +723,7 @@
         <td>
           <div style="display: flex; align-items: center; gap: 6px;">
             <code style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-secondary);">${escapeHtml(maskedSecret)}</code>
-            <button class="btn btn-secondary btn-sm btn-copy-key" data-key="${escapeHtml(k.key)}" style="padding: 2px 6px; font-size: 11px;">Copy</button>
+            <button class="btn btn-secondary btn-sm btn-copy-key" data-id="${k.id}" style="padding: 2px 6px; font-size: 11px;">Copy</button>
           </div>
         </td>
         <td>
@@ -681,11 +745,16 @@
       `;
 
       tr.querySelector(".btn-copy-key").addEventListener("click", async () => {
-        const ok = await copyToClipboard(k.key);
-        if (ok) {
-          showToast("API key copied to clipboard");
-        } else {
-          showToast("Failed to copy API key", "error");
+        try {
+          const revealed = await api(`/api/keys/${k.id}/reveal`);
+          const ok = await copyToClipboard(revealed.key || "");
+          if (ok) {
+            showToast("API key copied to clipboard");
+          } else {
+            showToast("Failed to copy API key", "error");
+          }
+        } catch (err) {
+          showToast(`Failed to reveal API key: ${err.message}`, "error");
         }
       });
 
@@ -807,7 +876,7 @@
     if (!el.snippetCode) return;
     const baseUrl = getDetectedBaseUrl();
     const model = state.selectedSnippetModel || "test-model";
-    const apiKey = state.temporaryApiKey || (state.apiKeys && state.apiKeys.length > 0 ? state.apiKeys[0].key : "sk-proxy-demo");
+    const apiKey = state.temporaryApiKey || "sk-proxy-demo";
 
     if (state.activeSnippetLang === "python") {
       el.snippetCode.textContent = `# Note: Using temporary testing key (expires in 30 min or 10 requests)
@@ -1555,9 +1624,9 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     accounts.forEach((acc) => {
       const tr = document.createElement("tr");
-      const maskedKey = acc.api_key && acc.api_key.length > 12
-        ? `${acc.api_key.slice(0, 6)}...${acc.api_key.slice(-4)}`
-        : (acc.api_key || "OAuth / None");
+      // The API returns a masked or empty credential; keep the display honest
+      // without re-masking an already masked value.
+      const maskedKey = acc.api_key || "OAuth / None";
 
       const inCooldown = acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000;
       const statusBadge = inCooldown
@@ -3487,7 +3556,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       title.textContent = "Edit Provider Account";
       idInput.value = account.id;
       nameInput.value = account.name;
-      keyInput.value = account.api_key || "";
+      keyInput.value = "";
+      keyInput.placeholder = "Leave blank to keep the current credential";
+      keyInput.type = "password";
       baseInput.value = account.base_url || "";
       priorityInput.value = account.priority || 1;
       weightInput.value = account.weight || 1;
@@ -3497,6 +3568,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       idInput.value = "";
       nameInput.value = "";
       keyInput.value = "";
+      keyInput.placeholder = "Enter API key or bearer token";
+      keyInput.type = "password";
       baseInput.value = "";
       const initialProvId = defaultProviderId || (provSelect.value || (state.plugins[0] ? state.plugins[0].id : ""));
       priorityInput.value = getNextAvailablePriority(initialProvId);
@@ -3571,7 +3644,7 @@ curl -X POST ${baseUrl}/chat/completions \\
             weight: parseInt(weightInput.value, 10) || 1,
             enabled: enabledInput.checked,
           };
-          if (provId !== "antigravity" || keyInput.value) {
+          if (keyInput.value) {
             updatePayload.api_key = keyInput.value;
           }
 
@@ -3611,13 +3684,26 @@ curl -X POST ${baseUrl}/chat/completions \\
   // Toggle account key visibility
   const btnToggleKey = document.getElementById("btn-toggle-account-key");
   if (btnToggleKey) {
-    btnToggleKey.addEventListener("click", () => {
+    btnToggleKey.addEventListener("click", async () => {
       const keyInput = document.getElementById("account-api-key");
-      if (keyInput) {
-        const isPass = keyInput.type === "password";
-        keyInput.type = isPass ? "text" : "password";
-        btnToggleKey.textContent = isPass ? "Hide" : "Show";
+      const idInput = document.getElementById("account-form-id");
+      if (!keyInput) return;
+
+      // Editing starts with a blank field so the secret never arrives with
+      // the list response. Reveal it on demand instead.
+      if (idInput && idInput.value && !keyInput.value) {
+        try {
+          const revealed = await api(`/api/accounts/${idInput.value}/reveal`);
+          keyInput.value = revealed.api_key || "";
+        } catch (err) {
+          showToast(`Failed to reveal credential: ${err.message}`, "error");
+          return;
+        }
       }
+
+      const isPass = keyInput.type === "password";
+      keyInput.type = isPass ? "text" : "password";
+      btnToggleKey.textContent = isPass ? "Hide" : "Show";
     });
   }
 
@@ -3665,8 +3751,41 @@ curl -X POST ${baseUrl}/chat/completions \\
     }
   });
 
-  // Global initial boot
-  async function init() {
+  // Admin login gate
+  async function handleAuthSubmit() {
+    const candidate = (el.authTokenInput ? el.authTokenInput.value : "").trim();
+    if (!candidate) {
+      showAuthGate("Enter the admin token to continue.");
+      return;
+    }
+    if (el.authSubmitBtn) el.authSubmitBtn.disabled = true;
+    const valid = await verifyAdminToken(candidate);
+    if (el.authSubmitBtn) el.authSubmitBtn.disabled = false;
+    if (!valid) {
+      showAuthGate("That admin token is not valid.");
+      return;
+    }
+    setAdminToken(candidate);
+    hideAuthGate();
+    await loadDashboard();
+  }
+
+  if (el.authSubmitBtn) {
+    el.authSubmitBtn.addEventListener("click", handleAuthSubmit);
+  }
+  if (el.authTokenInput) {
+    el.authTokenInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleAuthSubmit();
+    });
+  }
+  if (el.btnAdminLock) {
+    el.btnAdminLock.addEventListener("click", () => {
+      setAdminToken("");
+      window.location.reload();
+    });
+  }
+
+  async function loadDashboard() {
     enhanceAllSelects();
     await fetchStats();
     await loadTemplates();
@@ -3678,6 +3797,22 @@ curl -X POST ${baseUrl}/chat/completions \\
     await fetchManagementInfo();
     populateSnippetModels();
     updateSnippet();
+  }
+
+  // Global initial boot
+  async function init() {
+    if (!adminToken) {
+      showAuthGate();
+      return;
+    }
+    const valid = await verifyAdminToken(adminToken);
+    if (!valid) {
+      setAdminToken("");
+      showAuthGate("Enter the admin token to unlock the dashboard.");
+      return;
+    }
+    hideAuthGate();
+    await loadDashboard();
   }
 
   window.addEventListener("DOMContentLoaded", init);

@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,7 @@ from llmproxy.core.codex_oauth import (
     codex_oauth,
 )
 from llmproxy.core.manager import plugin_manager
+from llmproxy.core.security import redact_account, redact_api_key, require_admin
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
     find_plugin_file_path,
@@ -57,7 +58,11 @@ from llmproxy.schemas import (
     RequestLogEntry,
 )
 
-router = APIRouter(prefix="/api", tags=["dashboard"])
+router = APIRouter(
+    prefix="/api",
+    tags=["dashboard"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 class PluginCreateRequest(BaseModel):
@@ -417,11 +422,15 @@ async def toggle_plugin_pin(plugin_id: str):
 
 @router.get("/keys", response_model=List[APIKey])
 async def list_api_keys(include_temporary: bool = False):
-    """List all local API keys and their usage metrics."""
+    """List all local API keys and their usage metrics.
+
+    Secrets are masked. Use ``GET /api/keys/{key_id}/reveal`` when the literal
+    key is needed for a copy action.
+    """
     keys = plugin_manager.get_api_keys()
     if not include_temporary:
         keys = [k for k in keys if not k.is_temporary]
-    return keys
+    return [redact_api_key(key) for key in keys]
 
 
 @router.get("/keys/temporary", response_model=APIKey)
@@ -438,7 +447,16 @@ async def create_api_key(body: APIKeyCreate):
 
 @router.get("/keys/{key_id}", response_model=APIKey)
 async def get_api_key(key_id: str):
-    """Get details and usage for a specific API key."""
+    """Get details and usage for a specific API key (secret masked)."""
+    key = plugin_manager.get_api_key(key_id)
+    if not key:
+        raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
+    return redact_api_key(key)
+
+
+@router.get("/keys/{key_id}/reveal", response_model=APIKey)
+async def reveal_api_key(key_id: str):
+    """Return the literal secret for a key. Requires admin authentication."""
     key = plugin_manager.get_api_key(key_id)
     if not key:
         raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found")
@@ -634,8 +652,13 @@ async def delete_custom_model(plugin_id: str, model_id: str):
 
 @router.get("/accounts", response_model=List[Account])
 async def list_accounts(provider_id: Optional[str] = Query(default=None)):
-    """List connected accounts, optionally filtered by provider_id."""
-    return plugin_manager.get_accounts(provider_id=provider_id)
+    """List connected accounts, optionally filtered by provider_id.
+
+    Credential fields are masked. Use the account reveal endpoint when an
+    edit flow genuinely needs the literal secret.
+    """
+    accounts = plugin_manager.get_accounts(provider_id=provider_id)
+    return [redact_account(account) for account in accounts]
 
 
 @router.post("/accounts", response_model=Account)
@@ -651,7 +674,16 @@ async def create_account(account_in: AccountCreate):
 
 @router.get("/accounts/{account_id}", response_model=Account)
 async def get_account(account_id: str):
-    """Get detail for a specific account."""
+    """Get detail for a specific account (credentials masked)."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    return redact_account(account)
+
+
+@router.get("/accounts/{account_id}/reveal", response_model=Account)
+async def reveal_account(account_id: str):
+    """Return an account with literal credentials. Requires admin authentication."""
     account = plugin_manager.get_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")

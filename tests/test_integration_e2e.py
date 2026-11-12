@@ -10,7 +10,7 @@ from llmproxy.core.manager import plugin_manager
 def e2e_client():
     # Discover real plugins
     plugin_manager.discover_and_load_all()
-    return TestClient(app)
+    return TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
 
 def test_e2e_plugins_and_models_catalog(e2e_client):
