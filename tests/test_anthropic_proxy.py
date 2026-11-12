@@ -103,11 +103,10 @@ def test_variant_model_id_builds_expected_thinking_payload():
         assert payload["model"] == "claude-sonnet-5-5"
         if level == "none":
             assert "thinking" not in payload
+            assert "output_config" not in payload
         else:
-            assert payload["thinking"] == {
-                "type": "enabled",
-                "budget_tokens": plugin._thinking_budget(level, 64000),
-            }
+            assert payload["thinking"] == {"type": "adaptive"}
+            assert payload["output_config"] == {"effort": level}
 
 
 def test_reasoning_variant_parameters_apply_when_request_uses_alias():
@@ -173,6 +172,31 @@ def test_thinking_budget_respects_max_tokens():
     assert plugin._thinking_budget("none", 64000) is None
 
 
+def test_adaptive_thinking_detection_and_legacy_budget_path():
+    plugin = AnthropicProxyPlugin()
+    assert plugin._uses_adaptive_thinking("claude-opus-5-5")
+    assert plugin._uses_adaptive_thinking("claude-sonnet-4-6")
+    assert plugin._uses_adaptive_thinking("claude-fable-5-2")
+    assert not plugin._uses_adaptive_thinking("claude-opus-4-5")
+    assert not plugin._uses_adaptive_thinking("claude-3-5-sonnet-20241022")
+
+    legacy = PluginModelConfig(
+        id="claude-3-5-sonnet",
+        name="Claude 3.5 Sonnet",
+        upstream_model="claude-3-5-sonnet-20241022",
+        max_tokens=8192,
+    )
+    request = ChatCompletionRequest(
+        model="claude-3-5-sonnet",
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=8192,
+        reasoning_effort="high",
+    )
+    payload = plugin._build_payload(request, legacy, {})
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 7168}
+    assert "output_config" not in payload
+
+
 def test_payload_enables_thinking_and_omits_sampling():
     plugin = AnthropicProxyPlugin()
     request = ChatCompletionRequest(
@@ -183,7 +207,8 @@ def test_payload_enables_thinking_and_omits_sampling():
         reasoning_effort="high",
     )
     payload = plugin._build_payload(request, _model(), {"reasoning_effort": "medium"})
-    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "high"}
     assert "temperature" not in payload
     assert "top_p" not in payload
 
@@ -392,7 +417,8 @@ def test_real_anthropic_response_is_translated(monkeypatch):
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["x-api-key"] == "sk-live-123"
-    assert captured["json"]["thinking"]["budget_tokens"] == 16384
+    assert captured["json"]["thinking"] == {"type": "adaptive"}
+    assert captured["json"]["output_config"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
     assert response.usage.total_tokens == 12

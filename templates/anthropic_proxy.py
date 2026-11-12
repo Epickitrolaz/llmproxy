@@ -8,6 +8,7 @@ reporting, and extended thinking controlled by a reasoning effort level.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
@@ -29,8 +30,9 @@ from llmproxy.schemas import (
     PluginVariable,
 )
 
-# Anthropic requires the thinking budget to be at least 1024 tokens and smaller
-# than max_tokens. The values below are deliberately conservative defaults.
+# Claude 4.6 and newer (including the 5.x models below) use adaptive thinking
+# with an ``output_config.effort`` level. Older models require an explicit
+# thinking budget. The values below are deliberately conservative defaults.
 REASONING_BUDGETS: Dict[str, int] = {
     "low": 1024,
     "medium": 4096,
@@ -324,6 +326,33 @@ class AnthropicProxyPlugin(BasePlugin):
         return min(desired, upper_bound)
 
     @staticmethod
+    def _uses_adaptive_thinking(model_name: str) -> bool:
+        """Return True when the model expects adaptive thinking instead of a budget."""
+        name = (model_name or "").lower()
+        family_first = re.search(
+            r"(?:claude-)?(opus|sonnet|haiku|fable|mythos)-(\d{1,2})(?:[.-](\d{1,2}))?(?!\d)",
+            name,
+        )
+        version_first = re.search(
+            r"claude-(\d{1,2})(?:[.-](\d{1,2}))?-(opus|sonnet|haiku|fable|mythos)", name
+        )
+        if family_first:
+            family = family_first.group(1)
+            major = int(family_first.group(2))
+            minor = int(family_first.group(3) or 0)
+        elif version_first:
+            family = version_first.group(3)
+            major = int(version_first.group(1))
+            minor = int(version_first.group(2) or 0)
+        else:
+            return False
+
+        if family in ("fable", "mythos"):
+            return True
+        # Claude 4.6+ and the 5.x family use adaptive thinking with an effort.
+        return major > 4 or (major == 4 and minor >= 6)
+
+    @staticmethod
     def _is_test_mode(api_key: str) -> bool:
         if not api_key:
             return True
@@ -537,7 +566,7 @@ class AnthropicProxyPlugin(BasePlugin):
             or 4096
         )
         max_tokens = int(max_tokens)
-        budget = self._thinking_budget(effort, max_tokens)
+        thinking_active = False
 
         system_blocks, anthropic_messages = self._build_anthropic_messages(request.messages)
         payload: Dict[str, Any] = {
@@ -551,10 +580,19 @@ class AnthropicProxyPlugin(BasePlugin):
             # An array of content blocks is required for system-level cache_control.
             payload["system"] = system_blocks
 
-        if budget is not None:
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            # Anthropic rejects temperature/top_p when extended thinking is active.
-        else:
+        if effort not in ("none", "default", ""):
+            if self._uses_adaptive_thinking(target_model):
+                payload["thinking"] = {"type": "adaptive"}
+                payload["output_config"] = {"effort": effort}
+                thinking_active = True
+            else:
+                budget = self._thinking_budget(effort, max_tokens)
+                if budget is not None:
+                    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    thinking_active = True
+
+        # Anthropic rejects temperature/top_p when extended thinking is active.
+        if not thinking_active:
             if request.temperature is not None and request.temperature != 1.0:
                 payload["temperature"] = request.temperature
             elif request.top_p is not None and request.top_p != 1.0:
@@ -566,7 +604,7 @@ class AnthropicProxyPlugin(BasePlugin):
             tool_choice = self._format_anthropic_tool_choice(request.tool_choice)
             if tool_choice:
                 # Anthropic only supports auto/none tool choice while thinking.
-                if budget is not None and tool_choice.get("type") in ("any", "tool"):
+                if thinking_active and tool_choice.get("type") in ("any", "tool"):
                     tool_choice = {"type": "auto"}
                 payload["tool_choice"] = tool_choice
 

@@ -79,6 +79,8 @@ Messages API and pre-configures **Claude Haiku 5.5**, **Claude Sonnet 5.5**,
 the `reasoning_effort` variable (`none`, `low`, `medium`, `high`, `xhigh`, or
 `max`). A request-level `reasoning_effort` value takes precedence, and
 temperature/top-p are omitted automatically whenever thinking is active.
+Claude 4.6 and newer use adaptive thinking with `output_config.effort`; older
+models fall back to an explicit thinking budget.
 
 Every reasoning level is also exposed as a separate model ID in `GET /v1/models`
 (for example `claude-sonnet-5-5:high` or `claude-fable-5-2:max`), so clients such
