@@ -404,3 +404,127 @@ async def test_simulation_mode_with_test_key():
     assert len(chunks) > 0
     full_text = "".join(c.choices[0].delta.get("content", "") for c in chunks)
     assert "Simulated OpenCode Free response" in full_text
+
+
+def test_reasoning_variable_and_validation():
+    """Verify reasoning effort is a plugin variable with validation."""
+    plugin = OpenCodeFreePlugin()
+    var = next(v for v in plugin.metadata.variables if v.name == "reasoning_effort")
+    assert var.type == "select"
+    assert var.default == "default"
+    assert set(var.options) == {"default", "none", "low", "medium", "high", "xhigh", "max"}
+
+    assert plugin.validate_variables({}) == []
+    assert plugin.validate_variables({"reasoning_effort": "high"}) == []
+    errors = plugin.validate_variables({"reasoning_effort": "extreme"})
+    assert errors and "Reasoning effort must be one of" in errors[0]
+
+
+def test_reasoning_suffix_and_plugin_default_in_payload():
+    """Verify reasoning levels flow into the upstream payload and are stripped from the model."""
+    plugin = OpenCodeFreePlugin()
+    model = PluginModelConfig(
+        id="deepseek-v4.1-flash-free",
+        name="DeepSeek V4.1 Flash Free",
+        upstream_model="deepseek-v4.1-flash-free",
+    )
+
+    # Plugin-level default applies when the request does not specify a level.
+    default_payload = plugin._build_upstream_payload(
+        ChatCompletionRequest(
+            model=model.id,
+            messages=[ChatMessage(role="user", content="hi")],
+        ),
+        model,
+        {"reasoning_effort": "medium"},
+    )
+    assert default_payload["model"] == "deepseek-v4.1-flash-free"
+    assert default_payload["reasoning_effort"] == "medium"
+
+    # Model suffix wins over the plugin default and is removed from the model ID.
+    suffix_payload = plugin._build_upstream_payload(
+        ChatCompletionRequest(
+            model="deepseek-v4.1-flash-free:high",
+            messages=[ChatMessage(role="user", content="hi")],
+        ),
+        model,
+        {"reasoning_effort": "medium"},
+    )
+    assert suffix_payload["model"] == "deepseek-v4.1-flash-free"
+    assert suffix_payload["reasoning_effort"] == "high"
+
+    # Explicit request-level reasoning_effort wins over the suffix.
+    request_payload = plugin._build_upstream_payload(
+        ChatCompletionRequest(
+            model="deepseek-v4.1-flash-free:low",
+            messages=[ChatMessage(role="user", content="hi")],
+            reasoning_effort="max",
+        ),
+        model,
+        {},
+    )
+    assert request_payload["model"] == "deepseek-v4.1-flash-free"
+    assert request_payload["reasoning_effort"] == "max"
+
+    # "none"/"off" disable reasoning explicitly instead of being dropped.
+    off_payload = plugin._build_upstream_payload(
+        ChatCompletionRequest(
+            model=model.id,
+            messages=[ChatMessage(role="user", content="hi")],
+            reasoning_effort="off",
+        ),
+        model,
+    )
+    assert off_payload["reasoning_effort"] == "none"
+
+    # No configured or requested level means no reasoning field is sent.
+    plain_payload = plugin._build_upstream_payload(
+        ChatCompletionRequest(
+            model=model.id,
+            messages=[ChatMessage(role="user", content="hi")],
+        ),
+        model,
+    )
+    assert "reasoning_effort" not in plain_payload
+
+
+@pytest.mark.anyio
+async def test_reasoning_effort_sent_upstream_non_streaming():
+    """Verify the resolved reasoning level reaches the upstream request body."""
+    plugin = OpenCodeFreePlugin()
+    recorded_body = {}
+
+    def mock_handler(request: httpx.Request):
+        recorded_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-reasoning",
+                "object": "chat.completion",
+                "model": "deepseek-v4.1-flash-free",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}}
+                ],
+            },
+        )
+
+    transport = httpx.MockTransport(mock_handler)
+    orig_client = httpx.AsyncClient
+    with patch(
+        "httpx.AsyncClient",
+        side_effect=lambda **kwargs: orig_client(transport=transport, **kwargs),
+    ):
+        req = ChatCompletionRequest(
+            model="deepseek-v4.1-flash-free:high",
+            messages=[ChatMessage(role="user", content="reason")],
+            stream=False,
+        )
+        model_cfg = PluginModelConfig(
+            id="deepseek-v4.1-flash-free",
+            name="DeepSeek Free",
+        )
+        await plugin.chat_completion(req, model_cfg, variables={})
+
+    assert recorded_body["model"] == "deepseek-v4.1-flash-free"
+    assert recorded_body["reasoning_effort"] == "high"
+
