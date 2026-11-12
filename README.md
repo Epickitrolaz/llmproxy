@@ -77,6 +77,11 @@ the `reasoning_effort` variable (`none`, `low`, `medium`, `high`, `xhigh`, or
 `max`). A request-level `reasoning_effort` value takes precedence, and
 temperature/top-p are omitted automatically whenever thinking is active.
 
+Every reasoning level is also exposed as a separate model ID in `GET /v1/models`
+(for example `claude-sonnet-5-5:high` or `claude-fable-5-2:max`), so clients such
+as OpenCode can list and select them without manual configuration. The `:` and
+`-` suffix forms are accepted and stripped before the request reaches Anthropic.
+
 ---
 
 ## Quickstart with Docker

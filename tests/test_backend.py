@@ -44,6 +44,9 @@ def test_models_endpoint_list():
         assert "gpt-4o" in model_ids
         assert "gpt-6-luna" in model_ids
         assert "claude-sonnet-5-5" in model_ids
+        # Anthropic reasoning variants are discoverable through the API.
+        assert "claude-sonnet-5-5:high" in model_ids
+        assert "claude-fable-5-2:max" in model_ids
         assert "nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
         assert "default-model" in model_ids
 
@@ -57,6 +60,11 @@ def test_models_endpoint_get_single():
         assert card["id"] == "gpt-4o"
         assert card["object"] == "model"
         assert card["owned_by"] == "codex"
+
+        # Anthropic reasoning variants are addressable as models too.
+        resp_variant = client.get("/v1/models/claude-sonnet-5-5:high")
+        assert resp_variant.status_code == 200
+        assert resp_variant.json()["owned_by"] == "anthropic_proxy"
 
         # Non-existent model
         resp_404 = client.get("/v1/models/non-existent-model")
