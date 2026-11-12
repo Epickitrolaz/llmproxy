@@ -137,6 +137,19 @@ Rules:
 For the full contract, field tables, and examples, see
 `skills/llmproxy-plugin/SKILL.md` and its `references/` folder.
 
+## Model listings and reasoning levels
+
+- `GET /v1/models` and the dashboard model list expose each model once under its
+  base ID. Do not publish synthetic `<model>:<level>` entries as separate models.
+- Advertise supported reasoning through `reasoning_levels` on
+  `PluginModelConfig` and `ModelCard`. Clients select a level with
+  `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
+- The provider plugin maps the level to its native controls or upstream model ID
+  (see `templates/antigravity.py`). The proxy handles the ID switching; clients
+  never need the internal ID.
+- When a client needs a reasoning selector (for example OpenCode variants), build
+  it from `reasoning_levels` instead of adding duplicate model IDs.
+
 ## Where to make changes
 
 | Task | Location |

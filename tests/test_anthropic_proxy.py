@@ -58,16 +58,11 @@ def test_metadata_preloads_expected_models_and_reasoning_levels():
     for model_id in BASE_MODEL_IDS:
         assert models[model_id].upstream_model == model_id
 
-    # Every reasoning level is exposed as a discoverable model variant.
-    assert len(models) == len(BASE_MODEL_IDS) * (1 + len(REASONING_LEVELS))
+    # Reasoning levels belong to the base model instead of separate model IDs.
+    assert len(models) == len(BASE_MODEL_IDS)
+    assert not any(":" in model_id for model_id in models)
     for model_id in BASE_MODEL_IDS:
-        base_model = models[model_id]
-        for level in REASONING_LEVELS:
-            variant = models[f"{model_id}:{level}"]
-            assert variant.upstream_model == model_id
-            assert variant.context_window == base_model.context_window
-            assert variant.max_tokens == base_model.max_tokens
-            assert variant.parameters == {"reasoning_effort": level}
+        assert models[model_id].reasoning_levels == list(REASONING_LEVELS)
 
     variables = {v.name: v for v in plugin.metadata.variables}
     assert variables["reasoning_effort"].type == "select"
@@ -75,52 +70,37 @@ def test_metadata_preloads_expected_models_and_reasoning_levels():
     assert set(variables["reasoning_effort"].options) == set(REASONING_LEVELS)
 
 
-def test_every_exposed_reasoning_variant_resolves_to_its_level():
+def test_reasoning_suffixes_are_handled_internally():
     plugin = AnthropicProxyPlugin()
-    for model in plugin.metadata.models:
-        if ":" not in model.id:
-            continue
-        base_id, level = model.id.rsplit(":", 1)
+    model = _model("claude-sonnet-5-5")
+    for level in REASONING_LEVELS:
         request = ChatCompletionRequest(
-            model=model.id,
+            model=f"claude-sonnet-5-5:{level}",
             messages=[ChatMessage(role="user", content="hi")],
         )
         target, effort = plugin._resolve_reasoning(request, model, {})
-        assert target == base_id
+        assert target == "claude-sonnet-5-5"
         assert effort == level
 
 
-def test_variant_model_id_builds_expected_thinking_payload():
+def test_base_model_with_effort_builds_expected_thinking_payload():
     plugin = AnthropicProxyPlugin()
+    model = _model("claude-sonnet-5-5")
     for level in REASONING_LEVELS:
-        variant = _model(f"claude-sonnet-5-5:{level}")
         request = ChatCompletionRequest(
-            model=variant.id,
+            model="claude-sonnet-5-5",
             messages=[ChatMessage(role="user", content="hi")],
             max_tokens=64000,
+            reasoning_effort=level,
         )
-        payload = plugin._build_payload(request, variant, {})
+        payload = plugin._build_payload(request, model, {})
         assert payload["model"] == "claude-sonnet-5-5"
         if level == "none":
             assert "thinking" not in payload
+            assert "output_config" not in payload
         else:
-            assert payload["thinking"] == {
-                "type": "enabled",
-                "budget_tokens": plugin._thinking_budget(level, 64000),
-            }
-
-
-def test_reasoning_variant_parameters_apply_when_request_uses_alias():
-    """A load-balancing rule can target a variant while clients send an alias."""
-    plugin = AnthropicProxyPlugin()
-    variant = _model("claude-sonnet-5-5:xhigh")
-    request = ChatCompletionRequest(
-        model="my-claude-rule",
-        messages=[ChatMessage(role="user", content="hi")],
-    )
-    target, effort = plugin._resolve_reasoning(request, variant, {"reasoning_effort": "low"})
-    assert target == "claude-sonnet-5-5"
-    assert effort == "xhigh"
+            assert payload["thinking"] == {"type": "adaptive"}
+            assert payload["output_config"] == {"effort": level}
 
 
 def test_reasoning_resolution_precedence_and_suffixes():
@@ -173,6 +153,31 @@ def test_thinking_budget_respects_max_tokens():
     assert plugin._thinking_budget("none", 64000) is None
 
 
+def test_adaptive_thinking_detection_and_legacy_budget_path():
+    plugin = AnthropicProxyPlugin()
+    assert plugin._uses_adaptive_thinking("claude-opus-5-5")
+    assert plugin._uses_adaptive_thinking("claude-sonnet-4-6")
+    assert plugin._uses_adaptive_thinking("claude-fable-5-2")
+    assert not plugin._uses_adaptive_thinking("claude-opus-4-5")
+    assert not plugin._uses_adaptive_thinking("claude-3-5-sonnet-20241022")
+
+    legacy = PluginModelConfig(
+        id="claude-3-5-sonnet",
+        name="Claude 3.5 Sonnet",
+        upstream_model="claude-3-5-sonnet-20241022",
+        max_tokens=8192,
+    )
+    request = ChatCompletionRequest(
+        model="claude-3-5-sonnet",
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=8192,
+        reasoning_effort="high",
+    )
+    payload = plugin._build_payload(request, legacy, {})
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 7168}
+    assert "output_config" not in payload
+
+
 def test_payload_enables_thinking_and_omits_sampling():
     plugin = AnthropicProxyPlugin()
     request = ChatCompletionRequest(
@@ -183,7 +188,8 @@ def test_payload_enables_thinking_and_omits_sampling():
         reasoning_effort="high",
     )
     payload = plugin._build_payload(request, _model(), {"reasoning_effort": "medium"})
-    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "high"}
     assert "temperature" not in payload
     assert "top_p" not in payload
 
@@ -392,7 +398,8 @@ def test_real_anthropic_response_is_translated(monkeypatch):
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["x-api-key"] == "sk-live-123"
-    assert captured["json"]["thinking"]["budget_tokens"] == 16384
+    assert captured["json"]["thinking"] == {"type": "adaptive"}
+    assert captured["json"]["output_config"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
     assert response.usage.total_tokens == 12

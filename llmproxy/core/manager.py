@@ -154,6 +154,10 @@ class PluginManager:
             models = self.get_plugin_models(plugin_id)
             if models:
                 cfg["models"] = [m.model_dump() for m in models]
+            plugin = self.plugins.get(plugin_id)
+            if plugin:
+                default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+                cfg["default_model_ids"] = [m.id for m in default_models]
         self._atomic_write(self.config_file, json.dumps(self.configs, indent=2))
 
     def _load_accounts(self) -> None:
@@ -1117,6 +1121,52 @@ class PluginManager:
         """Retrieve a loaded plugin by ID."""
         return self.plugins.get(plugin_id)
 
+    @staticmethod
+    def _repair_legacy_model_snapshot(
+        cfg: Dict[str, Any], default_models: List[PluginModelConfig]
+    ) -> bool:
+        """Undo model deletions that older snapshots generated for newly added defaults.
+
+        Older releases reconstructed ``deleted_models`` and ``edited_models`` from the
+        persisted ``models`` snapshot whenever both were empty. After a template added
+        models (for example reasoning variants), the next reconstruction marked every
+        new default as deleted, hiding it permanently. Detect that exact generated
+        state once and clear it. The snapshot then rebuilds without deleting defaults,
+        and ``default_model_ids`` prevents a repeat after the next save.
+        """
+        snapshot = cfg.get("models")
+        if not isinstance(snapshot, list) or not snapshot:
+            return False
+        if cfg.get("default_model_ids") or cfg.get("custom_models"):
+            return False
+
+        try:
+            persisted_models = [PluginModelConfig.model_validate(m) for m in snapshot]
+        except Exception:
+            return False
+
+        persisted_ids = {m.id for m in persisted_models}
+        default_by_id = {m.id: m.model_dump() for m in default_models}
+        deleted = set(cfg.get("deleted_models") or [])
+        edited = dict(cfg.get("edited_models") or {})
+
+        # The old reconstruction copied every persisted model into edited_models and
+        # marked every current default missing from the snapshot as deleted.
+        if set(edited) != persisted_ids:
+            return False
+        if deleted != set(default_by_id) - persisted_ids:
+            return False
+        if any(edited.get(m.id) != m.model_dump() for m in persisted_models):
+            return False
+        # A genuine user deletion or edit leaves values that differ from the plugin
+        # defaults. Only repair snapshots that still match the current defaults.
+        if any(default_by_id.get(m.id) != m.model_dump() for m in persisted_models):
+            return False
+
+        cfg["deleted_models"] = []
+        cfg["edited_models"] = {}
+        return True
+
     def get_plugin_models(self, plugin_id: str) -> List[PluginModelConfig]:
         """Retrieve configured models for a plugin (defaults - deleted + edited + custom)."""
         plugin = self.plugins.get(plugin_id)
@@ -1124,33 +1174,54 @@ class PluginManager:
             return []
 
         cfg = self.configs.get(plugin_id, {})
+        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+        repaired = self._repair_legacy_model_snapshot(cfg, default_models)
+
         deleted = set(cfg.get("deleted_models", []))
         edited = dict(cfg.get("edited_models", {}))
         custom = list(cfg.get("custom_models", []))
 
         # If cfg has a direct "models" list (from dashboard persist) and deleted_models/edited_models was empty,
-        # reconstruct deleted and edited models from it!
+        # reconstruct deleted and edited models from it. Only defaults that were known
+        # when the snapshot was saved can have been deliberately deleted; defaults
+        # added by a later plugin version must stay visible.
         if "models" in cfg and isinstance(cfg["models"], list) and not deleted and not edited and not custom:
             persisted_models = [PluginModelConfig.model_validate(m) for m in cfg["models"]]
             persisted_ids = {m.id for m in persisted_models}
-            default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+            known_default_ids = set(cfg.get("default_model_ids") or [])
+            default_by_id = {m.id: m for m in default_models}
             for default_m in default_models:
-                if default_m.id not in persisted_ids:
+                if default_m.id not in persisted_ids and default_m.id in known_default_ids:
                     deleted.add(default_m.id)
             for m in persisted_models:
-                edited[m.id] = m.model_dump()
+                default_m = default_by_id.get(m.id)
+                if default_m is None:
+                    continue
+                # Only values that actually differ from the plugin defaults are
+                # edits. Capability metadata such as reasoning_levels comes from
+                # the plugin and must not turn into a stale user edit.
+                persisted_data = m.model_dump()
+                default_data = default_m.model_dump()
+                if any(
+                    default_data.get(key) != value
+                    for key, value in persisted_data.items()
+                    if key != "reasoning_levels"
+                ):
+                    edited[m.id] = persisted_data
             cfg["deleted_models"] = list(deleted)
             cfg["edited_models"] = edited
 
         result: List[PluginModelConfig] = []
         seen_ids = set()
 
-        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
         for default_m in default_models:
             if default_m.id in deleted:
                 continue
             if default_m.id in edited:
                 model_obj = PluginModelConfig.model_validate(edited[default_m.id])
+                # Reasoning levels are plugin capability metadata, not part of
+                # a user's model edits. Keep them current after a template update.
+                model_obj.reasoning_levels = list(default_m.reasoning_levels)
             else:
                 model_obj = default_m.model_copy()
             result.append(model_obj)
@@ -1161,6 +1232,14 @@ class PluginManager:
             if model_obj.id not in seen_ids and model_obj.id not in deleted:
                 result.append(model_obj)
                 seen_ids.add(model_obj.id)
+
+        if repaired:
+            # Persist the repaired state and the current default IDs so the legacy
+            # reconstruction cannot hide these defaults again after a restart.
+            try:
+                self._save_configs()
+            except Exception as e:
+                logger.warning("Failed to persist repaired model snapshot for %s: %s", plugin_id, e)
 
         return result
 
