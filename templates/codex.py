@@ -4,7 +4,7 @@ OpenAI Codex Provider Plugin
 
 Native OpenAI Codex provider with official ChatGPT OAuth 2.0 PKCE authentication,
 direct wire protocol communication matching official Codex CLI and 9Router,
-multi-tier reasoning controls (low to ultra), and multi-account fallback/load balancing.
+multi-tier reasoning controls (none to max), and multi-account fallback/load balancing.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ class CodexPlugin(BasePlugin):
                     label="Reasoning Effort",
                     type="select",
                     default="medium",
-                    options=["ultra", "max", "xhigh", "high", "medium", "low", "none", "default"],
+                    options=["none", "low", "medium", "high", "xhigh", "max"],
                     description="Default reasoning effort for supported Codex models",
                 ),
                 PluginVariable(

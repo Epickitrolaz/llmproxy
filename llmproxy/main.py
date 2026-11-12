@@ -71,6 +71,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from llmproxy.api.management import router as management_router
+    app.include_router(management_router)
+except ImportError:
+    pass
+
 # Static files for the Black and White dashboard
 static_dir = Path(__file__).resolve().parent / "static"
 static_dir.mkdir(parents=True, exist_ok=True)

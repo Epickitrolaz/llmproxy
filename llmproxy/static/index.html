@@ -61,6 +61,31 @@
         </div>
       </div>
 
+      <!-- CLIProxyAPI-compatible Usage Hub -->
+      <div class="card" style="margin-bottom: 24px;">
+        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <h3>CLIProxyAPI Usage Hub</h3>
+            <span class="badge">T3 Code / OpenCode</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="copy-management-key-btn">Copy Key</button>
+        </div>
+        <div class="card-body" style="display: flex; flex-direction: column; gap: 10px;">
+          <p style="margin: 0; font-size: 12.5px; color: var(--ink-secondary);">
+            Add this router as a CLIProxyAPI-compatible usage hub in T3 Code or OpenCode to see pooled account limits.
+            Use the base URL below (the client appends <code>/v0/management/</code>).
+          </p>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 12px; color: var(--ink-muted); min-width: 110px;">Hub URL</span>
+            <code id="management-hub-url" style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-secondary);">Loading...</code>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 12px; color: var(--ink-muted); min-width: 110px;">Management Key</span>
+            <code id="management-hub-key" style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-secondary);">Loading...</code>
+          </div>
+        </div>
+      </div>
+
       <!-- Stat Metrics Grid -->
       <div class="stats-grid">
         <div class="stat-card">
@@ -303,7 +328,7 @@
           <button class="btn btn-secondary btn-sm" id="btn-logs-status" style="display: none;">Status</button>
           <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-secondary); cursor: pointer;">
             <input type="checkbox" id="logs-auto-toggle" style="accent-color: var(--accent-white);">
-            Auto-refresh (5s)
+            Auto-refresh (3s)
           </label>
           <button class="btn btn-secondary btn-sm" id="logs-refresh-btn">Refresh</button>
         </div>
