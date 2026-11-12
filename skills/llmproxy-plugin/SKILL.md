@@ -22,7 +22,8 @@ requests, handles accounts, reports usage when possible, and fails cleanly.
    - `templates/mock_provider.py` — offline provider with no upstream.
    - `templates/codex.py` — ChatGPT/Codex OAuth + Responses wire protocol.
    - `templates/antigravity.py` — Google Cloud Code PA streaming protocol.
-   - `templates/claude_code.py` — Anthropic Messages protocol.
+   - `templates/anthropic_proxy.py` — Anthropic Messages protocol.
+   - `templates/openrouter.py` — OpenRouter gateway with free-model defaults.
    - `templates/opencode_free.py` — anonymous upstream with session rotation.
 4. `llmproxy/api/router.py` — how the router selects accounts, resolves proxies,
    calls the plugin, streams chunks, records usage, and detects rate limits.

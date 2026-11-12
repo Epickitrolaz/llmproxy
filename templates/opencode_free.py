@@ -375,6 +375,17 @@ class OpenCodeFreePlugin(BasePlugin):
             headers.update(custom_headers)
         return headers
 
+    @staticmethod
+    def _apply_cache_fields(payload: Dict[str, Any], request: ChatCompletionRequest) -> None:
+        """Forward OpenAI prompt-cache routing hints to OpenCode Zen."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        for key in ("prompt_cache_key", "prompt_cache_retention"):
+            value = getattr(request, key, None)
+            if value is None:
+                value = extra.get(key)
+            if value is not None:
+                payload[key] = value
+
     def _build_upstream_payload(
         self,
         request: ChatCompletionRequest,
@@ -413,6 +424,7 @@ class OpenCodeFreePlugin(BasePlugin):
         if request.stop:
             payload["stop"] = request.stop
 
+        self._apply_cache_fields(payload, request)
         return payload
 
     def _is_test_mode(self, api_key: str) -> bool:

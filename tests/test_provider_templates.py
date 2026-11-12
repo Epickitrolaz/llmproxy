@@ -63,7 +63,8 @@ def test_templates_gallery_and_install_to_plugins(tmp_path, monkeypatch):
     template_ids = {t["id"] for t in templates}
     assert "antigravity" in template_ids
     assert "codex" in template_ids
-    assert "claude_code" in template_ids
+    assert "anthropic_proxy" in template_ids
+    assert "openrouter" in template_ids
     assert "openai_compatible" in template_ids
     assert "opencode_free" in template_ids
 

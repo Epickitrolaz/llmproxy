@@ -484,6 +484,62 @@ class AntigravityPlugin(BasePlugin):
         """Strips Google-rejected parameters from the payload."""
         return {k: v for k, v in body.items() if k not in self.REJECTED_GOOGLE_FIELDS}
 
+    @staticmethod
+    def _apply_cache_fields(
+        inner_request: Dict[str, Any],
+        request: ChatCompletionRequest,
+        supports_block_cache: bool = False,
+    ) -> None:
+        """Forward Gemini explicit cache references and Anthropic-style breakpoints."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        cached_content = (
+            getattr(request, "cached_content", None)
+            or getattr(request, "cachedContent", None)
+            or extra.get("cached_content")
+            or extra.get("cachedContent")
+        )
+        if cached_content:
+            inner_request["cachedContent"] = cached_content
+
+        cache_control = getattr(request, "cache_control", None) or extra.get("cache_control")
+        if not cache_control or not supports_block_cache:
+            return
+        contents = inner_request.get("contents") or []
+        if not contents:
+            return
+        parts = contents[-1].get("parts")
+        if isinstance(parts, list) and parts and isinstance(parts[-1], dict):
+            parts[-1].setdefault("cache_control", cache_control)
+
+    @staticmethod
+    def _build_usage(
+        usage_obj: Optional[Dict[str, Any]],
+        default_prompt: int = 0,
+        default_completion: int = 0,
+        previous: Optional[CompletionUsage] = None,
+    ) -> CompletionUsage:
+        """Map Google usageMetadata, including cached content tokens, to OpenAI shape."""
+        usage_obj = usage_obj or {}
+        prompt_tokens = int(usage_obj.get("promptTokenCount") or default_prompt or 0)
+        completion_tokens = int(
+            usage_obj.get("candidatesTokenCount") or default_completion or 0
+        )
+        total_tokens = int(
+            usage_obj.get("totalTokenCount") or (prompt_tokens + completion_tokens)
+        )
+        usage = CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        cached_tokens = usage_obj.get("cachedContentTokenCount")
+        if cached_tokens is None and previous is not None:
+            cached_tokens = getattr(previous, "cache_read_input_tokens", None)
+        if cached_tokens is not None:
+            usage.prompt_tokens_details = {"cached_tokens": int(cached_tokens)}
+            usage.cache_read_input_tokens = int(cached_tokens)
+        return usage
+
     def _is_test_mode(self, api_key: str) -> bool:
         if not api_key:
             return True
@@ -926,7 +982,7 @@ class AntigravityPlugin(BasePlugin):
 
         # Build contents from messages
         contents: List[Dict[str, Any]] = []
-        system_instruction_text = ""
+        system_instruction_parts: List[Dict[str, Any]] = []
 
         # Map call_id -> function_name for tool response mapping
         call_id_to_name: Dict[str, str] = {}
@@ -940,7 +996,19 @@ class AntigravityPlugin(BasePlugin):
 
         for m in request.messages:
             if m.role == "system":
-                system_instruction_text += (str(m.content) + "\n")
+                if isinstance(m.content, list):
+                    for part in m.content:
+                        if isinstance(part, str):
+                            system_instruction_parts.append({"text": part})
+                        elif isinstance(part, dict):
+                            text_part: Dict[str, Any] = {
+                                "text": part.get("text", str(part))
+                            }
+                            if "cache_control" in part:
+                                text_part["cache_control"] = part["cache_control"]
+                            system_instruction_parts.append(text_part)
+                elif m.content:
+                    system_instruction_parts.append({"text": str(m.content)})
             elif m.role in ("tool", "function"):
                 call_id = m.tool_call_id or getattr(m, "id", None)
                 func_name = m.name or (call_id_to_name.get(call_id) if call_id else None) or "tool"
@@ -965,10 +1033,25 @@ class AntigravityPlugin(BasePlugin):
                     fr_part["id"] = call_id
                 contents.append({"role": "user", "parts": [{"functionResponse": fr_part}]})
             elif m.role == "user":
-                prompt_text = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
+                parts: List[Dict[str, Any]] = []
+                if isinstance(m.content, list):
+                    for p in m.content:
+                        if isinstance(p, str):
+                            parts.append({"text": p})
+                        elif isinstance(p, dict):
+                            ptype = p.get("type")
+                            if ptype in ("text", "input_text"):
+                                part: Dict[str, Any] = {"text": p.get("text", "")}
+                            else:
+                                part = dict(p)
+                            if "cache_control" in p:
+                                part["cache_control"] = p["cache_control"]
+                            parts.append(part)
+                else:
+                    parts.append({"text": str(m.content)})
                 contents.append({
                     "role": "user",
-                    "parts": [{"text": prompt_text}]
+                    "parts": parts or [{"text": ""}]
                 })
             elif m.role in ("assistant", "model"):
                 parts = []
@@ -1023,6 +1106,16 @@ class AntigravityPlugin(BasePlugin):
                 "parts": [{"text": "Hello"}]
             })
 
+        supports_block_cache = "claude" in target_model.lower()
+        if not supports_block_cache:
+            # Gemini uses cachedContent resources instead of block-level breakpoints.
+            for item in contents:
+                for part in item.get("parts", []):
+                    if isinstance(part, dict):
+                        part.pop("cache_control", None)
+            for part in system_instruction_parts:
+                part.pop("cache_control", None)
+
         max_tokens = request.max_tokens or model_config.max_tokens or 65536
         generation_config: Dict[str, Any] = {
             "maxOutputTokens": max_tokens,
@@ -1047,11 +1140,15 @@ class AntigravityPlugin(BasePlugin):
             "generationConfig": generation_config,
             "sessionId": session_id_str,
         }
-        if system_instruction_text.strip():
+        if system_instruction_parts:
             inner_request["systemInstruction"] = {
                 "role": "user",
-                "parts": [{"text": system_instruction_text.strip()}],
+                "parts": system_instruction_parts,
             }
+
+        self._apply_cache_fields(
+            inner_request, request, supports_block_cache=supports_block_cache
+        )
 
         gemini_tools = _convert_openai_tools_to_gemini(request.tools)
         if gemini_tools:
@@ -1136,6 +1233,9 @@ class AntigravityPlugin(BasePlugin):
                 has_tool_call = False
                 in_thought = False
                 thought_ended_with_newline = False
+                last_usage = CompletionUsage(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0
+                )
 
                 yield ChatCompletionChunk(
                     id=chunk_id,
@@ -1180,7 +1280,16 @@ class AntigravityPlugin(BasePlugin):
                             break
                         try:
                             payload = json.loads(raw_data)
-                            candidates = payload.get("response", {}).get("candidates", [])
+                            response_obj = payload.get("response", {})
+                            usage_meta = response_obj.get("usageMetadata", {})
+                            if usage_meta:
+                                last_usage = self._build_usage(
+                                    usage_meta,
+                                    default_prompt=last_usage.prompt_tokens,
+                                    default_completion=last_usage.completion_tokens,
+                                    previous=last_usage,
+                                )
+                            candidates = response_obj.get("candidates", [])
                             for cand in candidates:
                                 parts = cand.get("content", {}).get("parts", [])
                                 for part in parts:
@@ -1257,6 +1366,7 @@ class AntigravityPlugin(BasePlugin):
                         created=created,
                         model=target_model,
                         choices=[ChatChoiceDelta(index=0, delta={}, finish_reason=finish_reason)],
+                        usage=last_usage,
                     )
 
             return sse_stream_generator()
@@ -1266,9 +1376,7 @@ class AntigravityPlugin(BasePlugin):
         regular_parts: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
         current_thought_sig = None
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
+        last_usage = CompletionUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async def get_stream():
@@ -1309,9 +1417,12 @@ class AntigravityPlugin(BasePlugin):
                     resp_obj = payload.get("response", {})
                     usage = resp_obj.get("usageMetadata", {})
                     if usage:
-                        prompt_tokens = int(usage.get("promptTokenCount", prompt_tokens))
-                        completion_tokens = int(usage.get("candidatesTokenCount", completion_tokens))
-                        total_tokens = int(usage.get("totalTokenCount", total_tokens))
+                        last_usage = self._build_usage(
+                            usage,
+                            default_prompt=last_usage.prompt_tokens,
+                            default_completion=last_usage.completion_tokens,
+                            previous=last_usage,
+                        )
 
                     candidates = resp_obj.get("candidates", [])
                     for cand in candidates:
@@ -1369,9 +1480,22 @@ class AntigravityPlugin(BasePlugin):
                 )
             ],
             usage=CompletionUsage(
-                prompt_tokens=prompt_tokens or 15,
-                completion_tokens=completion_tokens or max(1, len(regular_text) // 4),
-                total_tokens=total_tokens or (prompt_tokens + completion_tokens),
+                prompt_tokens=last_usage.prompt_tokens or 15,
+                completion_tokens=last_usage.completion_tokens or max(1, len(regular_text) // 4),
+                total_tokens=(
+                    last_usage.total_tokens
+                    or (last_usage.prompt_tokens + last_usage.completion_tokens)
+                ),
+                **(
+                    {"prompt_tokens_details": last_usage.prompt_tokens_details}
+                    if getattr(last_usage, "prompt_tokens_details", None)
+                    else {}
+                ),
+                **(
+                    {"cache_read_input_tokens": last_usage.cache_read_input_tokens}
+                    if getattr(last_usage, "cache_read_input_tokens", None) is not None
+                    else {}
+                ),
             ),
         )
 

@@ -236,7 +236,7 @@ If the upstream is not OpenAI Chat Completions:
 - Translate the final provider response into `ChatCompletionResponse`.
 - Preserve tool calls and usage.
 - See `templates/codex.py` (Responses API), `templates/antigravity.py` (Google
-  Cloud Code PA), and `templates/claude_code.py` (Anthropic Messages).
+  Cloud Code PA), and `templates/anthropic_proxy.py` (Anthropic Messages).
 
 ## 13. Shared HTTP clients
 

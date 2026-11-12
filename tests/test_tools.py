@@ -1,6 +1,6 @@
 """
 Unit and integration tests for Tool Calling (function calling) support across
-all providers (Antigravity, Codex, Claude Code, OpenAI Compatible) and local endpoints.
+all providers (Antigravity, Codex, Anthropic, OpenRouter, OpenAI Compatible) and local endpoints.
 """
 
 import json
@@ -48,7 +48,8 @@ def setup_providers():
     plugin_manager.accounts.clear()
     plugin_manager.update_plugin_config("antigravity", enabled=True, variables={"api_key": "test-key", "timeout": 60})
     plugin_manager.update_plugin_config("codex", enabled=True, variables={"api_key": "test-key"})
-    plugin_manager.update_plugin_config("claude_code", enabled=True, variables={"api_key": "test-key"})
+    plugin_manager.update_plugin_config("anthropic_proxy", enabled=True, variables={"api_key": "test-key"})
+    plugin_manager.update_plugin_config("openrouter", enabled=True, variables={"api_key": "test-key"})
     plugin_manager.update_plugin_config("openai_compatible", enabled=True, variables={"api_key": ""})
 
 
@@ -85,9 +86,9 @@ def test_schema_tool_fields():
     assert req.tools[0]["function"]["name"] == "get_weather"
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-3-7-sonnet", "gemini-3.8-flash"])
+@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_non_streaming(model_id):
-    """Verify all 4 providers return valid tool_calls when tools are supplied."""
+    """Verify all providers return valid tool_calls when tools are supplied."""
     with TestClient(app) as client:
         payload = {
             "model": model_id,
@@ -110,9 +111,9 @@ def test_all_providers_mock_tool_calling_non_streaming(model_id):
         assert "location" in message["tool_calls"][0]["function"]["arguments"]
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-3-7-sonnet", "gemini-3.8-flash"])
+@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_streaming(model_id):
-    """Verify all 4 providers stream tool_calls via SSE chunks properly."""
+    """Verify all providers stream tool_calls via SSE chunks properly."""
     with TestClient(app) as client:
         payload = {
             "model": model_id,
@@ -143,7 +144,7 @@ def test_all_providers_mock_tool_calling_streaming(model_id):
         assert final_finish_reason == "tool_calls", f"Expected finish_reason tool_calls for {model_id}, got {final_finish_reason}"
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-3-7-sonnet", "gemini-3.8-flash"])
+@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_tool_followup_roundtrip(model_id):
     """Verify follow-up message with tool role completes conversation with finish_reason stop."""
     with TestClient(app) as client:
@@ -201,10 +202,10 @@ def test_antigravity_gemini_schema_conversion():
     assert tool_cfg_specific == {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}}
 
 
-def test_claude_code_anthropic_conversion():
-    """Verify Claude Code converts tools, tool_choice, and messages for Anthropic."""
-    from plugins.claude_code import ClaudeCodePlugin
-    plugin = ClaudeCodePlugin()
+def test_anthropic_proxy_tool_conversion():
+    """Verify the Anthropic Messages template converts tools and messages."""
+    from templates.anthropic_proxy import AnthropicProxyPlugin
+    plugin = AnthropicProxyPlugin()
 
     anthropic_tools = plugin._format_anthropic_tools(SAMPLE_TOOLS)
     assert anthropic_tools is not None
@@ -223,8 +224,8 @@ def test_claude_code_anthropic_conversion():
         ),
         ChatMessage(role="tool", tool_call_id="call_1", content="25C"),
     ]
-    sys_prompts, a_messages = plugin._build_anthropic_messages(req_messages)
-    assert sys_prompts == ["System instruction"]
+    sys_blocks, a_messages = plugin._build_anthropic_messages(req_messages)
+    assert sys_blocks == [{"type": "text", "text": "System instruction"}]
     assert len(a_messages) == 3
     assert a_messages[0]["role"] == "user"
     assert a_messages[1]["role"] == "assistant"
