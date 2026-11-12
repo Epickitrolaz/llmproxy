@@ -479,6 +479,14 @@ class OpenAICompatiblePlugin(BasePlugin):
         if request.stop is not None:
             body["stop"] = request.stop
 
+        if request.stream:
+            # Ask upstream for a terminal usage chunk even when the client did
+            # not request one. Cache telemetry is recorded in the request log,
+            # and the router only forwards usage when the client asks for it.
+            stream_options = dict(request.stream_options or {})
+            stream_options["include_usage"] = True
+            body["stream_options"] = stream_options
+
         self._apply_cache_fields(body, request)
 
         url = f"{base_url}/chat/completions"

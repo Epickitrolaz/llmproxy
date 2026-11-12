@@ -3076,12 +3076,13 @@ curl -X POST ${baseUrl}/chat/completions \\
 
       const cacheRead = log.cache_read_input_tokens || 0;
       const cacheCreated = log.cache_creation_input_tokens || 0;
-      const cacheablePrompt = (log.prompt_tokens || 0) + cacheRead + cacheCreated;
-      const cacheHitRate = cacheablePrompt > 0 ? Math.round((cacheRead / cacheablePrompt) * 1000) / 10 : 0;
+      const cachePrompt = Math.max(log.prompt_tokens || 0, cacheRead + cacheCreated);
+      const cacheHitRate = cachePrompt > 0 ? Math.round((cacheRead / cachePrompt) * 1000) / 10 : 0;
+      const cacheTitle = `${cacheRead} cached read / ${cacheCreated} cached written`;
       const cacheCell = cacheRead > 0
-        ? `<span class="badge badge-active">${cacheHitRate}% hit</span>`
+        ? `<span class="badge badge-active" title="${escapeHtml(cacheTitle)}">${cacheHitRate}% hit</span>`
         : cacheCreated > 0
-          ? `<span class="badge">${cacheCreated} written</span>`
+          ? `<span class="badge" title="${escapeHtml(cacheTitle)}">${cacheCreated} written</span>`
           : `<span style="color: var(--ink-muted);">—</span>`;
 
       tr.innerHTML = `

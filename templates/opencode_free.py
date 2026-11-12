@@ -537,6 +537,13 @@ class OpenCodeFreePlugin(BasePlugin):
         if effort:
             payload["reasoning_effort"] = effort
 
+        if request.stream:
+            # Request usage for cache accounting; the router decides whether
+            # the client receives a usage chunk.
+            stream_options = dict(request.stream_options or {})
+            stream_options["include_usage"] = True
+            payload["stream_options"] = stream_options
+
         self._apply_cache_fields(payload, request)
         return payload
 

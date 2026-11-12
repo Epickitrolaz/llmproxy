@@ -28,7 +28,9 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - `anthropic_proxy` automatically adds cache breakpoints when an OpenAI-style client sends none (`auto_prompt_cache`, enabled by default).
   - OpenAI-compatible providers forward `prompt_cache_key` and `prompt_cache_retention`.
   - Gemini/Antigravity accepts `cachedContent` references, and cached-token counts are reported through OpenAI-style usage details.
-  - Request logs persist cache-read/write counters, and the dashboard shows a cache hit rate.
+  - Every provider normalizes OpenAI (`prompt_tokens_details.cached_tokens`) and Anthropic (`cache_read_input_tokens` / `cache_creation_input_tokens`) cache counters. `prompt_tokens` counts the full prompt, including cached tokens.
+  - Streaming providers request upstream usage so cache telemetry is recorded even when the client does not ask for usage.
+  - Request logs persist cache-read/write counters, and the dashboard shows a per-request cache column and a cache hit rate.
 - **Provider Management & Fullscreen Configuration**:
   - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
   - **Pin to Top**: Pin favorite providers to prioritize them across the dashboard and status overview.

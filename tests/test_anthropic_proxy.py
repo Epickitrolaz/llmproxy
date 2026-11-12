@@ -410,7 +410,8 @@ def test_real_anthropic_response_is_translated(monkeypatch):
     assert captured["json"]["output_config"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
-    assert response.usage.total_tokens == 12
+    assert response.usage.prompt_tokens == 13  # 7 input + 4 read + 2 written
+    assert response.usage.total_tokens == 18
     assert response.usage.cache_read_input_tokens == 4
     assert response.usage.cache_creation_input_tokens == 2
     assert response.usage.prompt_tokens_details == {"cached_tokens": 4}

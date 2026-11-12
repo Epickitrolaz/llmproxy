@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import AsyncIterator, Optional, Union
+from typing import Any, AsyncIterator, Dict, Optional, Union
 
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
@@ -158,15 +158,15 @@ class MockProviderPlugin(BasePlugin):
             f"• **Account status:** No account configured (Simulation Mode)"
         )
         reply = base_reply + details
+        usage_kwargs: Dict[str, Any] = {}
+        if cache_requested:
+            usage_kwargs["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+            usage_kwargs["cache_read_input_tokens"] = cached_tokens
         usage = CompletionUsage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
-            **(
-                {"prompt_tokens_details": {"cached_tokens": cached_tokens}}
-                if cache_requested
-                else {}
-            ),
+            **usage_kwargs,
         )
 
         if request.stream:

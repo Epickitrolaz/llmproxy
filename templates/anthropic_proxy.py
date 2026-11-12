@@ -1057,9 +1057,41 @@ class AnthropicProxyPlugin(BasePlugin):
         default_completion: int = 0,
         previous: Optional[CompletionUsage] = None,
     ) -> CompletionUsage:
-        """Map Anthropic usage, including prompt-cache counters, to OpenAI shape."""
+        """Map Anthropic usage, including prompt-cache counters, to OpenAI shape.
+
+        ``prompt_tokens`` follows OpenAI semantics and includes cached tokens.
+        Anthropic's ``input_tokens`` excludes cache reads/writes, so both cache
+        counters are added to the reported input when present. ``default_prompt``
+        is expected to already be normalized (used for streaming continuations).
+        """
         usage_obj = usage_obj or {}
-        prompt_tokens = int(usage_obj.get("input_tokens") or default_prompt or 0)
+
+        cache_read = usage_obj.get("cache_read_input_tokens")
+        cache_created = usage_obj.get("cache_creation_input_tokens")
+        if cache_read is None and previous is not None:
+            cache_read = getattr(previous, "cache_read_input_tokens", None)
+        if cache_created is None and previous is not None:
+            cache_created = getattr(previous, "cache_creation_input_tokens", None)
+        try:
+            cache_read = int(cache_read) if cache_read is not None else None
+        except (TypeError, ValueError):
+            cache_read = None
+        try:
+            cache_created = (
+                int(cache_created) if cache_created is not None else None
+            )
+        except (TypeError, ValueError):
+            cache_created = None
+
+        reported_input = usage_obj.get("input_tokens")
+        if reported_input is not None:
+            prompt_tokens = (
+                int(reported_input)
+                + (cache_read or 0)
+                + (cache_created or 0)
+            )
+        else:
+            prompt_tokens = int(default_prompt or 0)
         completion_tokens = int(usage_obj.get("output_tokens") or default_completion or 0)
         total_tokens = int(
             usage_obj.get("total_tokens") or (prompt_tokens + completion_tokens)
@@ -1070,17 +1102,11 @@ class AnthropicProxyPlugin(BasePlugin):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
         )
-        cache_read = usage_obj.get("cache_read_input_tokens")
-        cache_created = usage_obj.get("cache_creation_input_tokens")
-        if cache_read is None and previous is not None:
-            cache_read = getattr(previous, "cache_read_input_tokens", None)
-        if cache_created is None and previous is not None:
-            cache_created = getattr(previous, "cache_creation_input_tokens", None)
         if cache_read is not None:
-            usage.cache_read_input_tokens = int(cache_read)
-            usage.prompt_tokens_details = {"cached_tokens": int(cache_read)}
+            usage.cache_read_input_tokens = cache_read
+            usage.prompt_tokens_details = {"cached_tokens": cache_read}
         if cache_created is not None:
-            usage.cache_creation_input_tokens = int(cache_created)
+            usage.cache_creation_input_tokens = cache_created
         return usage
 
     async def _stream_messages(

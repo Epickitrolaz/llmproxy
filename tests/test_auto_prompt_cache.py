@@ -166,6 +166,18 @@ def test_usage_cache_tokens_handles_missing_and_present_counters():
     assert _usage_cache_tokens(usage) == (7, 3)
 
 
+def test_usage_cache_tokens_reads_openai_style_details():
+    usage = CompletionUsage(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        prompt_tokens_details={"cached_tokens": 80},
+    )
+    assert usage.cache_read_input_tokens == 80
+    assert usage.prompt_tokens_details == {"cached_tokens": 80}
+    assert _usage_cache_tokens(usage) == (80, 0)
+
+
 def test_request_logs_persist_cache_counters_and_stats_show_hit_rate():
     original_logs = list(plugin_manager.logs)
     original_requests = plugin_manager.total_requests_count
@@ -175,7 +187,7 @@ def test_request_logs_persist_cache_counters_and_stats_show_hit_rate():
                 id="cache-log-1",
                 model="claude-opus-5-5",
                 status="success",
-                prompt_tokens=100,
+                prompt_tokens=1000,
                 completion_tokens=20,
                 cache_read_input_tokens=800,
                 cache_creation_input_tokens=100,
@@ -190,14 +202,15 @@ def test_request_logs_persist_cache_counters_and_stats_show_hit_rate():
         ]
         plugin_manager.total_requests_count = 2
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
         logs = client.get("/api/logs").json()
         by_id = {log["id"]: log for log in logs}
         assert by_id["cache-log-1"]["cache_read_input_tokens"] == 800
         assert by_id["cache-log-1"]["cache_creation_input_tokens"] == 100
 
         stats = client.get("/api/stats").json()
-        # 800 cached out of (100 + 800 + 100) + 100 = 1100 cacheable prompt tokens.
+        # 800 cached out of 1000 + 100 = 1100 total prompt tokens across both
+        # requests (cached tokens are included in prompt_tokens).
         assert stats["cache_read_input_tokens"] == 800
         assert stats["cache_creation_input_tokens"] == 100
         assert stats["cache_hit_rate"] == 72.7

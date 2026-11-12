@@ -1326,10 +1326,14 @@ async def get_stats():
 
     cache_read_tokens = sum(int(log.cache_read_input_tokens or 0) for log in logs)
     cache_creation_tokens = sum(int(log.cache_creation_input_tokens or 0) for log in logs)
+    # ``prompt_tokens`` includes cached tokens (OpenAI semantics). ``max`` keeps
+    # rates sane for older persisted logs that used exclusive Anthropic counts.
     cacheable_prompt_tokens = sum(
-        int(log.prompt_tokens or 0)
-        + int(log.cache_read_input_tokens or 0)
-        + int(log.cache_creation_input_tokens or 0)
+        max(
+            int(log.prompt_tokens or 0),
+            int(log.cache_read_input_tokens or 0)
+            + int(log.cache_creation_input_tokens or 0),
+        )
         for log in logs
     )
     cache_hit_rate = (

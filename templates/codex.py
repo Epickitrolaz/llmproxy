@@ -361,9 +361,9 @@ class CodexPlugin(BasePlugin):
             or {}
         )
         if details.get("cached_tokens") is not None:
-            usage.prompt_tokens_details = {
-                "cached_tokens": int(details.get("cached_tokens") or 0)
-            }
+            cached_tokens = int(details.get("cached_tokens") or 0)
+            usage.prompt_tokens_details = {"cached_tokens": cached_tokens}
+            usage.cache_read_input_tokens = cached_tokens
         output_details = usage_obj.get("output_tokens_details") or {}
         if output_details.get("reasoning_tokens") is not None:
             usage.completion_tokens_details = {

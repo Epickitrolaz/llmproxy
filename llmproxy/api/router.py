@@ -60,12 +60,24 @@ def _calc_prompt_tokens(messages: list, tools: Optional[list] = None) -> int:
 
 
 def _usage_cache_tokens(usage: Optional[CompletionUsage]) -> tuple[int, int]:
-    """Return ``(cache_read, cache_created)`` counters from an OpenAI usage object."""
+    """Return ``(cache_read, cache_created)`` counters from a usage object.
+
+    Providers expose prompt-cache telemetry in two shapes: Anthropic-style
+    ``cache_read_input_tokens`` / ``cache_creation_input_tokens`` fields and
+    OpenAI-style ``prompt_tokens_details.cached_tokens``. Both are accepted so
+    every plugin reaches the dashboard identically.
+    """
     if usage is None:
         return 0, 0
     cache_read = getattr(usage, "cache_read_input_tokens", None)
     cache_created = getattr(usage, "cache_creation_input_tokens", None)
-    return int(cache_read or 0), int(cache_created or 0)
+    details = getattr(usage, "prompt_tokens_details", None)
+    if cache_read is None and isinstance(details, dict):
+        cache_read = details.get("cached_tokens")
+    try:
+        return max(0, int(cache_read or 0)), max(0, int(cache_created or 0))
+    except (TypeError, ValueError):
+        return 0, 0
 
 
 def _safe_float(val: Any, default: float) -> float:
@@ -644,8 +656,11 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                                 completion_tokens += _estimate_tokens(choice.delta["content"])
                             if choice.delta.get("tool_calls"):
                                 completion_tokens += _estimate_tokens(choice.delta["tool_calls"])
-                    if include_usage and chunk.usage is not None:
-                        # OpenAI clients expect usage only in the terminal usage chunk.
+                    if chunk.usage is not None:
+                        # Usage is recorded for logs above. Providers may send
+                        # it on every chunk (Anthropic) or only on a terminal
+                        # chunk (OpenAI); clients only get the synthesized
+                        # terminal usage chunk when they requested it.
                         chunk = chunk.model_copy(update={"usage": None})
                     return f"data: {chunk.model_dump_json()}\n\n"
                 if isinstance(chunk, str):
