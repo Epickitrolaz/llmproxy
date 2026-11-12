@@ -37,6 +37,25 @@ from llmproxy.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Reasoning levels that may be appended to any model ID as a routing suffix,
+# e.g. ``gpt-6-luna:high``. The suffix is stripped before the upstream request
+# and exposed to plugins through the ``reasoning_effort`` variable.
+REASONING_EFFORT_SUFFIXES = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+)
+
+
+def split_reasoning_suffix(model_id: str) -> Tuple[str, Optional[str]]:
+    """Split ``<model>:<level>`` into its base model ID and reasoning level."""
+    if not model_id or ":" not in model_id:
+        return model_id, None
+
+    base_id, _, level = model_id.rpartition(":")
+    level = level.lower()
+    if not base_id or level not in REASONING_EFFORT_SUFFIXES:
+        return model_id, None
+    return base_id, level
+
 
 class PluginManager:
     """
@@ -1375,6 +1394,18 @@ class PluginManager:
             if model_config.id == model_id:
                 vars_dict = self.get_plugin_variables(plugin.metadata.id)
                 return (model_config, plugin, vars_dict)
+
+        # 3. Accept a generic reasoning suffix on any active model (for example
+        #    `gpt-6-luna:high`), even when the provider does not publish a
+        #    dedicated variant model. Plugins read `reasoning_effort` from
+        #    their variables, so a per-request copy keeps other requests intact.
+        base_id, reasoning_effort = split_reasoning_suffix(model_id)
+        if reasoning_effort:
+            for model_config, plugin in self.get_all_active_models():
+                if model_config.id == base_id:
+                    vars_dict = self.get_plugin_variables(plugin.metadata.id)
+                    vars_dict["reasoning_effort"] = reasoning_effort
+                    return (model_config, plugin, vars_dict)
         return None
 
     def add_log(self, entry: RequestLogEntry) -> None:

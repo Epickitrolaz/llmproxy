@@ -10,6 +10,7 @@ from llmproxy.schemas import (
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    LoadBalancingRuleCreate,
     PluginMetadata,
     PluginModelConfig,
     PluginVariable,
@@ -218,6 +219,85 @@ def test_custom_model_crud():
     plugin_manager.configs["codex"]["edited_models"] = {}
     plugin_manager.configs["codex"]["deleted_models"] = []
     plugin_manager._save_configs()
+
+
+def test_generic_reasoning_suffix_resolution(tmp_path: Path):
+    """Verify any model accepts a reasoning suffix and rules keep priority order."""
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "reasoning_test.py").write_text(
+        """
+from llmproxy.core.interface import BasePlugin
+from llmproxy.schemas import (
+    ChatCompletionResponse,
+    PluginMetadata,
+    PluginModelConfig,
+    PluginVariable,
+)
+
+class ReasoningPlugin(BasePlugin):
+    @property
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            id="reasoning_test",
+            name="Reasoning Test",
+            variables=[
+                PluginVariable(
+                    name="reasoning_effort",
+                    label="Reasoning Effort",
+                    type="select",
+                    default="medium",
+                    options=["none", "low", "medium", "high"],
+                )
+            ],
+            models=[PluginModelConfig(id="reason-model", name="Reason Model")],
+        )
+
+    async def chat_completion(self, request, model_config, variables):
+        return ChatCompletionResponse(id="resp", model=request.model, choices=[])
+
+plugin = ReasoningPlugin()
+""",
+        encoding="utf-8",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_dir, data_dir=tmp_path / "data")
+    mgr.discover_and_load_all()
+
+    base = mgr.resolve_model("reason-model")
+    assert base is not None
+    assert base[0].id == "reason-model"
+    assert base[2]["reasoning_effort"] == "medium"
+
+    variant = mgr.resolve_model("reason-model:high")
+    assert variant is not None
+    assert variant[0].id == "reason-model"
+    assert variant[2]["reasoning_effort"] == "high"
+
+    ultra = mgr.resolve_model("reason-model:ultra")
+    assert ultra is not None
+    assert ultra[2]["reasoning_effort"] == "ultra"
+
+    # Unknown suffixes (for example OpenRouter's `:free`) must not be stripped.
+    assert mgr.resolve_model("reason-model:free") is None
+
+    rule = mgr.add_load_balancing_rule(
+        LoadBalancingRuleCreate(
+            model_id="reason-router",
+            name="Reasoning Router",
+            strategy="fallback",
+            targets=["reason-model:high"],
+        )
+    )
+    resolved = mgr.resolve_model("reason-router")
+    assert resolved is not None
+    assert resolved[0].id == "reason-model"
+    assert resolved[2]["reasoning_effort"] == "high"
+
+    # Fallback uses the target list order as priority.
+    rule.targets = ["reason-model:low", "reason-model:high"]
+    assert mgr.select_rule_target(rule) == "reason-model:low"
+    assert mgr.resolve_model("reason-router")[2]["reasoning_effort"] == "low"
 
 
 def test_plugin_hot_reload(tmp_path: Path):

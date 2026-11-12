@@ -164,7 +164,7 @@ def test_load_balancing_rules_crud_and_routing():
     rule_id = rule_data["id"]
     assert rule_data["model_id"] == "custom-fast-router"
     assert rule_data["strategy"] == "round_robin"
-    assert len(rule_data["targets"]) == 2
+    assert rule_data["targets"] == ["gemini-3.8-flash", "gpt-6-luna"]
 
     # 2. List rules
     res = client.get("/api/load-balancing-rules")
@@ -195,10 +195,15 @@ def test_load_balancing_rules_crud_and_routing():
     # 6. Update rule
     res = client.put(
         f"/api/load-balancing-rules/{rule_id}",
-        json={"strategy": "random", "name": "Random Fast Router"},
+        json={
+            "strategy": "random",
+            "name": "Random Fast Router",
+            "targets": ["gpt-6-luna", "gemini-3.8-flash"],
+        },
     )
     assert res.status_code == 200
     assert res.json()["strategy"] == "random"
+    assert res.json()["targets"] == ["gpt-6-luna", "gemini-3.8-flash"]
 
     # 7. Delete rule
     res = client.delete(f"/api/load-balancing-rules/{rule_id}")
