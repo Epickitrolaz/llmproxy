@@ -46,6 +46,15 @@ Key Features:
      the request with a clean session identity.
    - When disabled (default):
      Standard HTTP 429 rate limit errors with reset details are returned to the caller.
+
+5. Reasoning Levels:
+   - `reasoning_effort` can be set per request (or in `extra_body`), appended to the
+     model ID as a suffix (`deepseek-v4.1-flash-free:high`), or configured as the
+     plugin default variable. Request-level values take precedence over the model
+     suffix, which takes precedence over the plugin default.
+   - Supported levels: none, low, medium, high, xhigh, max.
+   - The resolved level is sent upstream as `reasoning_effort` and any suffix is
+     stripped from the model ID before the request leaves the proxy.
 """
 
 from __future__ import annotations
@@ -86,7 +95,7 @@ logger = logging.getLogger(__name__)
 # Plugin Template Identity
 id="opencode_free"
 name="OpenCode Free"
-description="OpenCode Zen free models provider with models managed via Models tab, anonymous zero-auth access, proxy support, and rate limit control"
+description="OpenCode Zen free models provider with models managed via Models tab, anonymous zero-auth access, proxy support, reasoning controls, and rate limit control"
 
 # Constant controlling whether rate limit bypassing (via session and project rotation) is enabled.
 # Disabled by default as required.
@@ -96,6 +105,28 @@ DEFAULT_BASE_URL: str = "https://opencode.ai/inference/openai/v1"
 DEFAULT_USER_AGENT: str = "opencode/latest/2.2.6/cli"
 DEFAULT_CLIENT: str = "cli"
 DEFAULT_PROJECT: str = "global"
+
+# Reasoning levels a caller can request for models that support them. The suffix
+# forms are accepted on the request model ID and stripped before the upstream
+# call, e.g. ``deepseek-v4.1-flash-free:high``.
+REASONING_SUFFIXES: Tuple[Tuple[str, str], ...] = (
+    (":none", "none"),
+    ("-none", "none"),
+    (":off", "none"),
+    ("-off", "none"),
+    (":low", "low"),
+    ("-low", "low"),
+    (":medium", "medium"),
+    ("-medium", "medium"),
+    (":high", "high"),
+    ("-high", "high"),
+    (":xhigh", "xhigh"),
+    ("-xhigh", "xhigh"),
+    (":max", "max"),
+    ("-max", "max"),
+)
+
+EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 
 # Default OpenCode free models exposed in the Models tab
 DEFAULT_FREE_MODELS: List[PluginModelConfig] = [
@@ -229,7 +260,7 @@ class OpenCodeFreePlugin(BasePlugin):
         self._metadata = PluginMetadata(
             id="opencode_free",
             name="OpenCode Free",
-            description="OpenCode Zen free models provider with models managed via Models tab, anonymous zero-auth access, proxy support, and rate limit control",
+            description="OpenCode Zen free models provider with models managed via Models tab, anonymous zero-auth access, proxy support, reasoning controls, and rate limit control",
             version="1.0.0",
             author="OpenCode",
             enabled=True,
@@ -286,6 +317,17 @@ class OpenCodeFreePlugin(BasePlugin):
                     description="Maximum retry attempts on transient network or rate limit errors",
                 ),
                 PluginVariable(
+                    name="reasoning_effort",
+                    label="Reasoning Effort",
+                    type="select",
+                    default="default",
+                    options=["default", *EFFORT_LEVELS],
+                    description=(
+                        "Default reasoning effort for free models that support it. A "
+                        "request-level reasoning_effort or a model suffix takes precedence."
+                    ),
+                ),
+                PluginVariable(
                     name="bypass_rate_limits",
                     label="Bypass Rate Limits",
                     type="boolean",
@@ -311,6 +353,14 @@ class OpenCodeFreePlugin(BasePlugin):
                     errors.append("Timeout must be a positive number.")
             except (ValueError, TypeError):
                 errors.append("Timeout must be a valid number.")
+
+        effort = str(variables.get("reasoning_effort") or "default").strip().lower()
+        if effort not in ("default", *EFFORT_LEVELS):
+            errors.append(
+                "Reasoning effort must be one of: default, "
+                + ", ".join(EFFORT_LEVELS)
+                + "."
+            )
         return errors
 
     # ==========================================================================
@@ -376,6 +426,65 @@ class OpenCodeFreePlugin(BasePlugin):
         return headers
 
     @staticmethod
+    def _normalize_effort(value: Any) -> Optional[str]:
+        """Normalize a caller- or config-provided reasoning level."""
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if not raw or raw in ("default", "auto"):
+            return None
+        if raw in ("off", "disabled", "false", "0"):
+            return "none"
+        if raw in EFFORT_LEVELS:
+            return raw
+        return None
+
+    def _resolve_reasoning(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Optional[str]]:
+        """Return the upstream model ID and the reasoning effort to send.
+
+        Precedence: request ``reasoning_effort`` / ``extra_body`` > model ID
+        suffix > plugin ``reasoning_effort`` variable.
+        """
+        variables = variables or {}
+        target_model = model_config.upstream_model or model_config.id
+
+        raw_effort: Any = None
+        if getattr(request, "reasoning_effort", None):
+            raw_effort = request.reasoning_effort
+        else:
+            extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+            raw_effort = extra.get("reasoning_effort")
+            if raw_effort is None:
+                reasoning = extra.get("reasoning")
+                if isinstance(reasoning, dict):
+                    raw_effort = reasoning.get("effort")
+                elif reasoning:
+                    raw_effort = reasoning
+
+        requested_model = (request.model or "").strip().lower()
+        for suffix, level in REASONING_SUFFIXES:
+            if requested_model.endswith(suffix):
+                if raw_effort is None:
+                    raw_effort = level
+                break
+
+        effort = self._normalize_effort(raw_effort)
+        if effort is None and raw_effort is None:
+            effort = self._normalize_effort(variables.get("reasoning_effort"))
+
+        for suffix, _ in REASONING_SUFFIXES:
+            if target_model.lower().endswith(suffix):
+                target_model = target_model[: -len(suffix)]
+                break
+
+        return target_model, effort
+
+    @staticmethod
     def _apply_cache_fields(payload: Dict[str, Any], request: ChatCompletionRequest) -> None:
         """Forward OpenAI prompt-cache routing hints to OpenCode Zen."""
         extra = request.extra_body if isinstance(request.extra_body, dict) else {}
@@ -390,9 +499,10 @@ class OpenCodeFreePlugin(BasePlugin):
         self,
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
+        variables: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build standard OpenAI-compatible payload accepted by OpenCode Zen."""
-        actual_model = model_config.upstream_model or model_config.id
+        actual_model, effort = self._resolve_reasoning(request, model_config, variables)
 
         messages_payload: List[Dict[str, Any]] = []
         for msg in request.messages:
@@ -423,6 +533,9 @@ class OpenCodeFreePlugin(BasePlugin):
             payload["tool_choice"] = request.tool_choice
         if request.stop:
             payload["stop"] = request.stop
+
+        if effort:
+            payload["reasoning_effort"] = effort
 
         self._apply_cache_fields(payload, request)
         return payload
@@ -732,8 +845,8 @@ class OpenCodeFreePlugin(BasePlugin):
                 return self._mock_stream(request, model_config, latency_ms=time_taken_ms)
             return self._mock_response(request, model_config, latency_ms=time_taken_ms)
 
-        payload = self._build_upstream_payload(request, model_config)
-        target_model = model_config.upstream_model or model_config.id
+        payload = self._build_upstream_payload(request, model_config, variables)
+        target_model = payload["model"]
 
         if request.stream:
             return self._execute_upstream_streaming(
