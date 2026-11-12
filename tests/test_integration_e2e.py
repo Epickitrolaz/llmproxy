@@ -14,7 +14,7 @@ def e2e_client():
 
 
 def test_e2e_plugins_and_models_catalog(e2e_client):
-    """Verify that default plugins (antigravity, codex, claude_code, openai_compatible) are loaded."""
+    """Verify that default plugins (antigravity, codex, anthropic, openrouter, openai) are loaded."""
     # 1. Check health
     health = e2e_client.get("/health").json()
     assert health["status"] == "ok"
@@ -31,8 +31,10 @@ def test_e2e_plugins_and_models_catalog(e2e_client):
     # Codex models
     assert "gpt-6-luna" in model_ids
     assert "gpt-4o" in model_ids
-    # Claude Code models
-    assert "claude-3-7-sonnet" in model_ids
+    # Anthropic Messages models
+    assert "claude-sonnet-5-5" in model_ids
+    # OpenRouter free models
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
     # OpenAI compatible models
     assert "default-model" in model_ids
 

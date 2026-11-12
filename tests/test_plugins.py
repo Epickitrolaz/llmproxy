@@ -22,7 +22,7 @@ def init_manager():
     """Ensure plugin_manager has loaded all default plugins before each test."""
     plugin_manager.discover_and_load_all()
     # Reset default test keys
-    for pid in ["antigravity", "codex", "claude_code"]:
+    for pid in ["antigravity", "codex", "anthropic_proxy", "openrouter"]:
         plugin_manager.update_plugin_config(pid, enabled=True, variables={"api_key": "test-key"})
     plugin_manager.update_plugin_config("openai_compatible", enabled=True, variables={"api_key": ""})
 
@@ -34,7 +34,8 @@ def test_plugin_discovery_and_metadata():
 
     assert "antigravity" in plugin_ids
     assert "codex" in plugin_ids
-    assert "claude_code" in plugin_ids
+    assert "anthropic_proxy" in plugin_ids
+    assert "openrouter" in plugin_ids
     assert "openai_compatible" in plugin_ids
 
     # Check antigravity metadata
@@ -57,13 +58,21 @@ def test_plugin_discovery_and_metadata():
     assert "gpt-4o" in codex_models
     assert "gpt-4o-mini" in codex_models
 
-    # Check claude_code metadata
-    claude = plugin_manager.get_plugin("claude_code")
-    assert claude is not None
-    claude_models = {m.id for m in claude.metadata.models}
-    assert "claude-3-7-sonnet" in claude_models
-    assert "claude-3-5-sonnet" in claude_models
-    assert "claude-3-5-haiku" in claude_models
+    # Check anthropic_proxy metadata
+    anthropic = plugin_manager.get_plugin("anthropic_proxy")
+    assert anthropic is not None
+    anthropic_models = {m.id for m in anthropic.metadata.models}
+    assert "claude-haiku-5-5" in anthropic_models
+    assert "claude-sonnet-5-5" in anthropic_models
+    assert "claude-opus-5-5" in anthropic_models
+    assert "claude-fable-5-2" in anthropic_models
+
+    # Check openrouter metadata
+    openrouter = plugin_manager.get_plugin("openrouter")
+    assert openrouter is not None
+    openrouter_models = {m.id for m in openrouter.metadata.models}
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in openrouter_models
+    assert all(":free" in model_id for model_id in openrouter_models)
 
     # Check openai_compatible metadata
     oai = plugin_manager.get_plugin("openai_compatible")
@@ -419,7 +428,8 @@ async def test_all_plugins_chat_completion_non_streaming():
     cases = [
         ("antigravity", "gemini-3.8-flash"),
         ("codex", "gpt-4o"),
-        ("claude_code", "claude-3-7-sonnet"),
+        ("anthropic_proxy", "claude-sonnet-5-5"),
+        ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
         ("openai_compatible", "default-model"),
     ]
 
@@ -449,7 +459,8 @@ async def test_all_plugins_chat_completion_streaming():
     cases = [
         ("antigravity", "gemini-3.8-flash"),
         ("codex", "gpt-4o"),
-        ("claude_code", "claude-3-7-sonnet"),
+        ("anthropic_proxy", "claude-sonnet-5-5"),
+        ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
         ("openai_compatible", "default-model"),
     ]
 

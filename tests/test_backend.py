@@ -23,7 +23,8 @@ def setup_backend():
     # Configure test API keys so variable validation succeeds
     plugin_manager.update_plugin_config("antigravity", enabled=True, variables={"api_key": "test-key", "timeout": 60})
     plugin_manager.update_plugin_config("codex", enabled=True, variables={"api_key": "test-key"})
-    plugin_manager.update_plugin_config("claude_code", enabled=True, variables={"api_key": "test-key"})
+    plugin_manager.update_plugin_config("anthropic_proxy", enabled=True, variables={"api_key": "test-key"})
+    plugin_manager.update_plugin_config("openrouter", enabled=True, variables={"api_key": "test-key"})
     plugin_manager.update_plugin_config("openai_compatible", enabled=True, variables={"api_key": ""})
 
 
@@ -37,12 +38,13 @@ def test_models_endpoint_list():
         assert data["object"] == "list"
         model_ids = {m["id"] for m in data["data"]}
 
-        # All 4 plugins' default models should be listed
+        # All provider plugins' default models should be listed
         assert "gemini-3.8-flash" in model_ids
         assert "claude-sonnet-4-6" in model_ids
         assert "gpt-4o" in model_ids
         assert "gpt-6-luna" in model_ids
-        assert "claude-3-7-sonnet" in model_ids
+        assert "claude-sonnet-5-5" in model_ids
+        assert "nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
         assert "default-model" in model_ids
 
 
@@ -133,7 +135,8 @@ def test_routing_across_plugins():
         test_routes = [
             ("gemini-3.8-flash", "Antigravity"),
             ("gpt-6-luna", "Codex"),
-            ("claude-3-7-sonnet", "Claude Code"),
+            ("claude-sonnet-5-5", "Anthropic"),
+            ("nvidia/nemotron-3-ultra-550b-a55b:free", "OpenRouter"),
             ("default-model", "OpenAI Compatible"),
         ]
 

@@ -1,14 +1,26 @@
+"""Anthropic Messages API provider plugin for LLMProxy.
+
+This plugin exposes Anthropic's native Messages API through the OpenAI-compatible
+``/v1/chat/completions`` endpoint. It supports streaming, tool calls, usage
+reporting, and extended thinking controlled by a reasoning effort level.
 """
-Anthropic Messages API Provider Plugin for LLMProxy.
-Translates OpenAI chat format into Anthropic Claude Messages API.
-"""
+
+from __future__ import annotations
+
+import json
 import time
 import uuid
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+
 import httpx
+
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
+    Account,
     ChatChoice,
+    ChatChoiceDelta,
     ChatMessage,
+    ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionUsage,
@@ -17,35 +29,117 @@ from llmproxy.schemas import (
     PluginVariable,
 )
 
+# Anthropic requires the thinking budget to be at least 1024 tokens and smaller
+# than max_tokens. The values below are deliberately conservative defaults.
+REASONING_BUDGETS: Dict[str, int] = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 16384,
+    "xhigh": 32768,
+    "max": 60000,
+}
+
+REASONING_SUFFIXES: Tuple[Tuple[str, str], ...] = (
+    (":none", "none"),
+    ("-none", "none"),
+    (":off", "none"),
+    ("-off", "none"),
+    (":low", "low"),
+    ("-low", "low"),
+    (":medium", "medium"),
+    ("-medium", "medium"),
+    (":high", "high"),
+    ("-high", "high"),
+    (":xhigh", "xhigh"),
+    ("-xhigh", "xhigh"),
+    (":max", "max"),
+    ("-max", "max"),
+)
+
 
 class AnthropicProxyPlugin(BasePlugin):
-    @property
-    def metadata(self) -> PluginMetadata:
-        return PluginMetadata(
+    """Anthropic Messages API provider with an OpenAI-compatible surface."""
+
+    def __init__(self) -> None:
+        self._metadata = PluginMetadata(
             id="anthropic_proxy",
-            name="Anthropic Claude Provider",
-            description="Upstream proxy converting requests to Claude 3.5 / Claude 3 Opus.",
-            version="1.0.0",
-            author="custom",
+            name="Anthropic (Messages API)",
+            description=(
+                "Anthropic Claude Messages API provider with streaming, tool calls, "
+                "and extended thinking support"
+            ),
+            version="2.0.0",
+            author="Anthropic",
             enabled=True,
+            filename="anthropic_proxy.py",
             variables=[
                 PluginVariable(
-                    name="anthropic_api_key",
+                    name="api_key",
                     label="Anthropic API Key",
                     type="secret",
                     default="",
-                    value="",
-                    required=True,
-                    description="Anthropic console API Key",
+                    description="Anthropic console API key (accounts can also supply this)",
+                ),
+                PluginVariable(
+                    name="base_url",
+                    label="Base URL",
+                    type="string",
+                    default="https://api.anthropic.com/v1",
+                    description="Anthropic Messages API base URL",
                 ),
                 PluginVariable(
                     name="anthropic_version",
-                    label="API Version",
+                    label="Anthropic Version",
                     type="string",
                     default="2023-06-01",
-                    value="2023-06-01",
-                    required=False,
-                    description="Anthropic API version header",
+                    description="Value sent in the anthropic-version header",
+                ),
+                PluginVariable(
+                    name="timeout",
+                    label="Timeout (seconds)",
+                    type="number",
+                    default=60,
+                    description="Request timeout in seconds",
+                ),
+                PluginVariable(
+                    name="load_balancing_strategy",
+                    label="Load Balancing Strategy",
+                    type="select",
+                    default="fallback",
+                    options=["fallback", "round_robin", "least_used", "random"],
+                    description="Strategy for distributing requests across connected accounts",
+                ),
+                PluginVariable(
+                    name="account_switch_cooldown",
+                    label="Account Cooldown (s)",
+                    type="number",
+                    default=60,
+                    description="Cooldown period when an account hits rate limits before retrying",
+                ),
+                PluginVariable(
+                    name="account_switch_wait",
+                    label="Switch Wait Delay (s)",
+                    type="number",
+                    default=1,
+                    description="Wait delay before switching to another account on failover",
+                ),
+                PluginVariable(
+                    name="max_retries",
+                    label="Max Failover Retries",
+                    type="number",
+                    default=2,
+                    description="Maximum number of account failovers per request",
+                ),
+                PluginVariable(
+                    name="reasoning_effort",
+                    label="Reasoning Effort",
+                    type="select",
+                    default="medium",
+                    options=["none", "low", "medium", "high", "xhigh", "max"],
+                    description=(
+                        "Default extended-thinking level. Request-level reasoning_effort "
+                        "or a model suffix such as ':high' takes precedence."
+                    ),
                 ),
                 PluginVariable(
                     name="proxy_enabled",
@@ -60,14 +154,17 @@ class AnthropicProxyPlugin(BasePlugin):
                     type="select",
                     default="sequential",
                     options=["sequential", "random", "specific", "switch_on_limit"],
-                    description="Strategy for selecting proxies from pool: sequential (round-robin), random, specific proxy, or switch on limit",
+                    description=(
+                        "Strategy for selecting proxies from the pool: sequential, random, "
+                        "specific, or switch_on_limit"
+                    ),
                 ),
                 PluginVariable(
                     name="specific_proxy_id",
                     label="Specific Proxy ID / Tag",
                     type="string",
                     default="",
-                    description="Target proxy ID, URL, or tag to route through when strategy is 'specific'",
+                    description="Target proxy ID, URL, or tag when the strategy is 'specific'",
                 ),
                 PluginVariable(
                     name="proxy",
@@ -79,85 +176,812 @@ class AnthropicProxyPlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="claude-3-5-sonnet",
-                    name="Claude 3.5 Sonnet",
-                    upstream_model="claude-3-5-sonnet-20241022",
+                    id="claude-haiku-5-5",
+                    name="Claude Haiku 5.5",
+                    upstream_model="claude-haiku-5-5",
                     context_window=200000,
-                    max_tokens=8192,
+                    max_tokens=64000,
                 ),
                 PluginModelConfig(
-                    id="claude-3-5-haiku",
-                    name="Claude 3.5 Haiku",
-                    upstream_model="claude-3-5-haiku-20241022",
+                    id="claude-sonnet-5-5",
+                    name="Claude Sonnet 5.5",
+                    upstream_model="claude-sonnet-5-5",
                     context_window=200000,
-                    max_tokens=8192,
+                    max_tokens=64000,
+                ),
+                PluginModelConfig(
+                    id="claude-opus-5-5",
+                    name="Claude Opus 5.5",
+                    upstream_model="claude-opus-5-5",
+                    context_window=200000,
+                    max_tokens=64000,
+                ),
+                PluginModelConfig(
+                    id="claude-fable-5-2",
+                    name="Claude Fable 5.2",
+                    upstream_model="claude-fable-5-2",
+                    context_window=1000000,
+                    max_tokens=64000,
                 ),
             ],
         )
+
+    @property
+    def metadata(self) -> PluginMetadata:
+        return self._metadata
+
+    # ------------------------------------------------------------------
+    # Reasoning helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_effort(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if not raw or raw in ("default", "auto"):
+            return None
+        if raw in ("none", "off", "disabled", "false", "0"):
+            return "none"
+        if raw in ("low", "medium", "high", "xhigh", "max"):
+            return raw
+        return None
+
+    def _resolve_reasoning(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Dict[str, Any],
+    ) -> Tuple[str, str]:
+        """Return ``(target_model, effort)`` with a fully normalized effort."""
+        target_model = model_config.upstream_model or model_config.id
+
+        raw_effort: Optional[str] = None
+        if request.reasoning_effort:
+            raw_effort = request.reasoning_effort
+        elif request.extra_body:
+            raw_effort = request.extra_body.get("reasoning_effort") or request.extra_body.get(
+                "reasoning"
+            )
+
+        # A suffix on the requested model wins over the provider default.
+        requested_model = (request.model or "").strip().lower()
+        for suffix, level in REASONING_SUFFIXES:
+            if requested_model.endswith(suffix):
+                if raw_effort is None:
+                    raw_effort = level
+                break
+
+        effort = self._normalize_effort(raw_effort)
+        if effort is None:
+            effort = self._normalize_effort(variables.get("reasoning_effort")) or "none"
+
+        # Never forward a reasoning routing suffix to the upstream API.
+        for suffix, _ in REASONING_SUFFIXES:
+            if target_model.lower().endswith(suffix):
+                target_model = target_model[: -len(suffix)]
+                break
+
+        return target_model, effort
+
+    @staticmethod
+    def _thinking_budget(effort: str, max_tokens: int) -> Optional[int]:
+        if effort in ("none", "default", ""):
+            return None
+        desired = REASONING_BUDGETS.get(effort)
+        if not desired:
+            return None
+        # Anthropic requires budget_tokens >= 1024 and < max_tokens.
+        upper_bound = int(max_tokens) - 1024
+        if upper_bound < 1024:
+            return None
+        return min(desired, upper_bound)
+
+    @staticmethod
+    def _is_test_mode(api_key: str) -> bool:
+        if not api_key:
+            return True
+        key = api_key.lower().strip()
+        prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
+        return any(key.startswith(p) for p in prefixes) or key in (
+            "test-key",
+            "test_key",
+            "secret123",
+        )
+
+    # ------------------------------------------------------------------
+    # Anthropic request/response translation
+    # ------------------------------------------------------------------
+
+    def _format_anthropic_tools(
+        self, tools: Optional[List[Dict[str, Any]]]
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not tools:
+            return None
+
+        anthropic_tools: List[Dict[str, Any]] = []
+        for tool in tools:
+            if "function" in tool:
+                fn = tool["function"]
+                name = fn.get("name", "")
+                description = fn.get("description", "")
+                parameters = fn.get("parameters", {"type": "object", "properties": {}})
+            else:
+                name = tool.get("name", "")
+                description = tool.get("description", "")
+                parameters = tool.get("input_schema") or tool.get(
+                    "parameters", {"type": "object", "properties": {}}
+                )
+
+            if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                parameters = {"type": "object", "properties": {}}
+
+            anthropic_tools.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "input_schema": parameters,
+                }
+            )
+
+        return anthropic_tools or None
+
+    def _format_anthropic_tool_choice(
+        self, tool_choice: Optional[Union[str, Dict[str, Any]]]
+    ) -> Optional[Dict[str, Any]]:
+        if not tool_choice or tool_choice == "auto":
+            return {"type": "auto"}
+        if tool_choice == "required":
+            return {"type": "any"}
+        if tool_choice == "none":
+            return None
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            fn_name = tool_choice.get("function", {}).get("name")
+            if fn_name:
+                return {"type": "tool", "name": fn_name}
+        return None
+
+    def _build_anthropic_messages(
+        self, messages: List[ChatMessage]
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        system_prompts: List[str] = []
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        for message in messages:
+            if message.role == "system":
+                if isinstance(message.content, str):
+                    system_prompts.append(message.content)
+                elif isinstance(message.content, list):
+                    system_prompts.append("\n".join(str(part) for part in message.content))
+                continue
+
+            if message.role in ("tool", "function"):
+                tool_use_id = message.tool_call_id or getattr(message, "id", None) or "call_unknown"
+                tool_content = str(message.content) if message.content is not None else ""
+                tool_block = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": tool_content,
+                }
+                if anthropic_messages and anthropic_messages[-1]["role"] == "user":
+                    previous = anthropic_messages[-1]["content"]
+                    if isinstance(previous, list):
+                        previous.append(tool_block)
+                    else:
+                        anthropic_messages[-1]["content"] = [
+                            {"type": "text", "text": str(previous)},
+                            tool_block,
+                        ]
+                else:
+                    anthropic_messages.append({"role": "user", "content": [tool_block]})
+                continue
+
+            if message.role == "assistant":
+                blocks: List[Dict[str, Any]] = []
+                if message.content:
+                    if isinstance(message.content, str):
+                        blocks.append({"type": "text", "text": message.content})
+                    elif isinstance(message.content, list):
+                        blocks.extend(message.content)
+
+                for tool_call in message.tool_calls or []:
+                    raw_args = tool_call.get("function", {}).get("arguments", "{}")
+                    if isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args)
+                        except Exception:
+                            parsed_args = {}
+                    else:
+                        parsed_args = raw_args or {}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tool_call.get("id") or f"toolu_{uuid.uuid4().hex[:12]}",
+                            "name": tool_call.get("function", {}).get("name", ""),
+                            "input": parsed_args,
+                        }
+                    )
+
+                if not blocks:
+                    blocks.append({"type": "text", "text": ""})
+
+                if anthropic_messages and anthropic_messages[-1]["role"] == "assistant":
+                    previous = anthropic_messages[-1]["content"]
+                    if isinstance(previous, list):
+                        previous.extend(blocks)
+                    else:
+                        anthropic_messages[-1]["content"] = [
+                            {"type": "text", "text": str(previous)}
+                        ] + blocks
+                else:
+                    anthropic_messages.append({"role": "assistant", "content": blocks})
+                continue
+
+            # role == "user"
+            if anthropic_messages and anthropic_messages[-1]["role"] == "user":
+                previous = anthropic_messages[-1]["content"]
+                if isinstance(previous, list):
+                    if isinstance(message.content, str):
+                        previous.append({"type": "text", "text": message.content})
+                    elif isinstance(message.content, list):
+                        previous.extend(message.content)
+                else:
+                    new_text = (
+                        str(message.content)
+                        if isinstance(message.content, str)
+                        else "\n".join(str(part) for part in message.content)
+                    )
+                    anthropic_messages[-1]["content"] = f"{previous}\n\n{new_text}"
+            else:
+                anthropic_messages.append({"role": "user", "content": message.content})
+
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": "Hello"})
+
+        return system_prompts, anthropic_messages
+
+    def _build_payload(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the native Anthropic Messages payload (also used by tests)."""
+        target_model, effort = self._resolve_reasoning(request, model_config, variables)
+        max_tokens = (
+            request.max_tokens
+            or request.max_completion_tokens
+            or model_config.max_tokens
+            or 4096
+        )
+        max_tokens = int(max_tokens)
+        budget = self._thinking_budget(effort, max_tokens)
+
+        system_prompts, anthropic_messages = self._build_anthropic_messages(request.messages)
+        payload: Dict[str, Any] = {
+            "model": target_model,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+            "stream": bool(request.stream),
+        }
+
+        if system_prompts:
+            payload["system"] = "\n\n".join(system_prompts)
+
+        if budget is not None:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            # Anthropic rejects temperature/top_p when extended thinking is active.
+        else:
+            if request.temperature is not None and request.temperature != 1.0:
+                payload["temperature"] = request.temperature
+            elif request.top_p is not None and request.top_p != 1.0:
+                payload["top_p"] = request.top_p
+
+        anthropic_tools = self._format_anthropic_tools(request.tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+            tool_choice = self._format_anthropic_tool_choice(request.tool_choice)
+            if tool_choice:
+                payload["tool_choice"] = tool_choice
+
+        return payload
+
+    # ------------------------------------------------------------------
+    # Simulation mode
+    # ------------------------------------------------------------------
+
+    def _mock_response(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        account: Optional[Account] = None,
+    ) -> ChatCompletionResponse:
+        model_name = model_config.id
+        account_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(message.role == "tool" for message in request.messages[-2:]):
+            fn = (
+                request.tools[0].get("function", {})
+                if "function" in request.tools[0]
+                else request.tools[0]
+            )
+            call_id = f"toolu_anthropic_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {}) or fn.get(
+                "input_schema", {}
+            ).get("properties", {})
+            if props:
+                first_key = next(iter(props.keys()))
+                mock_args = json.dumps({first_key: "test_value"})
+
+            return ChatCompletionResponse(
+                id=f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}",
+                created=int(time.time()),
+                model=model_name,
+                choices=[
+                    ChatChoice(
+                        index=0,
+                        message=ChatMessage(
+                            role="assistant",
+                            content=None,
+                            tool_calls=[
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": mock_args,
+                                    },
+                                }
+                            ],
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=14,
+                    completion_tokens=24,
+                    total_tokens=38,
+                ),
+            )
+
+        content = (
+            f"Simulated response from Anthropic ({model_name}){account_label}. "
+            "Configure a real API key to reach the Anthropic Messages API."
+        )
+        if any(message.role == "tool" for message in request.messages):
+            content = (
+                f"Simulated response from Anthropic ({model_name}){account_label} "
+                "with tool output processed."
+            )
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}",
+            created=int(time.time()),
+            model=model_name,
+            choices=[
+                ChatChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=content),
+                    finish_reason="stop",
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=14,
+                completion_tokens=24,
+                total_tokens=38,
+            ),
+        )
+
+    async def _mock_stream(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        account: Optional[Account] = None,
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        model_name = model_config.id
+        chunk_id = f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        account_label = f" via account '{account.name}'" if account else ""
+
+        if request.tools and not any(message.role == "tool" for message in request.messages[-2:]):
+            fn = (
+                request.tools[0].get("function", {})
+                if "function" in request.tools[0]
+                else request.tools[0]
+            )
+            call_id = f"toolu_anthropic_{uuid.uuid4().hex[:8]}"
+            tool_name = fn.get("name", "test_tool")
+            mock_args = "{}"
+            props = fn.get("parameters", {}).get("properties", {}) or fn.get(
+                "input_schema", {}
+            ).get("properties", {})
+            if props:
+                first_key = next(iter(props.keys()))
+                mock_args = json.dumps({first_key: "test_value"})
+
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {"name": tool_name, "arguments": ""},
+                                }
+                            ],
+                        },
+                        finish_reason=None,
+                    )
+                ],
+            )
+            for piece in (mock_args[: len(mock_args) // 2], mock_args[len(mock_args) // 2 :]):
+                if piece:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatChoiceDelta(
+                                index=0,
+                                delta={
+                                    "tool_calls": [
+                                        {"index": 0, "function": {"arguments": piece}}
+                                    ]
+                                },
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="tool_calls")],
+            )
+            return
+
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=model_name,
+            choices=[
+                ChatChoiceDelta(
+                    index=0,
+                    delta={"role": "assistant", "content": ""},
+                    finish_reason=None,
+                )
+            ],
+        )
+
+        for token in [
+            "Simulated ",
+            "stream ",
+            "response ",
+            f"from Anthropic for {model_name}{account_label}.",
+        ]:
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(index=0, delta={"content": token}, finish_reason=None)
+                ],
+            )
+
+        yield ChatCompletionChunk(
+            id=chunk_id,
+            created=created,
+            model=model_name,
+            choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
+        )
+
+    # ------------------------------------------------------------------
+    # Upstream streaming
+    # ------------------------------------------------------------------
+
+    async def _stream_messages(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        body: Dict[str, Any],
+        model_config: PluginModelConfig,
+        account: Optional[Account] = None,
+        proxy: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        chunk_id = f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        current_tool_call: Optional[Dict[str, Any]] = None
+        tool_call_index = 0
+        finish_sent = False
+
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+
+                    event_str = line[6:].strip()
+                    if not event_str or event_str == "[DONE]":
+                        continue
+
+                    try:
+                        event = json.loads(event_str)
+                    except Exception:
+                        continue
+
+                    event_type = event.get("type")
+                    if event_type == "error":
+                        error = event.get("error") or {}
+                        raise RuntimeError(
+                            error.get("message") or "Anthropic streaming error"
+                        )
+
+                    if event_type == "message_start":
+                        message = event.get("message") or {}
+                        chunk_id = f"chatcmpl-{message.get('id', uuid.uuid4().hex[:12])}"
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=model_config.id,
+                            choices=[
+                                ChatChoiceDelta(
+                                    index=0,
+                                    delta={"role": "assistant", "content": ""},
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                    elif event_type == "content_block_start":
+                        block = event.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            current_tool_call = {
+                                "index": tool_call_index,
+                                "id": block.get("id", f"toolu_{uuid.uuid4().hex[:8]}"),
+                                "name": block.get("name", ""),
+                            }
+                            yield ChatCompletionChunk(
+                                id=chunk_id,
+                                created=created,
+                                model=model_config.id,
+                                choices=[
+                                    ChatChoiceDelta(
+                                        index=0,
+                                        delta={
+                                            "tool_calls": [
+                                                {
+                                                    "index": tool_call_index,
+                                                    "id": current_tool_call["id"],
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": current_tool_call["name"],
+                                                        "arguments": "",
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                            tool_call_index += 1
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        delta_type = delta.get("type")
+                        if delta_type == "text_delta":
+                            yield ChatCompletionChunk(
+                                id=chunk_id,
+                                created=created,
+                                model=model_config.id,
+                                choices=[
+                                    ChatChoiceDelta(
+                                        index=0,
+                                        delta={"content": delta.get("text", "")},
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                        elif delta_type == "thinking_delta":
+                            yield ChatCompletionChunk(
+                                id=chunk_id,
+                                created=created,
+                                model=model_config.id,
+                                choices=[
+                                    ChatChoiceDelta(
+                                        index=0,
+                                        delta={"reasoning_content": delta.get("thinking", "")},
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                        elif delta_type == "input_json_delta" and current_tool_call is not None:
+                            yield ChatCompletionChunk(
+                                id=chunk_id,
+                                created=created,
+                                model=model_config.id,
+                                choices=[
+                                    ChatChoiceDelta(
+                                        index=0,
+                                        delta={
+                                            "tool_calls": [
+                                                {
+                                                    "index": current_tool_call["index"],
+                                                    "function": {
+                                                        "arguments": delta.get("partial_json", "")
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        finish_reason=None,
+                                    )
+                                ],
+                            )
+                    elif event_type == "content_block_stop":
+                        current_tool_call = None
+                    elif event_type == "message_delta":
+                        raw_stop = (event.get("delta") or {}).get("stop_reason")
+                        finish_reason = (
+                            "tool_calls"
+                            if raw_stop == "tool_use"
+                            else "stop"
+                            if raw_stop in ("end_turn", "stop_sequence")
+                            else (raw_stop or "stop")
+                        )
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=model_config.id,
+                            choices=[
+                                ChatChoiceDelta(
+                                    index=0, delta={}, finish_reason=finish_reason
+                                )
+                            ],
+                        )
+                        finish_sent = True
+                    elif event_type == "message_stop" and not finish_sent:
+                        yield ChatCompletionChunk(
+                            id=chunk_id,
+                            created=created,
+                            model=model_config.id,
+                            choices=[
+                                ChatChoiceDelta(index=0, delta={}, finish_reason="stop")
+                            ],
+                        )
+                        finish_sent = True
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
 
     async def chat_completion(
         self,
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
-        variables: dict,
+        variables: Dict[str, Any],
         account: Optional[Account] = None,
-    ) -> ChatCompletionResponse:
-        api_key = (account.api_key if account else None) or variables.get("anthropic_api_key") or ""
-        version = variables.get("anthropic_version") or "2023-06-01"
-        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
+    ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
+        api_key = (
+            (account.api_key if account else "")
+            or str(variables.get("api_key") or "")
+            or str(variables.get("anthropic_api_key") or "")
+        )
+        base_url = (
+            account.base_url
+            if (account and account.base_url)
+            else str(variables.get("base_url") or "https://api.anthropic.com/v1")
+        ).rstrip("/")
+        version = str(variables.get("anthropic_version") or "2023-06-01").strip()
 
-        headers = {
+        if self._is_test_mode(api_key):
+            if request.stream:
+                return self._mock_stream(request, model_config, account=account)
+            return self._mock_response(request, model_config, account=account)
+
+        payload = self._build_payload(request, model_config, variables)
+        headers: Dict[str, str] = {
             "x-api-key": api_key,
             "anthropic-version": version,
             "content-type": "application/json",
         }
+        url = f"{base_url}/messages"
+        proxy = (
+            str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip()
+            or None
+        )
+        timeout = float(variables.get("timeout") or 60.0)
 
-        system_prompt = None
-        messages = []
-        for msg in request.messages:
-            if msg.role == "system":
-                system_prompt = str(msg.content)
-            else:
-                role = "assistant" if msg.role == "assistant" else "user"
-                messages.append({"role": role, "content": str(msg.content)})
-
-        payload = {
-            "model": model_config.upstream_model or "claude-3-5-sonnet-20241022",
-            "messages": messages,
-            "max_tokens": request.max_tokens or model_config.max_tokens or 4096,
-            "temperature": request.temperature or 1.0,
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-
-        async with httpx.AsyncClient(timeout=60.0, proxy=proxy) as client:
-            resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-            text_content = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text_content += block.get("text", "")
-
-            usage = data.get("usage", {})
-            return ChatCompletionResponse(
-                id=f"chatcmpl-{data.get('id', uuid.uuid4().hex[:12])}",
-                model=request.model,
-                created=int(time.time()),
-                choices=[
-                    ChatChoice(
-                        index=0,
-                        message=ChatMessage(role="assistant", content=text_content),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=CompletionUsage(
-                    prompt_tokens=usage.get("input_tokens", 0),
-                    completion_tokens=usage.get("output_tokens", 0),
-                    total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                ),
+        if request.stream:
+            return self._stream_messages(
+                url,
+                headers,
+                payload,
+                model_config,
+                account=account,
+                proxy=proxy,
+                timeout=timeout,
             )
+
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        text_parts: List[str] = []
+        thinking_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        for block in data.get("content", []):
+            block_type = block.get("type")
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+            elif block_type == "thinking":
+                thinking_parts.append(block.get("thinking", ""))
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:12]}",
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(block.get("input", {})),
+                        },
+                    }
+                )
+
+        raw_stop = data.get("stop_reason")
+        finish_reason = (
+            "tool_calls"
+            if (raw_stop == "tool_use" or tool_calls)
+            else "stop"
+            if raw_stop in ("end_turn", "stop_sequence")
+            else (raw_stop or "stop")
+        )
+        text_content = "".join(text_parts) if text_parts else (None if tool_calls else "")
+        reasoning_content = "".join(thinking_parts) or None
+
+        message_kwargs: Dict[str, Any] = {
+            "role": "assistant",
+            "content": text_content,
+        }
+        if tool_calls:
+            message_kwargs["tool_calls"] = tool_calls
+        if reasoning_content:
+            message_kwargs["reasoning_content"] = reasoning_content
+
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("input_tokens", 0)
+        completion_tokens = usage.get("output_tokens", 0)
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{data.get('id', uuid.uuid4().hex[:12])}",
+            created=int(time.time()),
+            model=model_config.id,
+            choices=[
+                ChatChoice(
+                    index=0,
+                    message=ChatMessage(**message_kwargs),
+                    finish_reason=finish_reason,
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
 
 
 plugin = AnthropicProxyPlugin()

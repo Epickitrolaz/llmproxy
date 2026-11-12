@@ -6,7 +6,7 @@
 
 **Minimalist, High-Performance AI Router & Proxy with Dynamic Plugin Architecture.**
 
-LLMProxy routes OpenAI-compatible chat completion requests to various LLM providers (e.g. Antigravity, Codex, Claude Code, and generic OpenAI-compatible APIs). 
+LLMProxy routes OpenAI-compatible chat completion requests to various LLM providers (e.g. Antigravity, Codex, OpenRouter, Anthropic Messages, and generic OpenAI-compatible APIs).
 
 The only components hard-coded into the router are the **monochrome web dashboard** and the **hosted OpenAI API endpoint (`/v1`)**. Every provider is a standalone Python file in `plugins/` that can be swapped, edited live, or hot-reloaded directly from the dashboard.
 
@@ -20,7 +20,8 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Built-in providers:
     - `plugins/antigravity.py`: Antigravity provider (Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking).
     - `plugins/codex.py`: OpenAI Codex provider (GPT-6 Luna, GPT-4o, GPT-4o Mini, reasoning effort control).
-    - `plugins/claude_code.py`: Anthropic Claude Code provider (Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3.5 Haiku).
+    - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
+    - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
 - **Provider Management & Fullscreen Configuration**:
   - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
@@ -49,6 +50,28 @@ The only components hard-coded into the router are the **monochrome web dashboar
 - **Interactive Chat Playground**:
   - Balanced 1:1 split between model parameters and the chat thread.
   - Test custom rules and provider models with real-time streaming feedback.
+
+---
+
+## Why Claude Code is not bundled
+
+LLMProxy intentionally does not ship a built-in Claude Code provider. Anthropic's
+terms prohibit routing Claude Code traffic through third-party proxies, and
+accounts detected doing so may be suspended. Antigravity carries a similar
+restriction, but its appeals process is considerably more forgiving, and the
+Antigravity CLI (`agy`) is not yet as capable as Claude Code. We therefore keep
+the Antigravity integration available while leaving Claude Code automation to
+users with an approved setup. If you have your own sanctioned credentials, you can
+still add a custom provider from the dashboard without modifying the repository.
+
+## Anthropic and reasoning controls
+
+The bundled `templates/anthropic_proxy.py` template talks to Anthropic's native
+Messages API and pre-configures **Claude Haiku 5.5**, **Claude Sonnet 5.5**,
+**Claude Opus 5.5**, and **Claude Fable 5.2**. Extended thinking is controlled by
+the `reasoning_effort` variable (`none`, `low`, `medium`, `high`, `xhigh`, or
+`max`). A request-level `reasoning_effort` value takes precedence, and
+temperature/top-p are omitted automatically whenever thinking is active.
 
 ---
 
