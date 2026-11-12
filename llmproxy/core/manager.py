@@ -6,13 +6,14 @@ import json
 import logging
 import os
 import random
+import secrets
 import sys
 import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
@@ -55,6 +56,9 @@ class PluginManager:
         self.rules_file = self.data_dir / "load_balancing_rules.json"
         self.logs_file = self.data_dir / "request_logs.json"
         self.proxies_file = self.data_dir / "proxies.json"
+        self.management_key_file = self.data_dir / "management_key.txt"
+        self._management_key: Optional[str] = None
+        self._management_key_lock = threading.Lock()
 
         self.plugins: Dict[str, BasePlugin] = {}
         self.plugin_files: Dict[str, Path] = {}
@@ -316,6 +320,52 @@ class PluginManager:
         """Persist external proxies to disk."""
         serialized = [p.model_dump() for p in self.proxies.values()]
         self._atomic_write(self.proxies_file, json.dumps(serialized, indent=2))
+
+    # ==========================================
+    # CLIProxyAPI-compatible Management API
+    # ==========================================
+
+    def get_management_key(self) -> str:
+        """
+        Return the management key used by the CLIProxyAPI-compatible management API.
+
+        The key can be supplied through LLMPROXY_MANAGEMENT_KEY. Otherwise a stable
+        random key is generated once and persisted under data/management_key.txt so
+        clients such as T3 Code can add this router as a usage hub.
+        """
+        if self._management_key:
+            return self._management_key
+        with self._management_key_lock:
+            if self._management_key:
+                return self._management_key
+            self._management_key = self._resolve_management_key()
+            return self._management_key
+
+    def _resolve_management_key(self) -> str:
+        env_key = os.environ.get("LLMPROXY_MANAGEMENT_KEY", "").strip()
+        if env_key:
+            return env_key
+
+        try:
+            if self.management_key_file.exists():
+                stored_key = self.management_key_file.read_text(encoding="utf-8").strip()
+                if stored_key:
+                    return stored_key
+        except Exception as e:
+            logger.warning("Failed to read management key from %s: %s", self.management_key_file, e)
+
+        key = f"sk-mgmt-{secrets.token_urlsafe(32)}"
+        try:
+            self.management_key_file.parent.mkdir(parents=True, exist_ok=True)
+            self.management_key_file.write_text(key, encoding="utf-8")
+            try:
+                os.chmod(self.management_key_file, 0o600)
+            except OSError:
+                pass
+        except Exception as e:
+            logger.warning("Failed to persist management key to %s: %s", self.management_key_file, e)
+
+        return key
 
     # ==========================================
     # Accounts Management & Load Balancing
@@ -653,6 +703,42 @@ class PluginManager:
             selected = available[idx % len(available)]
             self.rr_indices[provider_id] = (idx + 1) % len(available)
             return selected
+
+    def get_account_candidates(
+        self,
+        provider_id: str,
+        strategy: Optional[str] = None,
+        exclude_account_ids: Optional[Set[str]] = None,
+    ) -> List[Account]:
+        """
+        Return all currently available accounts for a provider in the order they
+        should be attempted. This is used by request failover so every eligible
+        account is tried before a usage-limit error is returned.
+        """
+        exclude = exclude_account_ids or set()
+        available = [
+            a
+            for a in self.accounts.values()
+            if a.provider_id == provider_id and a.is_available() and a.id not in exclude
+        ]
+        if not available:
+            return []
+
+        strat = (strategy or "round_robin").lower().replace("-", "_")
+
+        if strat == "least_used":
+            available.sort(key=lambda a: (a.success_count, a.last_used_at or 0))
+        elif strat == "random":
+            random.shuffle(available)
+        elif strat in ("fallback", "priority"):
+            available.sort(key=lambda a: (a.priority, a.id))
+        else:
+            # Round robin: rotate the available list by the current cursor.
+            idx = self.rr_indices.get(provider_id, 0) % len(available)
+            available = available[idx:] + available[:idx]
+            self.rr_indices[provider_id] = (idx + 1) % len(available)
+
+        return available
 
     def mark_account_result(
         self,

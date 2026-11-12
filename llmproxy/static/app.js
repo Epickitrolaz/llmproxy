@@ -16,6 +16,7 @@
     rules: [],
     stats: {},
     logs: [],
+    managementKey: "",
     statusProviderFilter: "",
     activeSnippetLang: "python",
     selectedSnippetModel: "test-model",
@@ -73,6 +74,9 @@
     apiKeysCountBadge: document.getElementById("api-keys-count-badge"),
     apiKeysTableBody: document.getElementById("api-keys-table-body"),
     btnCreateApiKey: document.getElementById("btn-create-api-key"),
+    managementHubUrl: document.getElementById("management-hub-url"),
+    managementHubKey: document.getElementById("management-hub-key"),
+    copyManagementKeyBtn: document.getElementById("copy-management-key-btn"),
     snippetCode: document.getElementById("snippet-code"),
     snippetModelSelect: document.getElementById("snippet-model-select"),
     headerEndpointDisplay: document.getElementById("header-endpoint-display"),
@@ -606,6 +610,15 @@
     } catch (_) {}
   }
 
+  async function fetchManagementInfo() {
+    try {
+      const data = await api("/api/management");
+      if (el.managementHubUrl) el.managementHubUrl.textContent = data.base_url || "";
+      if (el.managementHubKey) el.managementHubKey.textContent = data.management_key || "";
+      state.managementKey = data.management_key || "";
+    } catch (_) {}
+  }
+
   async function fetchApiKeys() {
     try {
       const data = await api("/api/keys");
@@ -869,6 +882,18 @@ curl -X POST ${baseUrl}/chat/completions \\
         showToast("Base URL endpoint copied");
       } else {
         showToast("Failed to copy URL", "error");
+      }
+    });
+  }
+
+  if (el.copyManagementKeyBtn) {
+    el.copyManagementKeyBtn.addEventListener("click", async () => {
+      const key = (el.managementHubKey && el.managementHubKey.textContent) || state.managementKey || "";
+      const ok = await copyToClipboard(key);
+      if (ok) {
+        showToast("Management key copied");
+      } else {
+        showToast("Failed to copy management key", "error");
       }
     });
   }
@@ -2470,32 +2495,37 @@ curl -X POST ${baseUrl}/chat/completions \\
       if (!state.cachedQuotaData) state.cachedQuotaData = {};
 
       const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
-      if (antigravityAccounts.length > 0) {
-        try {
-          const agStatusRes = await api("/api/antigravity/status");
-          if (agStatusRes && agStatusRes.accounts) {
-            agStatusRes.accounts.forEach((item) => {
-              if (item.quota) {
-                state.cachedQuotaData[item.account_id] = item.quota;
-              }
-            });
-          }
-        } catch (_) {}
-      }
-
       const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
-      if (codexAccounts.length > 0) {
-        try {
-          const codexStatusRes = await api("/api/codex/status");
-          if (codexStatusRes && codexStatusRes.accounts) {
-            codexStatusRes.accounts.forEach((item) => {
-              if (item.quota) {
-                state.cachedQuotaData[item.account_id] = item.quota;
+
+      const antigravityPromise = antigravityAccounts.length > 0
+        ? api("/api/antigravity/status")
+            .then((agStatusRes) => {
+              if (agStatusRes && agStatusRes.accounts) {
+                agStatusRes.accounts.forEach((item) => {
+                  if (item.quota) {
+                    state.cachedQuotaData[item.account_id] = item.quota;
+                  }
+                });
               }
-            });
-          }
-        } catch (_) {}
-      }
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      const codexPromise = codexAccounts.length > 0
+        ? api("/api/codex/status")
+            .then((codexStatusRes) => {
+              if (codexStatusRes && codexStatusRes.accounts) {
+                codexStatusRes.accounts.forEach((item) => {
+                  if (item.quota) {
+                    state.cachedQuotaData[item.account_id] = item.quota;
+                  }
+                });
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      await Promise.all([antigravityPromise, codexPromise]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
 
@@ -2525,22 +2555,20 @@ curl -X POST ${baseUrl}/chat/completions \\
             const bucketKey = b.bucketId || b.displayName || "limit";
             const isHidden = hiddenSet.has(bucketKey);
 
-            let pct = 0;
+            let pct = 100;
             let color = "#34d399";
             let label = "";
 
-            if (b.usedPercent !== undefined && b.usedPercent !== null) {
-              // Usage meter (e.g. Codex) - 0% to 100% used
-              pct = Math.min(100, Math.max(0, Math.round(b.usedPercent)));
-              color = pct < 60 ? "#34d399" : pct < 85 ? "#fbbf24" : "#f43f5e";
-              label = `${pct}%`;
-            } else {
-              // Remaining quota meter (e.g. Antigravity) - 100% to 0% remaining
-              const frac = b.remainingFraction !== undefined ? b.remainingFraction : 1.0;
-              pct = Math.min(100, Math.max(0, Math.round(frac * 100)));
-              color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
-              label = `${pct}%`;
+            // All quota meters show remaining capacity: 100% = fully available,
+            // 0% = used up. Codex reports usedPercent, so invert it when the
+            // normalized remainingFraction is not available.
+            if (b.remainingFraction !== undefined && b.remainingFraction !== null) {
+              pct = Math.min(100, Math.max(0, Math.round(b.remainingFraction * 100)));
+            } else if (b.usedPercent !== undefined && b.usedPercent !== null) {
+              pct = Math.min(100, Math.max(0, Math.round(100 - b.usedPercent)));
             }
+            color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+            label = `${pct}%`;
 
             const resetStr = formatTimeRemaining(b.resetTime);
             const groupName = grp.displayName || (b.usedPercent !== undefined ? "Usage" : "Quota");
@@ -2727,7 +2755,7 @@ curl -X POST ${baseUrl}/chat/completions \\
           if (state.currentTab === "status" || state.currentTab === "logs") {
             fetchStatusData(true);
           }
-        }, 5000);
+        }, 3000);
       } else if (state.autoRefreshInterval) {
         clearInterval(state.autoRefreshInterval);
         state.autoRefreshInterval = null;
@@ -3367,6 +3395,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     await fetchApiKeys();
     await fetchTemporaryApiKey();
     await fetchRules();
+    await fetchManagementInfo();
     populateSnippetModels();
     updateSnippet();
   }

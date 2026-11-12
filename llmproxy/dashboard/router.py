@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -960,10 +961,9 @@ async def get_antigravity_all_status():
     if not accounts:
         return {"accounts": [], "message": "No Google Antigravity accounts configured"}
 
-    results = []
-    for acc in accounts:
+    async def build(acc: Account) -> Dict[str, Any]:
         quota_data = await fetch_antigravity_quota(acc)
-        results.append({
+        return {
             "account_id": acc.id,
             "account_name": acc.name,
             "enabled": acc.enabled,
@@ -971,8 +971,25 @@ async def get_antigravity_all_status():
             "tier": acc.extra_config.get("tier", "free-tier"),
             "rate_limited": not acc.is_available(),
             "quota": quota_data,
-        })
-    return {"accounts": results}
+        }
+
+    results = await asyncio.gather(*(build(acc) for acc in accounts), return_exceptions=True)
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            acc = accounts[index]
+            items.append({
+                "account_id": acc.id,
+                "account_name": acc.name,
+                "enabled": acc.enabled,
+                "email": acc.extra_config.get("email", ""),
+                "tier": acc.extra_config.get("tier", "free-tier"),
+                "rate_limited": not acc.is_available(),
+                "quota": {"error": str(item)},
+            })
+        else:
+            items.append(item)
+    return {"accounts": items}
 
 
 # =========================================================================
@@ -1218,10 +1235,9 @@ async def get_codex_all_status():
     if not accounts:
         return {"accounts": [], "message": "No Codex accounts configured"}
 
-    results = []
-    for acc in accounts:
+    async def build(acc: Account) -> Dict[str, Any]:
         status_data = await fetch_codex_status(acc)
-        results.append({
+        return {
             "account_id": acc.id,
             "account_name": acc.name,
             "enabled": acc.enabled,
@@ -1230,8 +1246,26 @@ async def get_codex_all_status():
             "rate_limited": not acc.is_available(),
             "quota": status_data.get("quota"),
             "status": status_data,
-        })
-    return {"accounts": results}
+        }
+
+    results = await asyncio.gather(*(build(acc) for acc in accounts), return_exceptions=True)
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            acc = accounts[index]
+            items.append({
+                "account_id": acc.id,
+                "account_name": acc.name,
+                "enabled": acc.enabled,
+                "email": acc.extra_config.get("email", ""),
+                "plan_type": acc.extra_config.get("plan_type", "standard"),
+                "rate_limited": not acc.is_available(),
+                "quota": {"error": str(item)},
+                "status": {"error": str(item)},
+            })
+        else:
+            items.append(item)
+    return {"accounts": items}
 
 
 # =========================================================================
@@ -1282,6 +1316,17 @@ async def get_stats():
         "total_accounts": total_accounts,
         "active_accounts": active_accounts,
         "avg_latency_ms": avg_latency,
+    }
+
+
+@router.get("/management")
+async def get_management_info(request: Request):
+    """Return the CLIProxyAPI-compatible hub URL and management key for T3 Code/OpenCode."""
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "base_url": base_url,
+        "management_url": f"{base_url}/v0/management",
+        "management_key": plugin_manager.get_management_key(),
     }
 
 
