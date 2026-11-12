@@ -139,6 +139,14 @@ def _persist_plugin_metadata(plugin_id: str, meta: PluginMetadata) -> None:
         pass
 
 
+def _effective_plugin_metadata(plugin_id: str, fallback: PluginMetadata) -> PluginMetadata:
+    """Return plugin metadata merged with the effective model configuration."""
+    for plugin_meta in plugin_manager.list_plugins():
+        if plugin_meta.id == plugin_id:
+            return plugin_meta
+    return fallback
+
+
 # =========================================================================
 # Plugins Management
 # =========================================================================
@@ -530,16 +538,13 @@ async def add_custom_model(plugin_id: str, model_config: PluginModelConfig):
     except Exception:
         pass
 
-    if model_config.id not in [m.id for m in plugin.metadata.models]:
-        plugin.metadata.models.append(model_config)
-
-    _persist_plugin_metadata(plugin_id, plugin.metadata)
+    plugin_meta = _effective_plugin_metadata(plugin_id, plugin.metadata)
 
     return {
         "status": "ok",
         "message": f"Model '{model_config.id}' added to plugin '{plugin_id}'",
         "model": model_config,
-        "plugin": plugin.metadata,
+        "plugin": plugin_meta,
     }
 
 
@@ -584,28 +589,13 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
     except Exception:
         pass
 
-    for m in plugin.metadata.models:
-        if m.id == model_id:
-            if body.name is not None:
-                m.name = body.name
-            if body.upstream_model is not None:
-                m.upstream_model = body.upstream_model
-            if body.enabled is not None:
-                m.enabled = body.enabled
-            if body.context_window is not None:
-                m.context_window = body.context_window
-            if body.max_tokens is not None:
-                m.max_tokens = body.max_tokens
-            if body.parameters is not None:
-                m.parameters = body.parameters
-
-    _persist_plugin_metadata(plugin_id, plugin.metadata)
+    plugin_meta = _effective_plugin_metadata(plugin_id, plugin.metadata)
 
     return {
         "status": "ok",
         "message": f"Model '{model_id}' updated",
         "model": target_model,
-        "plugin": plugin.metadata,
+        "plugin": plugin_meta,
     }
 
 
@@ -631,12 +621,6 @@ async def delete_custom_model(plugin_id: str, model_id: str):
         plugin_manager.delete_custom_model(plugin_id, model_id)
     except Exception:
         pass
-
-    idx = next((i for i, m in enumerate(plugin.metadata.models) if m.id == model_id), None)
-    if idx is not None:
-        plugin.metadata.models.pop(idx)
-
-    _persist_plugin_metadata(plugin_id, plugin.metadata)
 
     return {
         "status": "ok",
