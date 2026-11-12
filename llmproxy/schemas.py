@@ -102,6 +102,10 @@ class ModelCard(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "llmproxy"
     permission: List[Dict[str, Any]] = []
+    # Levels accepted through ``reasoning_effort`` (or a ``:<level>`` suffix).
+    # Clients may use these to offer a reasoning selector without listing the
+    # levels as separate model IDs.
+    reasoning_levels: List[str] = Field(default_factory=list)
 
 
 class ModelListResponse(BaseModel):
@@ -227,6 +231,9 @@ class PluginModelConfig(BaseModel):
     context_window: Optional[int] = 8192
     max_tokens: Optional[int] = 4096
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    # Reasoning levels this model accepts through ``reasoning_effort``. The
+    # proxy maps the level internally; clients use the base model ID.
+    reasoning_levels: List[str] = Field(default_factory=list)
 
 
 class PluginMetadata(BaseModel):

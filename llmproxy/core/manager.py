@@ -1195,9 +1195,19 @@ class PluginManager:
                     deleted.add(default_m.id)
             for m in persisted_models:
                 default_m = default_by_id.get(m.id)
-                # Only values that actually differ from the plugin defaults are edits.
-                if default_m is not None and m.model_dump() != default_m.model_dump():
-                    edited[m.id] = m.model_dump()
+                if default_m is None:
+                    continue
+                # Only values that actually differ from the plugin defaults are
+                # edits. Capability metadata such as reasoning_levels comes from
+                # the plugin and must not turn into a stale user edit.
+                persisted_data = m.model_dump()
+                default_data = default_m.model_dump()
+                if any(
+                    default_data.get(key) != value
+                    for key, value in persisted_data.items()
+                    if key != "reasoning_levels"
+                ):
+                    edited[m.id] = persisted_data
             cfg["deleted_models"] = list(deleted)
             cfg["edited_models"] = edited
 
@@ -1209,6 +1219,9 @@ class PluginManager:
                 continue
             if default_m.id in edited:
                 model_obj = PluginModelConfig.model_validate(edited[default_m.id])
+                # Reasoning levels are plugin capability metadata, not part of
+                # a user's model edits. Keep them current after a template update.
+                model_obj.reasoning_levels = list(default_m.reasoning_levels)
             else:
                 model_obj = default_m.model_copy()
             result.append(model_obj)

@@ -65,6 +65,31 @@ def test_models_added_by_plugin_update_stay_visible(tmp_path: Path):
     assert model_ids == ["model-a", "model-a:high"]
 
 
+def test_reasoning_levels_are_refreshed_after_template_update(tmp_path: Path):
+    """Capability metadata added to a default model is not hidden by a stale edit."""
+    plugins_dir = tmp_path / "plugins"
+    data_dir = tmp_path / "data"
+    plugins_dir.mkdir()
+    plugin_file = plugins_dir / "snapshot_test.py"
+    _write_plugin(plugin_file, "1.0.0", ["model-a"])
+
+    manager = PluginManager(plugins_dir=plugins_dir, data_dir=data_dir)
+    manager.discover_and_load_all()
+    manager._save_configs()
+
+    plugin_file.write_text(
+        PLUGIN_TEMPLATE.format(version="2.0.0", models=(
+            'PluginModelConfig(id="model-a", name="model-a", '
+            'reasoning_levels=["low", "high"])'
+        )),
+        encoding="utf-8",
+    )
+    manager.reload_plugin("snapshot_test")
+
+    models = {m.id: m for m in manager.get_plugin_models("snapshot_test")}
+    assert models["model-a"].reasoning_levels == ["low", "high"]
+
+
 def test_legacy_generated_deletions_are_repaired(tmp_path: Path):
     """The generated state that hid newly added defaults is cleared once."""
     plugins_dir = tmp_path / "plugins"
