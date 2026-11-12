@@ -137,6 +137,29 @@ def test_payload_enables_thinking_and_omits_sampling():
     assert payload_none["temperature"] == 0.2
 
 
+def test_thinking_relaxes_forced_tool_choice():
+    plugin = AnthropicProxyPlugin()
+    request = ChatCompletionRequest(
+        model="claude-sonnet-5-5",
+        messages=[ChatMessage(role="user", content="hi")],
+        tools=SAMPLE_TOOLS,
+        tool_choice="required",
+        reasoning_effort="high",
+    )
+    payload = plugin._build_payload(request, _model(), {})
+    assert payload["tool_choice"] == {"type": "auto"}
+
+    no_thinking = ChatCompletionRequest(
+        model="claude-sonnet-5-5",
+        messages=[ChatMessage(role="user", content="hi")],
+        tools=SAMPLE_TOOLS,
+        tool_choice="required",
+        reasoning_effort="none",
+    )
+    payload_none = plugin._build_payload(no_thinking, _model(), {})
+    assert payload_none["tool_choice"] == {"type": "any"}
+
+
 def test_tools_and_messages_are_translated_for_anthropic():
     plugin = AnthropicProxyPlugin()
     anthropic_tools = plugin._format_anthropic_tools(SAMPLE_TOOLS)

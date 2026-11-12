@@ -482,6 +482,9 @@ class AnthropicProxyPlugin(BasePlugin):
             payload["tools"] = anthropic_tools
             tool_choice = self._format_anthropic_tool_choice(request.tool_choice)
             if tool_choice:
+                # Anthropic only supports auto/none tool choice while thinking.
+                if budget is not None and tool_choice.get("type") in ("any", "tool"):
+                    tool_choice = {"type": "auto"}
                 payload["tool_choice"] = tool_choice
 
         return payload
