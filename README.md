@@ -83,14 +83,17 @@ Claude 4.6 and newer use adaptive thinking with `output_config.effort`; older
 models fall back to an explicit thinking budget.
 
 `GET /v1/models` lists each model once under its base ID. Models that support
-reasoning also carry a `reasoning_levels` field, for example:
+reasoning also carry a `reasoning_levels` field, and every plugin-backed model
+reports its configured limits through `context_window` and `max_tokens`:
 
 ```json
 {
   "id": "claude-opus-5-5",
   "object": "model",
   "owned_by": "anthropic_proxy",
-  "reasoning_levels": ["none", "low", "medium", "high", "xhigh", "max"]
+  "reasoning_levels": ["none", "low", "medium", "high", "xhigh", "max"],
+  "context_window": 200000,
+  "max_tokens": 64000
 }
 ```
 

@@ -106,6 +106,10 @@ class ModelCard(BaseModel):
     # Clients may use these to offer a reasoning selector without listing the
     # levels as separate model IDs.
     reasoning_levels: List[str] = Field(default_factory=list)
+    # Configured limits, additive to the OpenAI model-card shape. ``None`` when
+    # the model has no explicit configuration (for example load-balancer rules).
+    context_window: Optional[int] = None
+    max_tokens: Optional[int] = None
 
 
 class ModelListResponse(BaseModel):

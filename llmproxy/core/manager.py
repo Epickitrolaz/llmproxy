@@ -95,6 +95,7 @@ class PluginManager:
 
         # Write optimization state
         self._write_lock = threading.Lock()
+        self._saving_configs = False
         self._logs_dirty = False
         self._logs_timer: Optional[threading.Timer] = None
         self._api_keys_dirty = False
@@ -150,15 +151,21 @@ class PluginManager:
 
     def _save_configs(self) -> None:
         """Persist current plugin configurations to disk."""
-        for plugin_id, cfg in self.configs.items():
-            models = self.get_plugin_models(plugin_id)
-            if models:
-                cfg["models"] = [m.model_dump() for m in models]
-            plugin = self.plugins.get(plugin_id)
-            if plugin:
-                default_models = getattr(plugin, "_default_models", plugin.metadata.models)
-                cfg["default_model_ids"] = [m.id for m in default_models]
-        self._atomic_write(self.config_file, json.dumps(self.configs, indent=2))
+        if self._saving_configs:
+            return
+        self._saving_configs = True
+        try:
+            for plugin_id, cfg in self.configs.items():
+                models = self.get_plugin_models(plugin_id)
+                if models:
+                    cfg["models"] = [m.model_dump() for m in models]
+                plugin = self.plugins.get(plugin_id)
+                if plugin:
+                    default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+                    cfg["default_model_ids"] = [m.id for m in default_models]
+            self._atomic_write(self.config_file, json.dumps(self.configs, indent=2))
+        finally:
+            self._saving_configs = False
 
     def _load_accounts(self) -> None:
         """Load connected accounts from disk."""
@@ -1180,6 +1187,45 @@ class PluginManager:
         deleted = set(cfg.get("deleted_models", []))
         edited = dict(cfg.get("edited_models", {}))
         custom = list(cfg.get("custom_models", []))
+        default_by_id = {m.id: m for m in default_models}
+        cleaned = False
+
+        # Older delete+re-add flows could persist a model with a built-in ID in
+        # ``custom_models``. Migrate those entries into ``edited_models`` so the
+        # user's values take effect instead of being shadowed by the default.
+        if custom:
+            remaining: List[Dict[str, Any]] = []
+            for raw_custom in custom:
+                try:
+                    custom_model = PluginModelConfig.model_validate(raw_custom)
+                except Exception:
+                    remaining.append(raw_custom)
+                    continue
+
+                default_model = default_by_id.get(custom_model.id)
+                if default_model is None:
+                    remaining.append(raw_custom)
+                    continue
+
+                # A custom collision means the model is meant to exist; clear any
+                # stale deletion marker for the same ID.
+                deleted.discard(custom_model.id)
+                if custom_model.id not in edited:
+                    persisted_data = custom_model.model_dump()
+                    default_data = default_model.model_dump()
+                    if any(
+                        default_data.get(key) != value
+                        for key, value in persisted_data.items()
+                        if key != "reasoning_levels"
+                    ):
+                        edited[custom_model.id] = persisted_data
+                cleaned = True
+
+            if cleaned:
+                custom = remaining
+                cfg["custom_models"] = custom
+                cfg["edited_models"] = edited
+                cfg["deleted_models"] = list(deleted)
 
         # If cfg has a direct "models" list (from dashboard persist) and deleted_models/edited_models was empty,
         # reconstruct deleted and edited models from it. Only defaults that were known
@@ -1233,9 +1279,9 @@ class PluginManager:
                 result.append(model_obj)
                 seen_ids.add(model_obj.id)
 
-        if repaired:
-            # Persist the repaired state and the current default IDs so the legacy
-            # reconstruction cannot hide these defaults again after a restart.
+        if repaired or cleaned:
+            # Persist the repaired/cleaned state and the current default IDs so it
+            # survives a restart.
             try:
                 self._save_configs()
             except Exception as e:
@@ -1357,8 +1403,13 @@ class PluginManager:
         if model_config.id in deleted:
             deleted.remove(model_config.id)
 
-        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
+        plugin = self.plugins[plugin_id]
+        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+        default_model_ids = {m.id for m in default_models}
         if model_config.id in default_model_ids:
+            # A built-in ID belongs in edited_models even if the runtime metadata
+            # list was mutated (for example by a previous delete).
+            cfg["custom_models"] = [m for m in custom_models if m.get("id") != model_config.id]
             cfg.setdefault("edited_models", {})[model_config.id] = model_config.model_dump()
             self._save_configs()
             return True
@@ -1391,20 +1442,26 @@ class PluginManager:
             },
         )
         custom_models = cfg.setdefault("custom_models", [])
-        for i, m in enumerate(custom_models):
-            if m.get("id") == model_id:
-                custom_models[i] = model_config.model_dump()
-                self._save_configs()
-                return True
+        plugin = self.plugins[plugin_id]
+        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+        default_model_ids = {m.id for m in default_models}
 
-        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
         if model_id in default_model_ids:
+            # Built-in IDs must always be edited, never shadowed by a stale custom
+            # entry left behind by an older delete+re-add flow.
+            cfg["custom_models"] = [m for m in custom_models if m.get("id") != model_id]
             cfg.setdefault("edited_models", {})[model_id] = model_config.model_dump()
             deleted = cfg.setdefault("deleted_models", [])
             if model_id in deleted:
                 deleted.remove(model_id)
             self._save_configs()
             return True
+
+        for i, m in enumerate(custom_models):
+            if m.get("id") == model_id:
+                custom_models[i] = model_config.model_dump()
+                self._save_configs()
+                return True
 
         custom_models.append(model_config.model_dump())
         self._save_configs()
@@ -1431,7 +1488,9 @@ class PluginManager:
         if model_id in cfg.get("edited_models", {}):
             del cfg["edited_models"][model_id]
 
-        default_model_ids = {m.id for m in self.plugins[plugin_id].metadata.models}
+        plugin = self.plugins[plugin_id]
+        default_models = getattr(plugin, "_default_models", plugin.metadata.models)
+        default_model_ids = {m.id for m in default_models}
         if model_id in default_model_ids:
             deleted = cfg.setdefault("deleted_models", [])
             if model_id not in deleted:
