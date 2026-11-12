@@ -44,12 +44,11 @@ from llmproxy.schemas import (
 )
 
 # Template gallery identity (read by the dashboard template loader).
-id = "opencode_go"
-name = "OpenCode Go"
-description = (
-    "OpenCode Go subscription gateway with OpenAI-compatible Chat Completions, "
-    "API-key accounts, stable session routing, and reasoning controls"
-)
+# Keep these assignments formatted without spaces around "=": the gallery
+# loader reads them with a simple regex and needs them before the model list.
+id="opencode_go"
+name="OpenCode Go"
+description="OpenCode Go subscription gateway with OpenAI-compatible Chat Completions, API-key accounts, stable session routing, and reasoning controls"
 
 DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 DEFAULT_USER_AGENT = "llmproxy/1.0"
