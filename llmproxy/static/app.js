@@ -2536,11 +2536,27 @@ curl -X POST ${baseUrl}/chat/completions \\
         }),
       });
 
-      const replyContent = (res.choices && res.choices[0] && res.choices[0].message)
-        ? res.choices[0].message.content
+      const replyMessage = (res.choices && res.choices[0] && res.choices[0].message)
+        ? res.choices[0].message
+        : null;
+      const replyContent = replyMessage
+        ? replyMessage.content
         : (res.response || JSON.stringify(res));
+      const reasoningContent = replyMessage
+        ? (replyMessage.reasoning_content || replyMessage.reasoning || "")
+        : "";
 
-      assistantBubble.textContent = replyContent;
+      if (reasoningContent) {
+        assistantBubble.innerHTML = `
+          <div class="chat-reasoning">
+            <div class="chat-reasoning-label">Reasoning</div>
+            <div class="chat-reasoning-text">${escapeHtml(reasoningContent)}</div>
+          </div>
+          <div class="chat-answer">${escapeHtml(replyContent)}</div>
+        `;
+      } else {
+        assistantBubble.textContent = replyContent;
+      }
       state.chatMessages.push({ role: "assistant", content: replyContent });
     } catch (err) {
       assistantBubble.innerHTML = `<span style="color: var(--accent-red);">Error: ${escapeHtml(err.message)}</span>`;

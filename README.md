@@ -82,6 +82,14 @@ temperature/top-p are omitted automatically whenever thinking is active.
 Claude 4.6 and newer use adaptive thinking with `output_config.effort`; older
 models fall back to an explicit thinking budget.
 
+Reasoning is returned to OpenAI-compatible clients as `reasoning_content` in
+both streaming deltas and non-streaming messages, and the dashboard Playground
+renders it above the answer. The plugin also keeps the signed thinking blocks
+from a tool-use turn and replays them when the tool result is sent back, which
+Anthropic requires to continue a reasoning chain across tool calls. Requests
+may pass the level as `reasoning_effort`, as a `<model>:<level>` suffix, or as
+`extra_body.reasoning.effort`.
+
 `GET /v1/models` lists each model once under its base ID. Models that support
 reasoning also carry a `reasoning_levels` field, and every plugin-backed model
 reports its configured limits through `context_window` and `max_tokens`:
