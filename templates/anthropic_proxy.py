@@ -11,6 +11,7 @@ import json
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 import httpx
@@ -62,6 +63,50 @@ REASONING_SUFFIXES: Tuple[Tuple[str, str], ...] = (
 # their base ID; the proxy maps the level to the upstream thinking controls.
 REASONING_LEVELS: Tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
 
+# Anthropic requires the signed ``thinking`` / ``redacted_thinking`` blocks that
+# preceded a ``tool_use`` block to be replayed byte-for-byte when the tool
+# result is sent back. OpenAI-compatible clients only see ``reasoning_content``,
+# so the raw blocks are kept here, keyed by tool-use ID, for the duration of
+# the tool loop. The cache is intentionally small and in-memory: tool loops are
+# short-lived and signatures are only valid for the current conversation.
+_THINKING_BLOCKS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+_THINKING_BLOCKS_LIMIT = 512
+
+
+def remember_thinking_blocks(
+    tool_use_id: Optional[str], blocks: Optional[List[Dict[str, Any]]]
+) -> None:
+    """Cache signed thinking blocks so a later tool result can replay them."""
+    if not tool_use_id or not blocks:
+        return
+    replayable = [dict(block) for block in blocks if _is_replayable_thinking(block)]
+    if not replayable:
+        return
+    _THINKING_BLOCKS[tool_use_id] = replayable
+    _THINKING_BLOCKS.move_to_end(tool_use_id)
+    while len(_THINKING_BLOCKS) > _THINKING_BLOCKS_LIMIT:
+        _THINKING_BLOCKS.popitem(last=False)
+
+
+def _is_replayable_thinking(block: Dict[str, Any]) -> bool:
+    """Return True when a thinking block carries the data Anthropic requires."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("type") == "redacted_thinking":
+        return bool(block.get("data"))
+    return block.get("type") == "thinking" and bool(block.get("signature"))
+
+
+def cached_thinking_blocks(tool_use_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Return a copy of the signed thinking blocks stored for a tool call."""
+    if not tool_use_id:
+        return []
+    blocks = _THINKING_BLOCKS.get(tool_use_id)
+    if not blocks:
+        return []
+    _THINKING_BLOCKS.move_to_end(tool_use_id)
+    return [dict(block) for block in blocks]
+
 
 class AnthropicProxyPlugin(BasePlugin):
     """Anthropic Messages API provider with an OpenAI-compatible surface."""
@@ -74,7 +119,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 "Anthropic Claude Messages API provider with streaming, tool calls, "
                 "and extended thinking support"
             ),
-            version="2.0.0",
+            version="2.1.0",
             author="Anthropic",
             enabled=True,
             filename="anthropic_proxy.py",
@@ -255,9 +300,15 @@ class AnthropicProxyPlugin(BasePlugin):
         if request.reasoning_effort:
             raw_effort = request.reasoning_effort
         elif request.extra_body:
-            raw_effort = request.extra_body.get("reasoning_effort") or request.extra_body.get(
-                "reasoning"
-            )
+            raw_effort = request.extra_body.get("reasoning_effort")
+            if raw_effort is None:
+                reasoning = request.extra_body.get("reasoning")
+                if isinstance(reasoning, dict):
+                    raw_effort = reasoning.get("effort") or reasoning.get(
+                        "reasoning_effort"
+                    )
+                elif reasoning:
+                    raw_effort = reasoning
 
         # A suffix on the requested model wins over the provider default.
         requested_model = (request.model or "").strip().lower()
@@ -392,7 +443,9 @@ class AnthropicProxyPlugin(BasePlugin):
         return None
 
     def _build_anthropic_messages(
-        self, messages: List[ChatMessage]
+        self,
+        messages: List[ChatMessage],
+        thinking_active: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         system_blocks: List[Dict[str, Any]] = []
         anthropic_messages: List[Dict[str, Any]] = []
@@ -440,11 +493,35 @@ class AnthropicProxyPlugin(BasePlugin):
                 continue
 
             if message.role == "assistant":
-                blocks: List[Dict[str, Any]] = []
-                if message.content:
-                    blocks.extend(_text_blocks(message.content))
+                text_blocks: List[Dict[str, Any]] = (
+                    _text_blocks(message.content) if message.content else []
+                )
+                explicit_thinking = getattr(message, "thinking_blocks", None)
 
-                for tool_call in message.tool_calls or []:
+                blocks: List[Dict[str, Any]] = []
+                text_placed = False
+                for index, tool_call in enumerate(message.tool_calls or []):
+                    thinking: List[Dict[str, Any]] = []
+                    if thinking_active:
+                        if index == 0 and isinstance(explicit_thinking, list):
+                            # A client that round-trips the raw blocks wins over
+                            # the proxy-side cache.
+                            thinking = [
+                                dict(block)
+                                for block in explicit_thinking
+                                if _is_replayable_thinking(block)
+                            ]
+                        else:
+                            thinking = cached_thinking_blocks(tool_call.get("id"))
+
+                    if thinking:
+                        if text_blocks and not text_placed:
+                            blocks.extend(thinking)
+                            blocks.extend(text_blocks)
+                            text_placed = True
+                        else:
+                            blocks.extend(thinking)
+
                     raw_args = tool_call.get("function", {}).get("arguments", "{}")
                     if isinstance(raw_args, str):
                         try:
@@ -461,6 +538,9 @@ class AnthropicProxyPlugin(BasePlugin):
                             "input": parsed_args,
                         }
                     )
+
+                if text_blocks and not text_placed:
+                    blocks = text_blocks + blocks
 
                 if not blocks:
                     blocks.append({"type": "text", "text": ""})
@@ -537,9 +617,14 @@ class AnthropicProxyPlugin(BasePlugin):
             or 4096
         )
         max_tokens = int(max_tokens)
-        thinking_active = False
+        effort_active = bool(effort not in ("none", "default", ""))
+        adaptive = self._uses_adaptive_thinking(target_model)
+        budget = None if adaptive else self._thinking_budget(effort, max_tokens)
+        thinking_active = bool(effort_active and (adaptive or budget is not None))
 
-        system_blocks, anthropic_messages = self._build_anthropic_messages(request.messages)
+        system_blocks, anthropic_messages = self._build_anthropic_messages(
+            request.messages, thinking_active=thinking_active
+        )
         payload: Dict[str, Any] = {
             "model": target_model,
             "messages": anthropic_messages,
@@ -551,16 +636,12 @@ class AnthropicProxyPlugin(BasePlugin):
             # An array of content blocks is required for system-level cache_control.
             payload["system"] = system_blocks
 
-        if effort not in ("none", "default", ""):
-            if self._uses_adaptive_thinking(target_model):
+        if effort_active:
+            if adaptive:
                 payload["thinking"] = {"type": "adaptive"}
                 payload["output_config"] = {"effort": effort}
-                thinking_active = True
-            else:
-                budget = self._thinking_budget(effort, max_tokens)
-                if budget is not None:
-                    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                    thinking_active = True
+            elif budget is not None:
+                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         # Anthropic rejects temperature/top_p when extended thinking is active.
         if not thinking_active:
@@ -586,11 +667,34 @@ class AnthropicProxyPlugin(BasePlugin):
     # Simulation mode
     # ------------------------------------------------------------------
 
+    def _mock_reasoning(
+        self,
+        request: ChatCompletionRequest,
+        model_config: PluginModelConfig,
+        variables: Optional[Dict[str, Any]],
+        tool_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """Return simulated reasoning text when thinking is configured on."""
+        _, effort = self._resolve_reasoning(request, model_config, variables or {})
+        if effort in ("none", "default", ""):
+            return None
+        model_name = model_config.id
+        if tool_name:
+            return (
+                f"Simulated reasoning for {model_name} at {effort} effort: "
+                f"the request needs the {tool_name} tool before answering."
+            )
+        return (
+            f"Simulated reasoning for {model_name} at {effort} effort: "
+            "no further tool call is required, so the answer can be produced now."
+        )
+
     def _mock_response(
         self,
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account] = None,
+        variables: Optional[Dict[str, Any]] = None,
     ) -> ChatCompletionResponse:
         model_name = model_config.id
         account_label = f" via account '{account.name}'" if account else ""
@@ -611,6 +715,24 @@ class AnthropicProxyPlugin(BasePlugin):
                 first_key = next(iter(props.keys()))
                 mock_args = json.dumps({first_key: "test_value"})
 
+            message_kwargs: Dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": mock_args,
+                        },
+                    }
+                ],
+            }
+            reasoning = self._mock_reasoning(request, model_config, variables, tool_name)
+            if reasoning:
+                message_kwargs["reasoning_content"] = reasoning
+
             return ChatCompletionResponse(
                 id=f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}",
                 created=int(time.time()),
@@ -618,20 +740,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 choices=[
                     ChatChoice(
                         index=0,
-                        message=ChatMessage(
-                            role="assistant",
-                            content=None,
-                            tool_calls=[
-                                {
-                                    "id": call_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tool_name,
-                                        "arguments": mock_args,
-                                    },
-                                }
-                            ],
-                        ),
+                        message=ChatMessage(**message_kwargs),
                         finish_reason="tool_calls",
                     )
                 ],
@@ -652,6 +761,11 @@ class AnthropicProxyPlugin(BasePlugin):
                 "with tool output processed."
             )
 
+        message_kwargs = {"role": "assistant", "content": content}
+        reasoning = self._mock_reasoning(request, model_config, variables)
+        if reasoning:
+            message_kwargs["reasoning_content"] = reasoning
+
         return ChatCompletionResponse(
             id=f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}",
             created=int(time.time()),
@@ -659,7 +773,7 @@ class AnthropicProxyPlugin(BasePlugin):
             choices=[
                 ChatChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=content),
+                    message=ChatMessage(**message_kwargs),
                     finish_reason="stop",
                 )
             ],
@@ -675,6 +789,7 @@ class AnthropicProxyPlugin(BasePlugin):
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         account: Optional[Account] = None,
+        variables: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         model_name = model_config.id
         chunk_id = f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}"
@@ -696,6 +811,26 @@ class AnthropicProxyPlugin(BasePlugin):
             if props:
                 first_key = next(iter(props.keys()))
                 mock_args = json.dumps({first_key: "test_value"})
+
+            reasoning = self._mock_reasoning(
+                request, model_config, variables, tool_name
+            )
+            if reasoning:
+                yield ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        ChatChoiceDelta(
+                            index=0,
+                            delta={
+                                "role": "assistant",
+                                "reasoning_content": reasoning,
+                            },
+                            finish_reason=None,
+                        )
+                    ],
+                )
 
             yield ChatCompletionChunk(
                 id=chunk_id,
@@ -758,6 +893,21 @@ class AnthropicProxyPlugin(BasePlugin):
                 )
             ],
         )
+
+        reasoning = self._mock_reasoning(request, model_config, variables)
+        if reasoning:
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=created,
+                model=model_name,
+                choices=[
+                    ChatChoiceDelta(
+                        index=0,
+                        delta={"reasoning_content": reasoning},
+                        finish_reason=None,
+                    )
+                ],
+            )
 
         for token in [
             "Simulated ",
@@ -831,6 +981,8 @@ class AnthropicProxyPlugin(BasePlugin):
         chunk_id = f"chatcmpl-anthropic-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         current_tool_call: Optional[Dict[str, Any]] = None
+        current_thinking: Optional[Dict[str, Any]] = None
+        pending_thinking: List[Dict[str, Any]] = []
         tool_call_index = 0
         finish_sent = False
         last_usage = CompletionUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
@@ -842,10 +994,10 @@ class AnthropicProxyPlugin(BasePlugin):
                     line = line.strip()
                     if not line or line.startswith(":"):
                         continue
-                    if not line.startswith("data: "):
+                    if not line.startswith("data:"):
                         continue
 
-                    event_str = line[6:].strip()
+                    event_str = line[5:].strip()
                     if not event_str or event_str == "[DONE]":
                         continue
 
@@ -880,12 +1032,29 @@ class AnthropicProxyPlugin(BasePlugin):
                         )
                     elif event_type == "content_block_start":
                         block = event.get("content_block") or {}
-                        if block.get("type") == "tool_use":
+                        block_type = block.get("type")
+                        if block_type == "thinking":
+                            current_thinking = {
+                                "type": "thinking",
+                                "thinking": block.get("thinking", ""),
+                            }
+                            if block.get("signature"):
+                                current_thinking["signature"] = block["signature"]
+                        elif block_type == "redacted_thinking":
+                            if block.get("data"):
+                                pending_thinking.append(
+                                    {"type": "redacted_thinking", "data": block["data"]}
+                                )
+                        elif block_type == "tool_use":
                             current_tool_call = {
                                 "index": tool_call_index,
                                 "id": block.get("id", f"toolu_{uuid.uuid4().hex[:8]}"),
                                 "name": block.get("name", ""),
                             }
+                            remember_thinking_blocks(
+                                current_tool_call["id"], pending_thinking
+                            )
+                            pending_thinking = []
                             yield ChatCompletionChunk(
                                 id=chunk_id,
                                 created=created,
@@ -928,6 +1097,11 @@ class AnthropicProxyPlugin(BasePlugin):
                                 ],
                             )
                         elif delta_type == "thinking_delta":
+                            if current_thinking is not None:
+                                current_thinking["thinking"] = (
+                                    current_thinking.get("thinking", "")
+                                    + delta.get("thinking", "")
+                                )
                             yield ChatCompletionChunk(
                                 id=chunk_id,
                                 created=created,
@@ -940,6 +1114,8 @@ class AnthropicProxyPlugin(BasePlugin):
                                     )
                                 ],
                             )
+                        elif delta_type == "signature_delta" and current_thinking is not None:
+                            current_thinking["signature"] = delta.get("signature", "")
                         elif delta_type == "input_json_delta" and current_tool_call is not None:
                             yield ChatCompletionChunk(
                                 id=chunk_id,
@@ -963,6 +1139,9 @@ class AnthropicProxyPlugin(BasePlugin):
                                 ],
                             )
                     elif event_type == "content_block_stop":
+                        if current_thinking is not None:
+                            pending_thinking.append(current_thinking)
+                            current_thinking = None
                         current_tool_call = None
                     elif event_type == "message_delta":
                         raw_stop = (event.get("delta") or {}).get("stop_reason")
@@ -1029,8 +1208,12 @@ class AnthropicProxyPlugin(BasePlugin):
 
         if self._is_test_mode(api_key):
             if request.stream:
-                return self._mock_stream(request, model_config, account=account)
-            return self._mock_response(request, model_config, account=account)
+                return self._mock_stream(
+                    request, model_config, account=account, variables=variables
+                )
+            return self._mock_response(
+                request, model_config, account=account, variables=variables
+            )
 
         payload = self._build_payload(request, model_config, variables)
         headers: Dict[str, str] = {
@@ -1063,6 +1246,7 @@ class AnthropicProxyPlugin(BasePlugin):
 
         text_parts: List[str] = []
         thinking_parts: List[str] = []
+        pending_thinking: List[Dict[str, Any]] = []
         tool_calls: List[Dict[str, Any]] = []
         for block in data.get("content", []):
             block_type = block.get("type")
@@ -1070,10 +1254,25 @@ class AnthropicProxyPlugin(BasePlugin):
                 text_parts.append(block.get("text", ""))
             elif block_type == "thinking":
                 thinking_parts.append(block.get("thinking", ""))
+                thinking_block: Dict[str, Any] = {
+                    "type": "thinking",
+                    "thinking": block.get("thinking", ""),
+                }
+                if block.get("signature"):
+                    thinking_block["signature"] = block["signature"]
+                pending_thinking.append(thinking_block)
+            elif block_type == "redacted_thinking":
+                if block.get("data"):
+                    pending_thinking.append(
+                        {"type": "redacted_thinking", "data": block["data"]}
+                    )
             elif block_type == "tool_use":
+                tool_id = block.get("id") or f"toolu_{uuid.uuid4().hex[:12]}"
+                remember_thinking_blocks(tool_id, pending_thinking)
+                pending_thinking = []
                 tool_calls.append(
                     {
-                        "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:12]}",
+                        "id": tool_id,
                         "type": "function",
                         "function": {
                             "name": block.get("name", ""),
