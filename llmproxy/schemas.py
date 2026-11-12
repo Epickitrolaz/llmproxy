@@ -71,6 +71,9 @@ class CompletionUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cache_read_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
+    prompt_tokens_details: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -354,4 +357,6 @@ class RequestLogEntry(BaseModel):
     latency_ms: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     error_message: Optional[str] = None

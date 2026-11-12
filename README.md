@@ -25,8 +25,10 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
 - **Context Caching Passthrough**:
   - Anthropic `cache_control` breakpoints are preserved on system prompts, messages, and tools.
+  - `anthropic_proxy` automatically adds cache breakpoints when an OpenAI-style client sends none (`auto_prompt_cache`, enabled by default).
   - OpenAI-compatible providers forward `prompt_cache_key` and `prompt_cache_retention`.
   - Gemini/Antigravity accepts `cachedContent` references, and cached-token counts are reported through OpenAI-style usage details.
+  - Request logs persist cache-read/write counters, and the dashboard shows a cache hit rate.
 - **Provider Management & Fullscreen Configuration**:
   - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
   - **Pin to Top**: Pin favorite providers to prioritize them across the dashboard and status overview.
@@ -89,6 +91,14 @@ from a tool-use turn and replays them when the tool result is sent back, which
 Anthropic requires to continue a reasoning chain across tool calls. Requests
 may pass the level as `reasoning_effort`, as a `<model>:<level>` suffix, or as
 `extra_body.reasoning.effort`.
+
+The plugin also enables Anthropic prompt caching for OpenAI-style clients that
+do not send `cache_control` themselves. With `auto_prompt_cache` on (the
+default), it places one ephemeral breakpoint at the end of the system prompt and
+one at the end of the final message, provided the request is at least Anthropic's
+minimum cacheable size (1024 tokens, or 2048 for Haiku). Explicit client
+breakpoints and `extra_body.cache_control` are left untouched. Set
+`auto_prompt_cache` to `false` if you prefer to control cache writes yourself.
 
 `GET /v1/models` lists each model once under its base ID. Models that support
 reasoning also carry a `reasoning_levels` field, and every plugin-backed model

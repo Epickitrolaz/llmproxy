@@ -70,6 +70,7 @@
     statSuccessRate: document.getElementById("stat-success-rate"),
     statActiveModels: document.getElementById("stat-active-models"),
     statAvgLatency: document.getElementById("stat-avg-latency"),
+    statCacheHitRate: document.getElementById("stat-cache-hit-rate"),
     // Overview
     apiKeysCountBadge: document.getElementById("api-keys-count-badge"),
     apiKeysTableBody: document.getElementById("api-keys-table-body"),
@@ -604,6 +605,7 @@
       if (el.statSuccessRate) el.statSuccessRate.textContent = `${data.success_rate || 100}%`;
       if (el.statActiveModels) el.statActiveModels.textContent = data.active_models_count || 0;
       if (el.statAvgLatency) el.statAvgLatency.textContent = `${data.avg_latency_ms || 0} ms`;
+      if (el.statCacheHitRate) el.statCacheHitRate.textContent = `${data.cache_hit_rate || 0}%`;
       if (el.statProvidersCount) el.statProvidersCount.textContent = data.active_plugins_count || 0;
       if (el.statTotalAccounts) el.statTotalAccounts.textContent = data.total_accounts || 0;
       if (el.statActiveAccounts) el.statActiveAccounts.textContent = data.active_accounts || 0;
@@ -2986,7 +2988,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (state.logs.length === 0) {
       el.logsTableBody.innerHTML = `
         <tr>
-          <td colspan="8" style="text-align: center; color: var(--ink-muted); padding: 24px;">
+          <td colspan="9" style="text-align: center; color: var(--ink-muted); padding: 24px;">
             No requests logged yet. Make requests to <code>/v1/chat/completions</code> to see real-time persistent audit records.
           </td>
         </tr>
@@ -3003,6 +3005,16 @@ curl -X POST ${baseUrl}/chat/completions \\
         ? `<span class="badge badge-active">${log.status_code || 200} OK</span>`
         : `<span class="badge" style="color: var(--accent-red); border-color: var(--accent-red-border);">${log.status_code || 500} ERR</span>`;
 
+      const cacheRead = log.cache_read_input_tokens || 0;
+      const cacheCreated = log.cache_creation_input_tokens || 0;
+      const cacheablePrompt = (log.prompt_tokens || 0) + cacheRead + cacheCreated;
+      const cacheHitRate = cacheablePrompt > 0 ? Math.round((cacheRead / cacheablePrompt) * 1000) / 10 : 0;
+      const cacheCell = cacheRead > 0
+        ? `<span class="badge badge-active">${cacheHitRate}% hit</span>`
+        : cacheCreated > 0
+          ? `<span class="badge">${cacheCreated} written</span>`
+          : `<span style="color: var(--ink-muted);">—</span>`;
+
       tr.innerHTML = `
         <td style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-muted);">${escapeHtml(timeStr)}</td>
         <td>${statusBadge}</td>
@@ -3011,6 +3023,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         <td><code style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-secondary);">${escapeHtml(log.api_key_id || "direct")}</code></td>
         <td style="font-family: var(--font-mono);">${log.latency_ms || 0} ms</td>
         <td style="font-family: var(--font-mono);">${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
+        <td>${cacheCell}</td>
         <td style="font-size: 11.5px; color: var(--ink-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
           ${escapeHtml(log.error_message || "Completed")}
         </td>
