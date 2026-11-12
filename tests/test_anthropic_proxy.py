@@ -160,6 +160,62 @@ def test_thinking_relaxes_forced_tool_choice():
     assert payload_none["tool_choice"] == {"type": "any"}
 
 
+def test_cache_control_is_preserved_and_applied():
+    plugin = AnthropicProxyPlugin()
+    request = ChatCompletionRequest(
+        model="claude-sonnet-5-5",
+        messages=[
+            ChatMessage(
+                role="system",
+                content=[
+                    {
+                        "type": "text",
+                        "text": "Cached system prompt",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            ),
+            ChatMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "text",
+                        "text": "Cached user prompt",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            ),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        reasoning_effort="none",
+    )
+    payload = plugin._build_payload(request, _model(), {})
+    assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][0]["cache_control"] == {"type": "ephemeral"}
+
+    convenience = ChatCompletionRequest(
+        model="claude-sonnet-5-5",
+        messages=[ChatMessage(role="user", content="Cache this prefix")],
+        reasoning_effort="none",
+        extra_body={"cache_control": {"type": "ephemeral"}},
+    )
+    convenience_payload = plugin._build_payload(convenience, _model(), {})
+    assert convenience_payload["messages"][0]["content"][0]["cache_control"] == {
+        "type": "ephemeral"
+    }
+
+
 def test_tools_and_messages_are_translated_for_anthropic():
     plugin = AnthropicProxyPlugin()
     anthropic_tools = plugin._format_anthropic_tools(SAMPLE_TOOLS)
@@ -183,8 +239,8 @@ def test_tools_and_messages_are_translated_for_anthropic():
         ),
         ChatMessage(role="tool", tool_call_id="call_1", content="25C"),
     ]
-    system_prompts, anthropic_messages = plugin._build_anthropic_messages(messages)
-    assert system_prompts == ["System instruction"]
+    system_blocks, anthropic_messages = plugin._build_anthropic_messages(messages)
+    assert system_blocks == [{"type": "text", "text": "System instruction"}]
     assert len(anthropic_messages) == 3
     assert anthropic_messages[0]["role"] == "user"
     assert anthropic_messages[1]["role"] == "assistant"
@@ -236,7 +292,12 @@ def test_real_anthropic_response_is_translated(monkeypatch):
                     {"type": "text", "text": "Hello from Claude."},
                 ],
                 "stop_reason": "end_turn",
-                "usage": {"input_tokens": 7, "output_tokens": 5},
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 4,
+                    "cache_creation_input_tokens": 2,
+                },
             }
 
     class FakeClient:
@@ -274,3 +335,6 @@ def test_real_anthropic_response_is_translated(monkeypatch):
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
     assert response.usage.total_tokens == 12
+    assert response.usage.cache_read_input_tokens == 4
+    assert response.usage.cache_creation_input_tokens == 2
+    assert response.usage.prompt_tokens_details == {"cached_tokens": 4}

@@ -128,7 +128,12 @@ def test_real_openrouter_request_is_forwarded(monkeypatch):
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 4,
+                    "total_tokens": 7,
+                    "prompt_tokens_details": {"cached_tokens": 2},
+                },
             }
 
     class FakeClient:
@@ -175,3 +180,4 @@ def test_real_openrouter_request_is_forwarded(monkeypatch):
     assert captured["json"]["reasoning"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello via OpenRouter."
     assert response.usage.total_tokens == 7
+    assert response.usage.prompt_tokens_details == {"cached_tokens": 2}

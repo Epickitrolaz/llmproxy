@@ -135,6 +135,17 @@ class OpenAICompatiblePlugin(BasePlugin):
     def metadata(self) -> PluginMetadata:
         return self._metadata
 
+    @staticmethod
+    def _apply_cache_fields(body: Dict[str, Any], request: ChatCompletionRequest) -> None:
+        """Forward OpenAI prompt-cache routing hints and vendor cache options."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        for key in ("prompt_cache_key", "prompt_cache_retention"):
+            value = getattr(request, key, None)
+            if value is None:
+                value = extra.get(key)
+            if value is not None:
+                body[key] = value
+
     def _is_test_mode(self, api_key: str, base_url: str) -> bool:
         key = api_key.lower().strip()
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
@@ -467,6 +478,8 @@ class OpenAICompatiblePlugin(BasePlugin):
             body["response_format"] = request.response_format
         if request.stop is not None:
             body["stop"] = request.stop
+
+        self._apply_cache_fields(body, request)
 
         url = f"{base_url}/chat/completions"
         proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None

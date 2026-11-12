@@ -224,8 +224,8 @@ def test_anthropic_proxy_tool_conversion():
         ),
         ChatMessage(role="tool", tool_call_id="call_1", content="25C"),
     ]
-    sys_prompts, a_messages = plugin._build_anthropic_messages(req_messages)
-    assert sys_prompts == ["System instruction"]
+    sys_blocks, a_messages = plugin._build_anthropic_messages(req_messages)
+    assert sys_blocks == [{"type": "text", "text": "System instruction"}]
     assert len(a_messages) == 3
     assert a_messages[0]["role"] == "user"
     assert a_messages[1]["role"] == "assistant"

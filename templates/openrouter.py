@@ -299,6 +299,33 @@ class OpenRouterPlugin(BasePlugin):
             headers["X-Title"] = app_name
         return headers
 
+    @staticmethod
+    def _apply_cache_fields(body: Dict[str, Any], request: ChatCompletionRequest) -> None:
+        """Forward prompt-cache hints and an optional Anthropic-style breakpoint."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        for key in ("prompt_cache_key", "prompt_cache_retention"):
+            value = getattr(request, key, None)
+            if value is None:
+                value = extra.get(key)
+            if value is not None:
+                body[key] = value
+
+        cache_control = getattr(request, "cache_control", None) or extra.get("cache_control")
+        if not cache_control:
+            return
+        messages = body.get("messages") or []
+        if not messages:
+            return
+        content = messages[-1].get("content")
+        if isinstance(content, list) and content:
+            block = content[-1]
+            if isinstance(block, dict):
+                block.setdefault("cache_control", cache_control)
+        elif isinstance(content, str):
+            messages[-1]["content"] = [
+                {"type": "text", "text": content, "cache_control": cache_control}
+            ]
+
     def _build_body(
         self,
         request: ChatCompletionRequest,
@@ -346,6 +373,7 @@ class OpenRouterPlugin(BasePlugin):
             if stream_options.get("include_usage"):
                 body["stream_options"] = {"include_usage": True}
 
+        self._apply_cache_fields(body, request)
         return body
 
     def _mock_response(

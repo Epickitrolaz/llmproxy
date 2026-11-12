@@ -315,6 +315,62 @@ class CodexPlugin(BasePlugin):
 
         return "default"
 
+    @staticmethod
+    def _apply_cache_fields(payload: Dict[str, Any], request: ChatCompletionRequest) -> None:
+        """Forward OpenAI prompt-cache routing hints to the Responses API."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        for key in ("prompt_cache_key", "prompt_cache_retention"):
+            value = getattr(request, key, None)
+            if value is None:
+                value = extra.get(key)
+            if value is not None:
+                payload[key] = value
+
+    @staticmethod
+    def _build_usage(
+        usage_obj: Optional[Dict[str, Any]],
+        default_prompt: int = 0,
+        default_completion: int = 0,
+    ) -> CompletionUsage:
+        """Map Responses API usage, including cached input tokens, to OpenAI shape."""
+        usage_obj = usage_obj or {}
+        prompt_tokens = int(
+            usage_obj.get("input_tokens")
+            or usage_obj.get("prompt_tokens")
+            or default_prompt
+            or 0
+        )
+        completion_tokens = int(
+            usage_obj.get("output_tokens")
+            or usage_obj.get("completion_tokens")
+            or default_completion
+            or 0
+        )
+        total_tokens = int(
+            usage_obj.get("total_tokens") or (prompt_tokens + completion_tokens)
+        )
+
+        usage = CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        details = (
+            usage_obj.get("input_tokens_details")
+            or usage_obj.get("prompt_tokens_details")
+            or {}
+        )
+        if details.get("cached_tokens") is not None:
+            usage.prompt_tokens_details = {
+                "cached_tokens": int(details.get("cached_tokens") or 0)
+            }
+        output_details = usage_obj.get("output_tokens_details") or {}
+        if output_details.get("reasoning_tokens") is not None:
+            usage.completion_tokens_details = {
+                "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0)
+            }
+        return usage
+
     def _format_useful_details(
         self,
         time_taken_ms: float,
@@ -626,6 +682,8 @@ class CodexPlugin(BasePlugin):
         elif parsed_effort == "none":
             payload["reasoning"] = {"effort": "none"}
 
+        self._apply_cache_fields(payload, request)
+
         # Tools formatting (Responses API expects flat tool schemas)
         if request.tools:
             tools_list: List[Dict[str, Any]] = []
@@ -830,11 +888,7 @@ class CodexPlugin(BasePlugin):
                     usage_obj = resp_obj.get("usage", {})
                     usage = None
                     if usage_obj:
-                        usage = CompletionUsage(
-                            prompt_tokens=usage_obj.get("input_tokens", 0),
-                            completion_tokens=usage_obj.get("output_tokens", 0),
-                            total_tokens=usage_obj.get("total_tokens", 0),
-                        )
+                        usage = self._build_usage(usage_obj)
                     finish_reason = "tool_calls" if has_tool_calls else "stop"
                     yield ChatCompletionChunk(
                         id=chunk_id,
@@ -938,11 +992,7 @@ class CodexPlugin(BasePlugin):
                         chunk_id = resp_id
                     u_obj = resp_obj.get("usage", {})
                     if u_obj:
-                        usage = CompletionUsage(
-                            prompt_tokens=u_obj.get("input_tokens", 0),
-                            completion_tokens=u_obj.get("output_tokens", 0),
-                            total_tokens=u_obj.get("total_tokens", 0),
-                        )
+                        usage = self._build_usage(u_obj)
 
         content = "".join(text_pieces) if text_pieces else None
         if tool_calls_map:

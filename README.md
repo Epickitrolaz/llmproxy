@@ -23,6 +23,10 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
+- **Context Caching Passthrough**:
+  - Anthropic `cache_control` breakpoints are preserved on system prompts, messages, and tools.
+  - OpenAI-compatible providers forward `prompt_cache_key` and `prompt_cache_retention`.
+  - Gemini/Antigravity accepts `cachedContent` references, and cached-token counts are reported through OpenAI-style usage details.
 - **Provider Management & Fullscreen Configuration**:
   - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
   - **Pin to Top**: Pin favorite providers to prioritize them across the dashboard and status overview.

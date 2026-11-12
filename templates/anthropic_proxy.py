@@ -301,28 +301,32 @@ class AnthropicProxyPlugin(BasePlugin):
 
         anthropic_tools: List[Dict[str, Any]] = []
         for tool in tools:
+            cache_control = None
             if "function" in tool:
                 fn = tool["function"]
                 name = fn.get("name", "")
                 description = fn.get("description", "")
                 parameters = fn.get("parameters", {"type": "object", "properties": {}})
+                cache_control = tool.get("cache_control") or fn.get("cache_control")
             else:
                 name = tool.get("name", "")
                 description = tool.get("description", "")
                 parameters = tool.get("input_schema") or tool.get(
                     "parameters", {"type": "object", "properties": {}}
                 )
+                cache_control = tool.get("cache_control")
 
             if not isinstance(parameters, dict) or parameters.get("type") != "object":
                 parameters = {"type": "object", "properties": {}}
 
-            anthropic_tools.append(
-                {
-                    "name": name,
-                    "description": description,
-                    "input_schema": parameters,
-                }
-            )
+            anthropic_tool: Dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "input_schema": parameters,
+            }
+            if cache_control:
+                anthropic_tool["cache_control"] = cache_control
+            anthropic_tools.append(anthropic_tool)
 
         return anthropic_tools or None
 
@@ -343,21 +347,34 @@ class AnthropicProxyPlugin(BasePlugin):
 
     def _build_anthropic_messages(
         self, messages: List[ChatMessage]
-    ) -> Tuple[List[str], List[Dict[str, Any]]]:
-        system_prompts: List[str] = []
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        system_blocks: List[Dict[str, Any]] = []
         anthropic_messages: List[Dict[str, Any]] = []
+
+        def _text_blocks(content: Any) -> List[Dict[str, Any]]:
+            """Normalize content into Anthropic blocks while preserving cache_control."""
+            if isinstance(content, str):
+                return [{"type": "text", "text": content}]
+            blocks: List[Dict[str, Any]] = []
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, str):
+                        blocks.append({"type": "text", "text": part})
+                    elif isinstance(part, dict):
+                        blocks.append(dict(part))
+            return blocks
 
         for message in messages:
             if message.role == "system":
-                if isinstance(message.content, str):
-                    system_prompts.append(message.content)
-                elif isinstance(message.content, list):
-                    system_prompts.append("\n".join(str(part) for part in message.content))
+                system_blocks.extend(_text_blocks(message.content))
                 continue
 
             if message.role in ("tool", "function"):
                 tool_use_id = message.tool_call_id or getattr(message, "id", None) or "call_unknown"
-                tool_content = str(message.content) if message.content is not None else ""
+                if isinstance(message.content, list):
+                    tool_content: Any = _text_blocks(message.content)
+                else:
+                    tool_content = str(message.content) if message.content is not None else ""
                 tool_block = {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
@@ -379,10 +396,7 @@ class AnthropicProxyPlugin(BasePlugin):
             if message.role == "assistant":
                 blocks: List[Dict[str, Any]] = []
                 if message.content:
-                    if isinstance(message.content, str):
-                        blocks.append({"type": "text", "text": message.content})
-                    elif isinstance(message.content, list):
-                        blocks.extend(message.content)
+                    blocks.extend(_text_blocks(message.content))
 
                 for tool_call in message.tool_calls or []:
                     raw_args = tool_call.get("function", {}).get("arguments", "{}")
@@ -418,27 +432,49 @@ class AnthropicProxyPlugin(BasePlugin):
                 continue
 
             # role == "user"
+            blocks = _text_blocks(message.content)
             if anthropic_messages and anthropic_messages[-1]["role"] == "user":
                 previous = anthropic_messages[-1]["content"]
                 if isinstance(previous, list):
-                    if isinstance(message.content, str):
-                        previous.append({"type": "text", "text": message.content})
-                    elif isinstance(message.content, list):
-                        previous.extend(message.content)
+                    previous.extend(blocks)
                 else:
-                    new_text = (
-                        str(message.content)
-                        if isinstance(message.content, str)
-                        else "\n".join(str(part) for part in message.content)
-                    )
-                    anthropic_messages[-1]["content"] = f"{previous}\n\n{new_text}"
+                    anthropic_messages[-1]["content"] = [
+                        {"type": "text", "text": str(previous)}
+                    ] + blocks
             else:
-                anthropic_messages.append({"role": "user", "content": message.content})
+                anthropic_messages.append({"role": "user", "content": blocks})
 
         if not anthropic_messages:
-            anthropic_messages.append({"role": "user", "content": "Hello"})
+            anthropic_messages.append({"role": "user", "content": [{"type": "text", "text": "Hello"}]})
 
-        return system_prompts, anthropic_messages
+        return system_blocks, anthropic_messages
+
+    @staticmethod
+    def _apply_cache_control(payload: Dict[str, Any], request: ChatCompletionRequest) -> None:
+        """Apply a top-level cache_control hint to the final message block.
+
+        Anthropic places cache breakpoints on content blocks. Most clients send
+        an explicit block-level ``cache_control``, which is preserved as-is. This
+        helper additionally accepts the common convenience form
+        ``{"cache_control": {"type": "ephemeral"}}`` in ``extra_body``.
+        """
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        cache_control = getattr(request, "cache_control", None) or extra.get("cache_control")
+        if not cache_control:
+            return
+
+        messages = payload.get("messages") or []
+        if not messages:
+            return
+        content = messages[-1].get("content")
+        if isinstance(content, list) and content:
+            block = content[-1]
+            if isinstance(block, dict):
+                block.setdefault("cache_control", cache_control)
+        elif isinstance(content, str):
+            messages[-1]["content"] = [
+                {"type": "text", "text": content, "cache_control": cache_control}
+            ]
 
     def _build_payload(
         self,
@@ -457,7 +493,7 @@ class AnthropicProxyPlugin(BasePlugin):
         max_tokens = int(max_tokens)
         budget = self._thinking_budget(effort, max_tokens)
 
-        system_prompts, anthropic_messages = self._build_anthropic_messages(request.messages)
+        system_blocks, anthropic_messages = self._build_anthropic_messages(request.messages)
         payload: Dict[str, Any] = {
             "model": target_model,
             "messages": anthropic_messages,
@@ -465,8 +501,9 @@ class AnthropicProxyPlugin(BasePlugin):
             "stream": bool(request.stream),
         }
 
-        if system_prompts:
-            payload["system"] = "\n\n".join(system_prompts)
+        if system_blocks:
+            # An array of content blocks is required for system-level cache_control.
+            payload["system"] = system_blocks
 
         if budget is not None:
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
@@ -487,6 +524,7 @@ class AnthropicProxyPlugin(BasePlugin):
                     tool_choice = {"type": "auto"}
                 payload["tool_choice"] = tool_choice
 
+        self._apply_cache_control(payload, request)
         return payload
 
     # ------------------------------------------------------------------
@@ -692,6 +730,39 @@ class AnthropicProxyPlugin(BasePlugin):
     # Upstream streaming
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_usage(
+        usage_obj: Optional[Dict[str, Any]],
+        default_prompt: int = 0,
+        default_completion: int = 0,
+        previous: Optional[CompletionUsage] = None,
+    ) -> CompletionUsage:
+        """Map Anthropic usage, including prompt-cache counters, to OpenAI shape."""
+        usage_obj = usage_obj or {}
+        prompt_tokens = int(usage_obj.get("input_tokens") or default_prompt or 0)
+        completion_tokens = int(usage_obj.get("output_tokens") or default_completion or 0)
+        total_tokens = int(
+            usage_obj.get("total_tokens") or (prompt_tokens + completion_tokens)
+        )
+
+        usage = CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        cache_read = usage_obj.get("cache_read_input_tokens")
+        cache_created = usage_obj.get("cache_creation_input_tokens")
+        if cache_read is None and previous is not None:
+            cache_read = getattr(previous, "cache_read_input_tokens", None)
+        if cache_created is None and previous is not None:
+            cache_created = getattr(previous, "cache_creation_input_tokens", None)
+        if cache_read is not None:
+            usage.cache_read_input_tokens = int(cache_read)
+            usage.prompt_tokens_details = {"cached_tokens": int(cache_read)}
+        if cache_created is not None:
+            usage.cache_creation_input_tokens = int(cache_created)
+        return usage
+
     async def _stream_messages(
         self,
         url: str,
@@ -707,6 +778,7 @@ class AnthropicProxyPlugin(BasePlugin):
         current_tool_call: Optional[Dict[str, Any]] = None
         tool_call_index = 0
         finish_sent = False
+        last_usage = CompletionUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async with client.stream("POST", url, headers=headers, json=body) as response:
@@ -737,6 +809,7 @@ class AnthropicProxyPlugin(BasePlugin):
                     if event_type == "message_start":
                         message = event.get("message") or {}
                         chunk_id = f"chatcmpl-{message.get('id', uuid.uuid4().hex[:12])}"
+                        last_usage = self._build_usage(message.get("usage"))
                         yield ChatCompletionChunk(
                             id=chunk_id,
                             created=created,
@@ -748,6 +821,7 @@ class AnthropicProxyPlugin(BasePlugin):
                                     finish_reason=None,
                                 )
                             ],
+                            usage=last_usage,
                         )
                     elif event_type == "content_block_start":
                         block = event.get("content_block") or {}
@@ -844,6 +918,13 @@ class AnthropicProxyPlugin(BasePlugin):
                             if raw_stop in ("end_turn", "stop_sequence")
                             else (raw_stop or "stop")
                         )
+                        if event.get("usage"):
+                            last_usage = self._build_usage(
+                                event.get("usage"),
+                                default_prompt=last_usage.prompt_tokens,
+                                default_completion=last_usage.completion_tokens,
+                                previous=last_usage,
+                            )
                         yield ChatCompletionChunk(
                             id=chunk_id,
                             created=created,
@@ -853,6 +934,7 @@ class AnthropicProxyPlugin(BasePlugin):
                                     index=0, delta={}, finish_reason=finish_reason
                                 )
                             ],
+                            usage=last_usage,
                         )
                         finish_sent = True
                     elif event_type == "message_stop" and not finish_sent:
@@ -863,6 +945,7 @@ class AnthropicProxyPlugin(BasePlugin):
                             choices=[
                                 ChatChoiceDelta(index=0, delta={}, finish_reason="stop")
                             ],
+                            usage=last_usage,
                         )
                         finish_sent = True
 
@@ -964,9 +1047,7 @@ class AnthropicProxyPlugin(BasePlugin):
         if reasoning_content:
             message_kwargs["reasoning_content"] = reasoning_content
 
-        usage = data.get("usage", {})
-        prompt_tokens = usage.get("input_tokens", 0)
-        completion_tokens = usage.get("output_tokens", 0)
+        usage = self._build_usage(data.get("usage"))
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{data.get('id', uuid.uuid4().hex[:12])}",
@@ -979,11 +1060,7 @@ class AnthropicProxyPlugin(BasePlugin):
                     finish_reason=finish_reason,
                 )
             ],
-            usage=CompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=usage,
         )
 
 

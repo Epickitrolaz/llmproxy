@@ -2,12 +2,19 @@
 Offline Mock Provider Plugin for LLMProxy.
 Simulates instant chat completion without external network calls.
 """
+from __future__ import annotations
+
 import time
 import uuid
+from typing import AsyncIterator, Optional, Union
+
 from llmproxy.core.interface import BasePlugin
 from llmproxy.schemas import (
+    Account,
     ChatChoice,
+    ChatChoiceDelta,
     ChatMessage,
+    ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionUsage,
@@ -85,12 +92,39 @@ class MockProviderPlugin(BasePlugin):
             ],
         )
 
+    @staticmethod
+    def _context_cache_requested(request: ChatCompletionRequest) -> bool:
+        """Detect cache hints so the offline mock reports a simulated cache hit."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        if any(
+            key in extra
+            for key in (
+                "prompt_cache_key",
+                "prompt_cache_retention",
+                "cache_control",
+                "cached_content",
+                "cachedContent",
+            )
+        ):
+            return True
+        if getattr(request, "prompt_cache_key", None) or getattr(
+            request, "cache_control", None
+        ):
+            return True
+        for message in request.messages:
+            if isinstance(message.content, list):
+                for part in message.content:
+                    if isinstance(part, dict) and part.get("cache_control"):
+                        return True
+        return False
+
     async def chat_completion(
         self,
         request: ChatCompletionRequest,
         model_config: PluginModelConfig,
         variables: dict,
-    ) -> ChatCompletionResponse:
+        account: Optional[Account] = None,
+    ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
         start_t = time.perf_counter()
         prefix = variables.get("response_prefix") or "[Mock AI]"
         last_user_msg = "Hello!"
@@ -105,7 +139,14 @@ class MockProviderPlugin(BasePlugin):
         prompt_tokens = max(1, len(last_user_msg.split()))
         completion_tokens = len(base_reply.split())
         total_tokens = prompt_tokens + completion_tokens
+        cache_requested = self._context_cache_requested(request)
+        cached_tokens = max(0, prompt_tokens // 2) if cache_requested else 0
 
+        cache_line = (
+            f"• **Context cache:** simulated ({cached_tokens} cached prompt tokens)\n"
+            if cache_requested
+            else ""
+        )
         details = (
             f"\n\n---\n"
             f"**Execution Details:**\n"
@@ -113,9 +154,60 @@ class MockProviderPlugin(BasePlugin):
             f"• **Timestamp:** {now_str}\n"
             f"• **Model:** {request.model}\n"
             f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
+            f"{cache_line}"
             f"• **Account status:** No account configured (Simulation Mode)"
         )
         reply = base_reply + details
+        usage = CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            **(
+                {"prompt_tokens_details": {"cached_tokens": cached_tokens}}
+                if cache_requested
+                else {}
+            ),
+        )
+
+        if request.stream:
+            chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
+
+            async def stream_response() -> AsyncIterator[ChatCompletionChunk]:
+                yield ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=request.model,
+                    choices=[
+                        ChatChoiceDelta(
+                            index=0,
+                            delta={"role": "assistant", "content": ""},
+                            finish_reason=None,
+                        )
+                    ],
+                )
+                for index in range(0, len(reply), 24):
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=request.model,
+                        choices=[
+                            ChatChoiceDelta(
+                                index=0,
+                                delta={"content": reply[index : index + 24]},
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                yield ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=request.model,
+                    choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")],
+                    usage=usage,
+                )
+
+            return stream_response()
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -128,11 +220,7 @@ class MockProviderPlugin(BasePlugin):
                     finish_reason="stop",
                 )
             ],
-            usage=CompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=usage,
         )
 
 
