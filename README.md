@@ -42,8 +42,11 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - When local keys are created, clients authenticate using `Authorization: Bearer <key>` or `x-api-key: <key>`. (When no keys are configured, requests are allowed without authentication).
 - **Custom Load Balancing Rules (Virtual Models)**:
   - Create custom virtual models exposed on the `/v1` endpoint (e.g. `smart-router`, `hybrid-coder`).
-  - Select target models from any installed provider.
+  - Select target models from any installed provider. Reasoning variants are folded
+    into one target with a level picker instead of appearing as `:none`/`:high` models.
   - Select a routing strategy: Round Robin, Least Used, Random, or Fallback.
+  - Ordered target list: in Fallback mode the first entry is the primary and lower
+    entries are the next fallbacks; Round Robin follows the same order.
   - Transparently exposed in `GET /v1/models` and routed dynamically during completions.
 - **Unified Status & Limits Dashboard**:
   - Multi-provider tabbed view designed to scale cleanly across 50+ providers.
@@ -81,6 +84,11 @@ Every reasoning level is also exposed as a separate model ID in `GET /v1/models`
 (for example `claude-sonnet-5-5:high` or `claude-fable-5-2:max`), so clients such
 as OpenCode can list and select them without manual configuration. The `:` and
 `-` suffix forms are accepted and stripped before the request reaches Anthropic.
+
+The same `:<level>` suffix works generically for any provider model, even when
+the provider does not publish variant IDs. For example `gpt-6-luna:high` resolves
+to `gpt-6-luna` with the per-request `reasoning_effort` set to `high`. Custom load
+balancing rules use this to attach a reasoning level to each target.
 
 ---
 

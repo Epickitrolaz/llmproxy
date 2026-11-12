@@ -1963,7 +1963,13 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     rulesToDisplay.forEach((r) => {
       const tr = document.createElement("tr");
-      const targetsBadges = (r.targets || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ");
+      const targetsBadges = (r.targets || [])
+        .map((target) => {
+          const parsed = splitReasoningSuffix(target);
+          const label = parsed ? `${parsed.baseId} · ${parsed.level}` : target;
+          return `<span class="badge">${escapeHtml(label)}</span>`;
+        })
+        .join(" ");
 
       tr.innerHTML = `
         <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
@@ -2029,6 +2035,71 @@ curl -X POST ${baseUrl}/chat/completions \\
     });
   }
 
+  const RULE_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+  /** Split a `<model>:<level>` ID into its base model and reasoning level. */
+  function splitReasoningSuffix(modelId) {
+    if (!modelId || typeof modelId !== "string") return null;
+    const separator = modelId.lastIndexOf(":");
+    if (separator <= 0) return null;
+    const level = modelId.slice(separator + 1).toLowerCase();
+    if (!RULE_REASONING_LEVELS.includes(level)) return null;
+    return { baseId: modelId.slice(0, separator), level };
+  }
+
+  /**
+   * Build a de-duplicated list of selectable rule targets. Explicit reasoning
+   * model IDs (`model:high`) are folded into the base model instead of being
+   * shown as separate near-duplicate entries, and every provider-level
+   * `reasoning_effort` option is attached to that provider's models.
+   */
+  function buildRuleTargetCatalog() {
+    const catalog = [];
+    const byId = new Map();
+
+    function ensureEntry(id, provider) {
+      let entry = byId.get(id);
+      if (!entry) {
+        entry = {
+          id,
+          name: id,
+          providerName: provider ? provider.name : "",
+          providerId: provider ? provider.id : "",
+          levels: [],
+        };
+        byId.set(id, entry);
+        catalog.push(entry);
+      }
+      return entry;
+    }
+
+    function addLevel(entry, level) {
+      const normalized = String(level || "").toLowerCase();
+      if (!normalized || normalized === "default") return;
+      if (!entry.levels.includes(normalized)) entry.levels.push(normalized);
+    }
+
+    state.plugins.forEach((p) => {
+      const reasoningVar = (p.variables || []).find((v) => v.name === "reasoning_effort");
+      const providerLevels = reasoningVar && Array.isArray(reasoningVar.options)
+        ? reasoningVar.options
+        : [];
+
+      (p.models || []).forEach((m) => {
+        const parsed = splitReasoningSuffix(m.id);
+        const entry = ensureEntry(parsed ? parsed.baseId : m.id, p);
+        if (!parsed) {
+          entry.name = m.name || m.id;
+        } else {
+          addLevel(entry, parsed.level);
+        }
+        providerLevels.forEach((level) => addLevel(entry, level));
+      });
+    });
+
+    return catalog;
+  }
+
   function openRuleModal(rule = null) {
     const idInput = document.getElementById("rule-form-id");
     const mIdInput = document.getElementById("rule-form-model-id");
@@ -2038,32 +2109,73 @@ curl -X POST ${baseUrl}/chat/completions \\
     const enabledInput = document.getElementById("rule-form-enabled");
     const targetsContainer = document.getElementById("rule-targets-container");
     const targetsSearchInput = document.getElementById("rule-targets-search-input");
+    const selectedContainer = document.getElementById("rule-selected-targets");
+    const priorityHint = document.getElementById("rule-priority-hint");
     const title = document.getElementById("modal-rule-title");
 
-    if (targetsSearchInput) {
-      targetsSearchInput.value = "";
-      targetsSearchInput.oninput = (e) => {
-        const q = e.target.value.toLowerCase().trim();
-        targetsContainer.querySelectorAll("label").forEach((lbl) => {
-          const txt = lbl.textContent.toLowerCase();
-          lbl.style.display = !q || txt.includes(q) ? "flex" : "none";
-        });
-      };
-    }
+    const catalog = buildRuleTargetCatalog();
+    const catalogById = new Map(catalog.map((m) => [m.id, m]));
+    const selectedTargets = [];
 
-    // Gather all active models across all providers
-    const allModels = [];
-    state.plugins.forEach((p) => {
-      (p.models || []).forEach((m) => {
-        allModels.push({ id: m.id, providerName: p.name, providerId: p.id });
-      });
+    (rule && rule.targets ? rule.targets : []).forEach((target) => {
+      const parsed = splitReasoningSuffix(target);
+      selectedTargets.push(
+        parsed ? { id: parsed.baseId, level: parsed.level } : { id: target, level: "" }
+      );
     });
 
-    targetsContainer.innerHTML = "";
-    if (allModels.length === 0) {
-      targetsContainer.innerHTML = `<span style="color: var(--ink-muted); font-size: 12px;">No provider models available. Enable provider plugins first.</span>`;
-    } else {
-      allModels.forEach((m) => {
+    // Collapse exact duplicate targets while preserving the saved priority order.
+    const seenTargets = new Set();
+    for (let i = 0; i < selectedTargets.length; i++) {
+      const key = `${selectedTargets[i].id}:${selectedTargets[i].level}`;
+      if (seenTargets.has(key)) {
+        selectedTargets.splice(i, 1);
+        i--;
+      } else {
+        seenTargets.add(key);
+      }
+    }
+
+    el.modalRule._ruleTargets = selectedTargets;
+
+    function hasSelectedBase(baseId) {
+      return selectedTargets.some((t) => t.id === baseId);
+    }
+
+    function levelsForTarget(target) {
+      const entry = catalogById.get(target.id);
+      const levels = entry ? entry.levels.slice() : [];
+      if (target.level && !levels.includes(target.level)) levels.push(target.level);
+      return levels;
+    }
+
+    function updatePriorityHint() {
+      if (!priorityHint) return;
+      const strategy = stratSelect.value;
+      if (strategy === "fallback" || strategy === "priority") {
+        priorityHint.textContent =
+          "Fallback mode: the first selected model is the primary, and each lower entry is the next fallback.";
+      } else {
+        priorityHint.textContent =
+          "The first selected model is tried first. Use the arrows to change priority.";
+      }
+    }
+
+    function renderAvailableTargets() {
+      const query = (targetsSearchInput ? targetsSearchInput.value : "").toLowerCase().trim();
+      targetsContainer.innerHTML = "";
+
+      if (catalog.length === 0) {
+        targetsContainer.innerHTML = `<span style="color: var(--ink-muted); font-size: 12px;">No provider models available. Enable provider plugins first.</span>`;
+        return;
+      }
+
+      let visible = 0;
+      catalog.forEach((m) => {
+        const labelText = `${m.id} (${m.providerName})`;
+        if (query && !labelText.toLowerCase().includes(query)) return;
+        visible++;
+
         const lbl = document.createElement("label");
         lbl.style.display = "flex";
         lbl.style.alignItems = "center";
@@ -2075,15 +2187,113 @@ curl -X POST ${baseUrl}/chat/completions \\
         chk.type = "checkbox";
         chk.value = m.id;
         chk.className = "rule-target-chk";
-        if (rule && (rule.targets || []).includes(m.id)) {
-          chk.checked = true;
-        }
+        chk.checked = hasSelectedBase(m.id);
+        chk.addEventListener("change", () => {
+          if (chk.checked) {
+            if (!hasSelectedBase(m.id)) selectedTargets.push({ id: m.id, level: "" });
+          } else {
+            for (let i = selectedTargets.length - 1; i >= 0; i--) {
+              if (selectedTargets[i].id === m.id) selectedTargets.splice(i, 1);
+            }
+          }
+          renderSelectedTargets();
+        });
 
         lbl.appendChild(chk);
-        lbl.appendChild(document.createTextNode(`${m.id} (${m.providerName})`));
+        lbl.appendChild(document.createTextNode(labelText));
         targetsContainer.appendChild(lbl);
       });
+
+      if (visible === 0) {
+        targetsContainer.innerHTML = `<span style="color: var(--ink-muted); font-size: 12px;">No models match this search.</span>`;
+      }
     }
+
+    function renderSelectedTargets() {
+      selectedContainer.innerHTML = "";
+
+      if (selectedTargets.length === 0) {
+        selectedContainer.innerHTML = `<div class="rule-selected-empty">No targets selected yet. Pick models above.</div>`;
+        updatePriorityHint();
+        return;
+      }
+
+      selectedTargets.forEach((target, index) => {
+        const entry = catalogById.get(target.id);
+        const providerName = entry ? entry.providerName : "";
+        const levels = levelsForTarget(target);
+        const row = document.createElement("div");
+        row.className = "rule-selected-row";
+        row.dataset.targetId = target.id;
+
+        const reasoningHtml = levels.length
+          ? `<div class="rule-selected-controls">
+               <label for="rule-target-level-${index}">Reasoning</label>
+               <select class="select-input rule-reasoning-select" id="rule-target-level-${index}">
+                 <option value="">Default</option>
+                 ${levels
+                   .map(
+                     (level) =>
+                       `<option value="${escapeHtml(level)}"${level === target.level ? " selected" : ""}>${escapeHtml(level)}</option>`
+                   )
+                   .join("")}
+               </select>
+             </div>`
+          : "";
+
+        row.innerHTML = `
+          <span class="rule-selected-index">${index + 1}</span>
+          <div class="rule-selected-info">
+            <div class="rule-selected-title">
+              <span>${escapeHtml(target.id)}</span>
+              ${providerName ? `<span class="badge badge-muted">${escapeHtml(providerName)}</span>` : ""}
+            </div>
+            ${reasoningHtml}
+          </div>
+          <div class="rule-selected-actions">
+            <button type="button" class="rule-order-btn" data-action="up" title="Move up" aria-label="Move up" ${index === 0 ? "disabled" : ""}>↑</button>
+            <button type="button" class="rule-order-btn" data-action="down" title="Move down" aria-label="Move down" ${index === selectedTargets.length - 1 ? "disabled" : ""}>↓</button>
+            <button type="button" class="rule-order-btn rule-remove-btn" data-action="remove" title="Remove target" aria-label="Remove target">✕</button>
+          </div>
+        `;
+
+        const levelSelect = row.querySelector(".rule-reasoning-select");
+        if (levelSelect) {
+          levelSelect.addEventListener("change", () => {
+            selectedTargets[index].level = levelSelect.value;
+          });
+        }
+
+        row.querySelectorAll(".rule-order-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const action = btn.dataset.action;
+            if (action === "remove") {
+              selectedTargets.splice(index, 1);
+            } else if (action === "up" && index > 0) {
+              const previous = selectedTargets[index - 1];
+              selectedTargets[index - 1] = selectedTargets[index];
+              selectedTargets[index] = previous;
+            } else if (action === "down" && index < selectedTargets.length - 1) {
+              const next = selectedTargets[index + 1];
+              selectedTargets[index + 1] = selectedTargets[index];
+              selectedTargets[index] = next;
+            }
+            renderSelectedTargets();
+            if (action === "remove") renderAvailableTargets();
+          });
+        });
+
+        selectedContainer.appendChild(row);
+      });
+
+      updatePriorityHint();
+    }
+
+    if (targetsSearchInput) {
+      targetsSearchInput.value = "";
+      targetsSearchInput.oninput = () => renderAvailableTargets();
+    }
+    stratSelect.onchange = updatePriorityHint;
 
     if (rule) {
       title.textContent = "Edit Custom Load Balancing Rule";
@@ -2105,6 +2315,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       enabledInput.checked = true;
     }
 
+    renderAvailableTargets();
+    renderSelectedTargets();
     enhanceSelect(stratSelect);
     openModal(el.modalRule);
   }
@@ -2123,7 +2335,10 @@ curl -X POST ${baseUrl}/chat/completions \\
       const descInput = document.getElementById("rule-form-desc");
       const enabledInput = document.getElementById("rule-form-enabled");
 
-      const selectedTargets = Array.from(document.querySelectorAll(".rule-target-chk:checked")).map((c) => c.value);
+      const draftTargets = (el.modalRule && el.modalRule._ruleTargets) || [];
+      const selectedTargets = draftTargets
+        .map((target) => (target.level ? `${target.id}:${target.level}` : target.id))
+        .filter((target, index, all) => target && all.indexOf(target) === index);
       const modelId = mIdInput.value.trim();
       const name = nameInput.value.trim() || modelId;
 

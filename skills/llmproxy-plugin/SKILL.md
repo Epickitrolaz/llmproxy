@@ -173,6 +173,9 @@ PluginModelConfig(
   is the final list.
 - If the provider supports reasoning variants, either expose separate model IDs or
   parse suffixes such as `:high`/`-high` and strip them before the upstream call.
+  The router also accepts a generic `<model>:<level>` ID (for example
+  `gpt-6-luna:high`) and passes the level to plugins through the per-request
+  `reasoning_effort` variable, so honoring that variable is enough for rule targets.
 
 ## Non-streaming implementation
 
