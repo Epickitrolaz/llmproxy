@@ -18,6 +18,14 @@ from templates import anthropic_proxy as anthropic_module
 from templates.anthropic_proxy import AnthropicProxyPlugin
 
 
+@pytest.fixture(autouse=True)
+def clear_thinking_block_cache():
+    """Keep the signed-thinking replay cache isolated between tests."""
+    anthropic_module._THINKING_BLOCKS.clear()
+    yield
+    anthropic_module._THINKING_BLOCKS.clear()
+
+
 SAMPLE_TOOLS = [
     {
         "type": "function",
@@ -58,16 +66,11 @@ def test_metadata_preloads_expected_models_and_reasoning_levels():
     for model_id in BASE_MODEL_IDS:
         assert models[model_id].upstream_model == model_id
 
-    # Every reasoning level is exposed as a discoverable model variant.
-    assert len(models) == len(BASE_MODEL_IDS) * (1 + len(REASONING_LEVELS))
+    # Reasoning levels belong to the base model instead of separate model IDs.
+    assert len(models) == len(BASE_MODEL_IDS)
+    assert not any(":" in model_id for model_id in models)
     for model_id in BASE_MODEL_IDS:
-        base_model = models[model_id]
-        for level in REASONING_LEVELS:
-            variant = models[f"{model_id}:{level}"]
-            assert variant.upstream_model == model_id
-            assert variant.context_window == base_model.context_window
-            assert variant.max_tokens == base_model.max_tokens
-            assert variant.parameters == {"reasoning_effort": level}
+        assert models[model_id].reasoning_levels == list(REASONING_LEVELS)
 
     variables = {v.name: v for v in plugin.metadata.variables}
     assert variables["reasoning_effort"].type == "select"
@@ -75,52 +78,37 @@ def test_metadata_preloads_expected_models_and_reasoning_levels():
     assert set(variables["reasoning_effort"].options) == set(REASONING_LEVELS)
 
 
-def test_every_exposed_reasoning_variant_resolves_to_its_level():
+def test_reasoning_suffixes_are_handled_internally():
     plugin = AnthropicProxyPlugin()
-    for model in plugin.metadata.models:
-        if ":" not in model.id:
-            continue
-        base_id, level = model.id.rsplit(":", 1)
+    model = _model("claude-sonnet-5-5")
+    for level in REASONING_LEVELS:
         request = ChatCompletionRequest(
-            model=model.id,
+            model=f"claude-sonnet-5-5:{level}",
             messages=[ChatMessage(role="user", content="hi")],
         )
         target, effort = plugin._resolve_reasoning(request, model, {})
-        assert target == base_id
+        assert target == "claude-sonnet-5-5"
         assert effort == level
 
 
-def test_variant_model_id_builds_expected_thinking_payload():
+def test_base_model_with_effort_builds_expected_thinking_payload():
     plugin = AnthropicProxyPlugin()
+    model = _model("claude-sonnet-5-5")
     for level in REASONING_LEVELS:
-        variant = _model(f"claude-sonnet-5-5:{level}")
         request = ChatCompletionRequest(
-            model=variant.id,
+            model="claude-sonnet-5-5",
             messages=[ChatMessage(role="user", content="hi")],
             max_tokens=64000,
+            reasoning_effort=level,
         )
-        payload = plugin._build_payload(request, variant, {})
+        payload = plugin._build_payload(request, model, {})
         assert payload["model"] == "claude-sonnet-5-5"
         if level == "none":
             assert "thinking" not in payload
+            assert "output_config" not in payload
         else:
-            assert payload["thinking"] == {
-                "type": "enabled",
-                "budget_tokens": plugin._thinking_budget(level, 64000),
-            }
-
-
-def test_reasoning_variant_parameters_apply_when_request_uses_alias():
-    """A load-balancing rule can target a variant while clients send an alias."""
-    plugin = AnthropicProxyPlugin()
-    variant = _model("claude-sonnet-5-5:xhigh")
-    request = ChatCompletionRequest(
-        model="my-claude-rule",
-        messages=[ChatMessage(role="user", content="hi")],
-    )
-    target, effort = plugin._resolve_reasoning(request, variant, {"reasoning_effort": "low"})
-    assert target == "claude-sonnet-5-5"
-    assert effort == "xhigh"
+            assert payload["thinking"] == {"type": "adaptive"}
+            assert payload["output_config"] == {"effort": level}
 
 
 def test_reasoning_resolution_precedence_and_suffixes():
@@ -173,6 +161,31 @@ def test_thinking_budget_respects_max_tokens():
     assert plugin._thinking_budget("none", 64000) is None
 
 
+def test_adaptive_thinking_detection_and_legacy_budget_path():
+    plugin = AnthropicProxyPlugin()
+    assert plugin._uses_adaptive_thinking("claude-opus-5-5")
+    assert plugin._uses_adaptive_thinking("claude-sonnet-4-6")
+    assert plugin._uses_adaptive_thinking("claude-fable-5-2")
+    assert not plugin._uses_adaptive_thinking("claude-opus-4-5")
+    assert not plugin._uses_adaptive_thinking("claude-3-5-sonnet-20241022")
+
+    legacy = PluginModelConfig(
+        id="claude-3-5-sonnet",
+        name="Claude 3.5 Sonnet",
+        upstream_model="claude-3-5-sonnet-20241022",
+        max_tokens=8192,
+    )
+    request = ChatCompletionRequest(
+        model="claude-3-5-sonnet",
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=8192,
+        reasoning_effort="high",
+    )
+    payload = plugin._build_payload(request, legacy, {})
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 7168}
+    assert "output_config" not in payload
+
+
 def test_payload_enables_thinking_and_omits_sampling():
     plugin = AnthropicProxyPlugin()
     request = ChatCompletionRequest(
@@ -183,7 +196,8 @@ def test_payload_enables_thinking_and_omits_sampling():
         reasoning_effort="high",
     )
     payload = plugin._build_payload(request, _model(), {"reasoning_effort": "medium"})
-    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "high"}
     assert "temperature" not in payload
     assert "top_p" not in payload
 
@@ -392,10 +406,356 @@ def test_real_anthropic_response_is_translated(monkeypatch):
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["x-api-key"] == "sk-live-123"
-    assert captured["json"]["thinking"]["budget_tokens"] == 16384
+    assert captured["json"]["thinking"] == {"type": "adaptive"}
+    assert captured["json"]["output_config"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
     assert response.usage.total_tokens == 12
     assert response.usage.cache_read_input_tokens == 4
     assert response.usage.cache_creation_input_tokens == 2
     assert response.usage.prompt_tokens_details == {"cached_tokens": 4}
+
+
+STREAM_THINKING_WITH_TOOL = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_stream","usage":{"input_tokens":9,"output_tokens":1}}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Need the "}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"weather tool."}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG=="}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":0}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"get_weather","input":{}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"location\\":\\"Paris\\"}"}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":1}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":6}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+]
+
+
+def _fake_httpx_client(monkeypatch, *, payload=None, sse_lines=None, captured=None):
+    """Install a fake AsyncClient that serves one non-stream or stream response."""
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+        async def aiter_lines(self):
+            for line in sse_lines or []:
+                yield line
+
+    class StreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            if captured is not None:
+                captured.update(url=url, headers=headers, json=json)
+            return FakeResponse()
+
+        def stream(self, method, url, headers=None, json=None):
+            if captured is not None:
+                captured.update(url=url, headers=headers, json=json)
+            return StreamContext()
+
+    monkeypatch.setattr(anthropic_module.httpx, "AsyncClient", FakeClient)
+
+
+def _stream_request(model):
+    return ChatCompletionRequest(
+        model=model,
+        messages=[ChatMessage(role="user", content="weather in Paris?")],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="high",
+        max_tokens=8000,
+        stream=True,
+    )
+
+
+def _collect_stream(plugin, request, model):
+    async def collect():
+        stream = await plugin.chat_completion(
+            request, model, {"api_key": "sk-live-123"}
+        )
+        return [chunk async for chunk in stream]
+
+    return asyncio.run(collect())
+
+
+def _assistant_tool_call_message(tool_id: str) -> ChatMessage:
+    return ChatMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            {
+                "id": tool_id,
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'},
+            }
+        ],
+    )
+
+
+def test_streaming_emits_reasoning_before_tool_calls(monkeypatch):
+    _fake_httpx_client(monkeypatch, sse_lines=STREAM_THINKING_WITH_TOOL)
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+
+    chunks = _collect_stream(plugin, _stream_request(model.id), model)
+
+    reasoning = "".join(
+        chunk.choices[0].delta.get("reasoning_content", "")
+        for chunk in chunks
+        if chunk.choices
+    )
+    assert reasoning == "Need the weather tool."
+
+    reasoning_index = next(
+        i
+        for i, chunk in enumerate(chunks)
+        if chunk.choices and chunk.choices[0].delta.get("reasoning_content")
+    )
+    tool_index = next(
+        i
+        for i, chunk in enumerate(chunks)
+        if chunk.choices and chunk.choices[0].delta.get("tool_calls")
+    )
+    assert reasoning_index < tool_index
+    assert chunks[-1].choices[0].finish_reason == "tool_calls"
+
+
+def test_streamed_signed_thinking_is_replayed_for_tool_results(monkeypatch):
+    _fake_httpx_client(monkeypatch, sse_lines=STREAM_THINKING_WITH_TOOL)
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    _collect_stream(plugin, _stream_request(model.id), model)
+
+    follow_up = ChatCompletionRequest(
+        model=model.id,
+        messages=[
+            ChatMessage(role="user", content="weather in Paris?"),
+            _assistant_tool_call_message("toolu_stream"),
+            ChatMessage(role="tool", tool_call_id="toolu_stream", content="Sunny, 21C"),
+        ],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="high",
+        max_tokens=8000,
+    )
+    payload = plugin._build_payload(follow_up, model, {})
+    assistant_blocks = payload["messages"][1]["content"]
+
+    # Anthropic requires the assistant turn that issued a tool call to start
+    # with the exact signed thinking block from the original response.
+    assert assistant_blocks[0] == {
+        "type": "thinking",
+        "thinking": "Need the weather tool.",
+        "signature": "SIG==",
+    }
+    assert assistant_blocks[1]["type"] == "tool_use"
+    assert assistant_blocks[1]["id"] == "toolu_stream"
+
+
+def test_non_streaming_signed_thinking_is_replayed_for_tool_results(monkeypatch):
+    payload = {
+        "id": "msg_1",
+        "content": [
+            {"type": "thinking", "thinking": "Call the tool.", "signature": "SIG2=="},
+            {"type": "tool_use", "id": "toolu_nonstream", "name": "get_weather", "input": {}},
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 4, "output_tokens": 2},
+    }
+    _fake_httpx_client(monkeypatch, payload=payload)
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="weather?")],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="high",
+        max_tokens=8000,
+    )
+    response = asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+    assert response.choices[0].message.reasoning_content == "Call the tool."
+
+    follow_up = ChatCompletionRequest(
+        model=model.id,
+        messages=[
+            ChatMessage(role="user", content="weather?"),
+            _assistant_tool_call_message("toolu_nonstream"),
+            ChatMessage(role="tool", tool_call_id="toolu_nonstream", content="Rain"),
+        ],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="high",
+        max_tokens=8000,
+    )
+    follow_payload = plugin._build_payload(follow_up, model, {})
+    assert follow_payload["messages"][1]["content"][0] == {
+        "type": "thinking",
+        "thinking": "Call the tool.",
+        "signature": "SIG2==",
+    }
+
+
+def test_thinking_blocks_are_not_replayed_when_reasoning_is_disabled(monkeypatch):
+    _fake_httpx_client(
+        monkeypatch,
+        sse_lines=STREAM_THINKING_WITH_TOOL,
+    )
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    _collect_stream(plugin, _stream_request(model.id), model)
+
+    follow_up = ChatCompletionRequest(
+        model=model.id,
+        messages=[
+            ChatMessage(role="user", content="weather in Paris?"),
+            _assistant_tool_call_message("toolu_stream"),
+            ChatMessage(role="tool", tool_call_id="toolu_stream", content="Sunny"),
+        ],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="none",
+        max_tokens=8000,
+    )
+    payload = plugin._build_payload(follow_up, model, {})
+    assert "thinking" not in payload
+    assert all(
+        block["type"] != "thinking"
+        for block in payload["messages"][1]["content"]
+    )
+
+
+def test_simulation_emits_reasoning_content():
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        reasoning_effort="high",
+    )
+    response = plugin._mock_response(request, model, variables={"reasoning_effort": "high"})
+    assert response.choices[0].message.reasoning_content.startswith(
+        "Simulated reasoning for claude-sonnet-5-5 at high effort"
+    )
+
+    disabled = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        reasoning_effort="none",
+    )
+    response_none = plugin._mock_response(
+        disabled, model, variables={"reasoning_effort": "high"}
+    )
+    assert getattr(response_none.choices[0].message, "reasoning_content", None) is None
+
+
+def test_simulation_stream_emits_reasoning_before_content():
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        reasoning_effort="high",
+        stream=True,
+    )
+
+    async def collect():
+        stream = await plugin.chat_completion(
+            request, model, {"api_key": "test-key", "reasoning_effort": "high"}
+        )
+        return [chunk async for chunk in stream]
+
+    chunks = asyncio.run(collect())
+    reasoning_index = next(
+        i
+        for i, chunk in enumerate(chunks)
+        if chunk.choices and chunk.choices[0].delta.get("reasoning_content")
+    )
+    content_index = next(
+        i
+        for i, chunk in enumerate(chunks)
+        if chunk.choices and chunk.choices[0].delta.get("content")
+    )
+    assert reasoning_index < content_index
+    assert chunks[-1].choices[0].finish_reason == "stop"
+
+
+def test_simulation_tool_turn_emits_reasoning():
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="weather?")],
+        tools=SAMPLE_TOOLS,
+        reasoning_effort="high",
+        stream=True,
+    )
+
+    async def collect():
+        stream = await plugin.chat_completion(
+            request, model, {"api_key": "test-key", "reasoning_effort": "high"}
+        )
+        return [chunk async for chunk in stream]
+
+    chunks = asyncio.run(collect())
+    reasoning = "".join(
+        chunk.choices[0].delta.get("reasoning_content", "")
+        for chunk in chunks
+        if chunk.choices
+    )
+    assert "get_weather" in reasoning
+    assert chunks[-1].choices[0].finish_reason == "tool_calls"
+
+
+def test_extra_body_reasoning_object_is_resolved():
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        extra_body={"reasoning": {"effort": "max"}},
+    )
+    target, effort = plugin._resolve_reasoning(request, model, {})
+    assert target == model.id
+    assert effort == "max"

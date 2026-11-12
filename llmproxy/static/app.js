@@ -1854,6 +1854,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         <td>
           <div style="display: flex; gap: 6px; align-items: center;">
             <button class="btn btn-secondary btn-sm btn-test btn-fs-test-model" data-mid="${m.id}" title="Test model response">Test</button>
+            <button class="btn btn-secondary btn-sm btn-fs-edit-model" data-mid="${m.id}">Edit</button>
             <button class="btn btn-danger btn-sm btn-fs-del-model" data-mid="${m.id}">Delete</button>
           </div>
         </td>
@@ -1910,6 +1911,10 @@ curl -X POST ${baseUrl}/chat/completions \\
         }
       });
 
+      tr.querySelector(".btn-fs-edit-model").addEventListener("click", () => {
+        openModelForm(plugin.id, m);
+      });
+
       tr.querySelector(".btn-fs-del-model").addEventListener("click", async () => {
         const ok = await customConfirm(`Remove model '${m.id}' from plugin?`, {
           title: "Remove Model",
@@ -1933,52 +1938,96 @@ curl -X POST ${baseUrl}/chat/completions \\
     });
   }
 
+  function openModelForm(pluginId, model) {
+    const isEdit = Boolean(model);
+    document.getElementById("model-form-mode").value = isEdit ? "edit" : "add";
+    document.getElementById("model-form-plugin-id").value = pluginId;
+    const idInput = document.getElementById("model-form-id");
+    idInput.value = isEdit ? model.id : "";
+    idInput.disabled = isEdit;
+    document.getElementById("model-form-name").value = isEdit ? (model.name || "") : "";
+    document.getElementById("model-form-upstream").value = isEdit ? (model.upstream_model || "") : "";
+    document.getElementById("model-form-context").value = isEdit ? (model.context_window || 8192) : 128000;
+    document.getElementById("model-form-max-tokens").value = isEdit ? (model.max_tokens || 4096) : 4096;
+    document.getElementById("model-form-parameters").value =
+      isEdit && model.parameters && Object.keys(model.parameters).length > 0
+        ? JSON.stringify(model.parameters, null, 2)
+        : "";
+    document.getElementById("model-form-enabled").checked = isEdit ? model.enabled !== false : true;
+    document.getElementById("modal-model-title").textContent = isEdit ? "Edit Model" : "Add Custom Model";
+    document.getElementById("btn-save-model").textContent = isEdit ? "Save Changes" : "Save Model";
+    openModal(el.modalModel);
+  }
+
   const fsBtnAddModel = document.getElementById("fs-btn-add-model");
   if (fsBtnAddModel) {
     fsBtnAddModel.addEventListener("click", () => {
-      document.getElementById("model-form-plugin-id").value = state.currentFullscreenPluginId;
-      document.getElementById("model-form-id").value = "";
-      document.getElementById("model-form-name").value = "";
-      document.getElementById("model-form-upstream").value = "";
-      openModal(el.modalModel);
+      openModelForm(state.currentFullscreenPluginId, null);
     });
   }
 
-  // Model creation submit
+  // Model creation / edit submit
   const btnSaveModel = document.getElementById("btn-save-model");
   if (btnSaveModel) {
     btnSaveModel.addEventListener("click", async () => {
+      const mode = document.getElementById("model-form-mode").value;
       const pId = document.getElementById("model-form-plugin-id").value;
       const mId = document.getElementById("model-form-id").value.trim();
       const mName = document.getElementById("model-form-name").value.trim() || mId;
       const mUpstream = document.getElementById("model-form-upstream").value.trim() || mId;
-      const mContext = parseInt(document.getElementById("model-form-context").value, 10) || 128000;
+      const mContext = parseInt(document.getElementById("model-form-context").value, 10) || 8192;
       const mMaxTokens = parseInt(document.getElementById("model-form-max-tokens").value, 10) || 4096;
+      const mEnabled = document.getElementById("model-form-enabled").checked;
+      const paramsText = document.getElementById("model-form-parameters").value.trim();
 
       if (!mId) {
         showToast("Model ID is required", "error");
         return;
       }
 
+      let mParameters = {};
+      if (paramsText) {
+        try {
+          mParameters = JSON.parse(paramsText);
+        } catch (err) {
+          showToast("Parameters must be valid JSON", "error");
+          return;
+        }
+        if (!mParameters || typeof mParameters !== "object" || Array.isArray(mParameters)) {
+          showToast("Parameters must be a JSON object", "error");
+          return;
+        }
+      }
+
+      const payload = {
+        name: mName,
+        upstream_model: mUpstream,
+        context_window: mContext,
+        max_tokens: mMaxTokens,
+        enabled: mEnabled,
+        parameters: mParameters,
+      };
+
       try {
-        await api(`/api/plugins/${pId}/models`, {
-          method: "POST",
-          body: JSON.stringify({
-            id: mId,
-            name: mName,
-            upstream_model: mUpstream,
-            context_window: mContext,
-            max_tokens: mMaxTokens,
-            enabled: true,
-          }),
-        });
-        showToast(`Model '${mId}' added`);
+        if (mode === "edit") {
+          await api(`/api/plugins/${encodeURIComponent(pId)}/models/${encodeURIComponent(mId)}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
+          showToast(`Model '${mId}' updated`);
+        } else {
+          await api(`/api/plugins/${encodeURIComponent(pId)}/models`, {
+            method: "POST",
+            body: JSON.stringify({ id: mId, ...payload }),
+          });
+          showToast(`Model '${mId}' added`);
+        }
         closeModal(el.modalModel);
         await fetchPlugins();
         const updatedP = state.plugins.find((p) => p.id === pId);
         if (updatedP) renderFullscreenModels(updatedP);
       } catch (err) {
-        showToast(`Failed to add model: ${err.message}`, "error");
+        showToast(`Failed to save model: ${err.message}`, "error");
       }
     });
   }
@@ -2556,11 +2605,27 @@ curl -X POST ${baseUrl}/chat/completions \\
         }),
       });
 
-      const replyContent = (res.choices && res.choices[0] && res.choices[0].message)
-        ? res.choices[0].message.content
+      const replyMessage = (res.choices && res.choices[0] && res.choices[0].message)
+        ? res.choices[0].message
+        : null;
+      const replyContent = replyMessage
+        ? replyMessage.content
         : (res.response || JSON.stringify(res));
+      const reasoningContent = replyMessage
+        ? (replyMessage.reasoning_content || replyMessage.reasoning || "")
+        : "";
 
-      assistantBubble.textContent = replyContent;
+      if (reasoningContent) {
+        assistantBubble.innerHTML = `
+          <div class="chat-reasoning">
+            <div class="chat-reasoning-label">Reasoning</div>
+            <div class="chat-reasoning-text">${escapeHtml(reasoningContent)}</div>
+          </div>
+          <div class="chat-answer">${escapeHtml(replyContent)}</div>
+        `;
+      } else {
+        assistantBubble.textContent = replyContent;
+      }
       state.chatMessages.push({ role: "assistant", content: replyContent });
     } catch (err) {
       assistantBubble.innerHTML = `<span style="color: var(--accent-red);">Error: ${escapeHtml(err.message)}</span>`;

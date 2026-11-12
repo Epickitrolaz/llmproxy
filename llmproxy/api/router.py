@@ -855,6 +855,9 @@ async def list_models():
                 ModelCard(
                     id=model_config.id,
                     owned_by=plugin.metadata.id,
+                    reasoning_levels=list(model_config.reasoning_levels),
+                    context_window=model_config.context_window,
+                    max_tokens=model_config.max_tokens,
                 )
             )
             seen.add(model_config.id)
@@ -871,7 +874,13 @@ async def get_model(model_id: str):
     active_models = plugin_manager.get_all_active_models()
     for model_config, plugin in active_models:
         if model_config.id == model_id:
-            return ModelCard(id=model_config.id, owned_by=plugin.metadata.id)
+            return ModelCard(
+                id=model_config.id,
+                owned_by=plugin.metadata.id,
+                reasoning_levels=list(model_config.reasoning_levels),
+                context_window=model_config.context_window,
+                max_tokens=model_config.max_tokens,
+            )
     raise HTTPException(
         status_code=404,
         detail={

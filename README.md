@@ -79,16 +79,40 @@ Messages API and pre-configures **Claude Haiku 5.5**, **Claude Sonnet 5.5**,
 the `reasoning_effort` variable (`none`, `low`, `medium`, `high`, `xhigh`, or
 `max`). A request-level `reasoning_effort` value takes precedence, and
 temperature/top-p are omitted automatically whenever thinking is active.
+Claude 4.6 and newer use adaptive thinking with `output_config.effort`; older
+models fall back to an explicit thinking budget.
 
-Every reasoning level is also exposed as a separate model ID in `GET /v1/models`
-(for example `claude-sonnet-5-5:high` or `claude-fable-5-2:max`), so clients such
-as OpenCode can list and select them without manual configuration. The `:` and
-`-` suffix forms are accepted and stripped before the request reaches Anthropic.
+Reasoning is returned to OpenAI-compatible clients as `reasoning_content` in
+both streaming deltas and non-streaming messages, and the dashboard Playground
+renders it above the answer. The plugin also keeps the signed thinking blocks
+from a tool-use turn and replays them when the tool result is sent back, which
+Anthropic requires to continue a reasoning chain across tool calls. Requests
+may pass the level as `reasoning_effort`, as a `<model>:<level>` suffix, or as
+`extra_body.reasoning.effort`.
 
-The same `:<level>` suffix works generically for any provider model, even when
-the provider does not publish variant IDs. For example `gpt-6-luna:high` resolves
-to `gpt-6-luna` with the per-request `reasoning_effort` set to `high`. Custom load
-balancing rules use this to attach a reasoning level to each target.
+`GET /v1/models` lists each model once under its base ID. Models that support
+reasoning also carry a `reasoning_levels` field, and every plugin-backed model
+reports its configured limits through `context_window` and `max_tokens`:
+
+```json
+{
+  "id": "claude-opus-5-5",
+  "object": "model",
+  "owned_by": "anthropic_proxy",
+  "reasoning_levels": ["none", "low", "medium", "high", "xhigh", "max"],
+  "context_window": 200000,
+  "max_tokens": 64000
+}
+```
+
+Clients can use those levels to offer a reasoning selector and send the chosen
+level as `reasoning_effort` in the request body. The proxy maps it internally;
+no separate model IDs are required.
+
+The `:<level>` suffix is also accepted generically for any provider model and is
+stripped before routing. For example `gpt-6-luna:high` resolves to `gpt-6-luna`
+with the per-request `reasoning_effort` set to `high`. Custom load balancing
+rules use this to attach a reasoning level to each target.
 
 ---
 
