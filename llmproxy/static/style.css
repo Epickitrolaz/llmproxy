@@ -1836,3 +1836,74 @@ input:checked + .slider:before {
   justify-content: flex-end;
   padding: 4px 0;
 }
+
+/* =========================================================================
+   Admin Authentication Gate
+   ========================================================================= */
+
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.06), transparent 55%), var(--bg-canvas);
+}
+
+.auth-gate[hidden] {
+  display: none;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 32px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-solid);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-modal);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--ink-secondary);
+}
+
+.auth-card h2 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.auth-description {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-secondary);
+}
+
+.auth-description code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-primary);
+}
+
+.auth-error {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--accent-red);
+}
+
+.auth-error:empty {
+  display: none;
+}

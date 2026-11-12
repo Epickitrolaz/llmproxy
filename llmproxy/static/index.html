@@ -41,8 +41,36 @@
         </script>
       </div>
       <button class="btn btn-secondary btn-sm" id="copy-endpoint-btn" title="Copy base URL">Copy URL</button>
+      <button class="btn btn-secondary btn-sm" id="btn-admin-lock" title="Forget the saved admin token">Lock</button>
     </div>
   </header>
+
+  <!-- Admin authentication gate -->
+  <div class="auth-gate" id="auth-gate" hidden>
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="brand-icon">L</div>
+        <span>LLMPROXY</span>
+      </div>
+      <h2>Admin Authentication</h2>
+      <p class="auth-description">
+        The dashboard API now requires an admin token. Enter the value from
+        <code>LLMPROXY_ADMIN_TOKEN</code>, or the auto-generated token stored in
+        <code>data/admin_token</code> on the router.
+      </p>
+      <label class="form-label" for="auth-token-input">Admin Token</label>
+      <input
+        type="password"
+        class="form-input"
+        id="auth-token-input"
+        placeholder="Paste your admin token"
+        autocomplete="current-password"
+        spellcheck="false"
+      >
+      <div class="auth-error" id="auth-error" role="alert"></div>
+      <button class="btn btn-primary" id="auth-submit-btn">Unlock Dashboard</button>
+    </div>
+  </div>
 
   <!-- Main Content Layout -->
   <main class="main-content">

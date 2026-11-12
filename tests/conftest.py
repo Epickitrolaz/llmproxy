@@ -17,6 +17,12 @@ if TEMPLATES_DIR.exists():
 
 
 @pytest.fixture(autouse=True)
+def admin_token_env(monkeypatch):
+    """Give the dashboard API tests a known admin token."""
+    monkeypatch.setenv("LLMPROXY_ADMIN_TOKEN", "test-admin-token")
+
+
+@pytest.fixture(autouse=True)
 def prepare_test_environment(request):
     """
     Ensure built-in templates are populated into plugin_manager for functional

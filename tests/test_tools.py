@@ -89,7 +89,7 @@ def test_schema_tool_fields():
 @pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_non_streaming(model_id):
     """Verify all providers return valid tool_calls when tools are supplied."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
@@ -114,7 +114,7 @@ def test_all_providers_mock_tool_calling_non_streaming(model_id):
 @pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_streaming(model_id):
     """Verify all providers stream tool_calls via SSE chunks properly."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
@@ -147,7 +147,7 @@ def test_all_providers_mock_tool_calling_streaming(model_id):
 @pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_tool_followup_roundtrip(model_id):
     """Verify follow-up message with tool role completes conversation with finish_reason stop."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
             "model": model_id,
             "messages": [

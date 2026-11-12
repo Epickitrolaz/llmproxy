@@ -46,7 +46,7 @@ def test_const_limit_bypass_disabled_by_default():
 
 def test_opencode_free_template_discovered_in_gallery():
     """Verify that the opencode_free template appears in /api/templates without model config variables."""
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
     res = client.get("/api/templates")
     assert res.status_code == 200
     templates = res.json()
@@ -74,7 +74,7 @@ def test_install_template_to_plugins(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_manager, "plugins", {})
     monkeypatch.setattr(plugin_manager, "configs", {})
 
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
     res_add = client.post("/api/templates/opencode_free/add")
     assert res_add.status_code == 200
     added = res_add.json()

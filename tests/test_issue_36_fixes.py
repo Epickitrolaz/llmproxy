@@ -18,7 +18,7 @@ from llmproxy.schemas import (
     CompletionUsage,
 )
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
 
 @pytest.fixture(autouse=True)

@@ -173,7 +173,7 @@ def test_accounts_crud_and_load_balancing():
 
 def test_accounts_api_endpoints():
     """Verify REST API /api/accounts CRUD endpoints."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         # Create account
         create_res = client.post(
             "/api/accounts",
@@ -220,7 +220,7 @@ def test_accounts_api_endpoints():
 
 def test_antigravity_oauth_start_and_status():
     """Verify Google Antigravity OAuth start, loopback redirect URL, and status endpoints."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         start_res = client.post("/api/antigravity/oauth/start")
         assert start_res.status_code == 200
         data = start_res.json()
@@ -238,7 +238,7 @@ def test_antigravity_oauth_start_and_status():
 
 def test_antigravity_import_local_and_live_quota():
     """Verify local Antigravity session auto-discovery and live CloudCode PA quota retrieval."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         import_res = client.post("/api/antigravity/oauth/import-local")
         # May be 200 if acp_token is present on host
         if import_res.status_code == 200:

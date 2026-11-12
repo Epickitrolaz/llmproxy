@@ -42,7 +42,7 @@ from llmproxy.dashboard.router import fetch_codex_quota
 @pytest.mark.asyncio
 async def test_issue1_test_chat_failover_to_higher_priority_account(monkeypatch):
     """Verify /api/test-chat routes to account with priority > min_priority when priority 1 fails."""
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # Clear existing accounts for mock_provider
     for a in list(plugin_manager.get_accounts("mock_provider")):

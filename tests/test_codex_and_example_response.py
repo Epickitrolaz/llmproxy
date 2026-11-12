@@ -55,7 +55,7 @@ from plugins.codex import CodexPlugin
 from plugins.antigravity import AntigravityPlugin
 
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
 
 @pytest.fixture(autouse=True)

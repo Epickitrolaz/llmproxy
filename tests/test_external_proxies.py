@@ -46,7 +46,7 @@ def clean_proxy_pool(tmp_path, monkeypatch):
 
 def test_proxy_crud_and_dashboard_endpoints():
     """Verify proxy pool CRUD via API endpoints."""
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # 1. Initially empty
     res = client.get("/api/proxies")
@@ -99,7 +99,7 @@ def test_proxy_crud_and_dashboard_endpoints():
 
 def test_proxies_off_by_default_on_all_providers():
     """Verify that external proxy routing is off by default across all provider templates."""
-    templates = client_get_templates = TestClient(app).get("/api/templates").json()
+    templates = client_get_templates = TestClient(app, headers={"X-Admin-Token": "test-admin-token"}).get("/api/templates").json()
     for tpl in templates:
         p_id = tpl["id"]
         plugin = plugin_manager.get_plugin(p_id)

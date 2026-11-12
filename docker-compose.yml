@@ -11,6 +11,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - LLMPROXY_ADMIN_TOKEN=${LLMPROXY_ADMIN_TOKEN:-}
     volumes:
       - ./plugins:/app/plugins
       - ./data:/app/data

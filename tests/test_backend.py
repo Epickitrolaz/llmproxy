@@ -30,7 +30,7 @@ def setup_backend():
 
 def test_models_endpoint_list():
     """Verify GET /v1/models returns active models from all enabled plugins."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         resp = client.get("/v1/models")
         assert resp.status_code == 200
         data = resp.json()
@@ -53,7 +53,7 @@ def test_models_endpoint_list():
 
 def test_models_endpoint_get_single():
     """Verify GET /v1/models/{model_id} returns single ModelCard or 404."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         resp = client.get("/v1/models/gpt-4o")
         assert resp.status_code == 200
         card = resp.json()
@@ -74,7 +74,7 @@ def test_models_endpoint_get_single():
 
 def test_chat_completions_non_streaming():
     """Verify POST /v1/chat/completions non-streaming response."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
             "model": "gpt-4o",
             "messages": [
@@ -98,7 +98,7 @@ def test_chat_completions_non_streaming():
 
 def test_chat_completions_streaming_sse():
     """Verify POST /v1/chat/completions SSE streaming with data: <json> and data: [DONE]."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
             "model": "gemini-3.8-flash",
             "messages": [{"role": "user", "content": "Stream me a response"}],
@@ -139,7 +139,7 @@ def test_chat_completions_streaming_sse():
 
 def test_routing_across_plugins():
     """Verify model routing sends requests to the appropriate plugin."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         test_routes = [
             ("gemini-3.8-flash", "Antigravity"),
             ("gpt-6-luna", "Codex"),
@@ -164,7 +164,7 @@ def test_routing_across_plugins():
 
 def test_error_handling_unknown_model():
     """Verify 404 is returned when requested model does not exist."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         resp = client.post(
             "/v1/chat/completions",
             json={
@@ -179,7 +179,7 @@ def test_error_handling_unknown_model():
 
 def test_error_handling_disabled_plugin():
     """Verify models from disabled plugins return 404."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         # Disable codex
         plugin_manager.update_plugin_config("codex", enabled=False)
 
@@ -200,7 +200,7 @@ def test_error_handling_disabled_plugin():
 
 def test_error_handling_variable_validation():
     """Verify 400 is returned when required operational plugin variables are missing."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         # Clear timeout for antigravity
         plugin_manager.update_plugin_config("antigravity", variables={"timeout": ""})
 
@@ -221,7 +221,7 @@ def test_error_handling_variable_validation():
 
 def test_telemetry_logs_recording():
     """Verify request telemetry logs capture latency, status, and token estimations."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         initial_log_count = len(plugin_manager.get_logs())
 
         # Successful request
@@ -248,7 +248,7 @@ def test_telemetry_logs_recording():
 
 def test_streaming_error_handling(monkeypatch):
     """Verify streaming yields error JSON payload and [DONE] on plugin exception."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         plugin = plugin_manager.get_plugin("openai_compatible")
         assert plugin is not None
 
@@ -277,7 +277,7 @@ def test_streaming_error_handling(monkeypatch):
 
 def test_health_check_endpoint():
     """Verify /health endpoint returns status ok and correct plugin count."""
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         resp = client.get("/health")
         assert resp.status_code == 200
         data = resp.json()

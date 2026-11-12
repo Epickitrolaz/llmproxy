@@ -35,7 +35,7 @@ def test_empty_plugins_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_manager, "plugins", {})
     monkeypatch.setattr(plugin_manager, "configs", {})
 
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
     res = client.get("/api/plugins")
     assert res.status_code == 200
     assert res.json() == []
@@ -53,7 +53,7 @@ def test_templates_gallery_and_install_to_plugins(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_manager, "plugins", {})
     monkeypatch.setattr(plugin_manager, "configs", {})
 
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # 1. Fetch available templates
     res = client.get("/api/templates")
@@ -106,7 +106,7 @@ def test_test_keys_not_displayed_in_key_list(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_manager, "data_dir", temp_data)
     monkeypatch.setattr(plugin_manager, "api_keys", {})
 
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # 1. Create a normal user API key
     res = client.post("/api/keys", json={"name": "Production Key", "key": "sk-proxy-user-123"})
@@ -128,7 +128,7 @@ def test_test_keys_not_displayed_in_key_list(tmp_path, monkeypatch):
 
 def test_antigravity_reasoning_effort_routing():
     """Verify gemini-3.8-flash dynamically routes to gemini-3.8-flash-high/-medium/-low."""
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # 1. Normal call with default effort -> routes to high
     res_high = client.post(
