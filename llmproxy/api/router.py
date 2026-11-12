@@ -59,6 +59,15 @@ def _calc_prompt_tokens(messages: list, tools: Optional[list] = None) -> int:
     return max(1, total)
 
 
+def _usage_cache_tokens(usage: Optional[CompletionUsage]) -> tuple[int, int]:
+    """Return ``(cache_read, cache_created)`` counters from an OpenAI usage object."""
+    if usage is None:
+        return 0, 0
+    cache_read = getattr(usage, "cache_read_input_tokens", None)
+    cache_created = getattr(usage, "cache_creation_input_tokens", None)
+    return int(cache_read or 0), int(cache_created or 0)
+
+
 def _safe_float(val: Any, default: float) -> float:
     try:
         if val is None or val == "":
@@ -610,10 +619,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         async def sse_event_stream() -> AsyncIterator[str]:
             nonlocal log_id, prompt_tokens
             completion_tokens = 0
+            cache_read_tokens = 0
+            cache_creation_tokens = 0
             last_usage: Optional[CompletionUsage] = None
 
             def handle_chunk(chunk: Any) -> Optional[str]:
                 nonlocal log_id, prompt_tokens, completion_tokens, last_usage
+                nonlocal cache_read_tokens, cache_creation_tokens
                 if isinstance(chunk, ChatCompletionChunk):
                     if chunk.id:
                         log_id = chunk.id
@@ -623,6 +635,9 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                             prompt_tokens = chunk.usage.prompt_tokens
                         if chunk.usage.completion_tokens:
                             completion_tokens = chunk.usage.completion_tokens
+                        cache_read_tokens, cache_creation_tokens = _usage_cache_tokens(
+                            chunk.usage
+                        )
                     else:
                         for choice in chunk.choices:
                             if choice.delta.get("content"):
@@ -687,6 +702,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                         latency_ms=latency_ms,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        cache_read_input_tokens=cache_read_tokens,
+                        cache_creation_input_tokens=cache_creation_tokens,
                     )
                 )
             except Exception as e:
@@ -718,6 +735,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                         latency_ms=latency_ms,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        cache_read_input_tokens=cache_read_tokens,
+                        cache_creation_input_tokens=cache_creation_tokens,
                         error_message=str(e),
                     )
                 )
@@ -770,6 +789,10 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                         total_tokens=prompt_tokens + completion_tokens,
                     )
 
+            cache_read_tokens, cache_creation_tokens = _usage_cache_tokens(
+                response.usage if isinstance(response, ChatCompletionResponse) else None
+            )
+
             if candidate and not candidate.id.startswith("default-"):
                 plugin_manager.mark_account_result(candidate.id, success=True)
             if attempt_proxy:
@@ -792,6 +815,8 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     latency_ms=latency_ms,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    cache_read_input_tokens=cache_read_tokens,
+                    cache_creation_input_tokens=cache_creation_tokens,
                 )
             )
             return response

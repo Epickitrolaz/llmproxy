@@ -1324,6 +1324,20 @@ async def get_stats():
     total_accounts = len(all_accounts)
     active_accounts = len([a for a in all_accounts if a.is_available()])
 
+    cache_read_tokens = sum(int(log.cache_read_input_tokens or 0) for log in logs)
+    cache_creation_tokens = sum(int(log.cache_creation_input_tokens or 0) for log in logs)
+    cacheable_prompt_tokens = sum(
+        int(log.prompt_tokens or 0)
+        + int(log.cache_read_input_tokens or 0)
+        + int(log.cache_creation_input_tokens or 0)
+        for log in logs
+    )
+    cache_hit_rate = (
+        round((cache_read_tokens / cacheable_prompt_tokens) * 100.0, 1)
+        if cacheable_prompt_tokens > 0
+        else 0.0
+    )
+
     return {
         "total_requests": total_requests,
         "success_rate": success_rate,
@@ -1332,6 +1346,9 @@ async def get_stats():
         "total_accounts": total_accounts,
         "active_accounts": active_accounts,
         "avg_latency_ms": avg_latency,
+        "cache_read_input_tokens": cache_read_tokens,
+        "cache_creation_input_tokens": cache_creation_tokens,
+        "cache_hit_rate": cache_hit_rate,
     }
 
 

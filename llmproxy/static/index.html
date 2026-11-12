@@ -136,6 +136,11 @@
           <span class="stat-value" id="stat-avg-latency">0 ms</span>
           <span class="stat-subtext">Roundtrip upstream response</span>
         </div>
+        <div class="stat-card">
+          <span class="stat-eyebrow">Cache Hit Rate</span>
+          <span class="stat-value" id="stat-cache-hit-rate">0%</span>
+          <span class="stat-subtext">Cached prompt tokens</span>
+        </div>
       </div>
 
       <!-- Local API Keys & Usage Tracking -->
@@ -402,6 +407,7 @@
                     <th>API Key</th>
                     <th>Latency</th>
                     <th>Tokens (In / Out)</th>
+                    <th>Cache</th>
                     <th>Details</th>
                   </tr>
                 </thead>

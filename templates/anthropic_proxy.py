@@ -193,6 +193,17 @@ class AnthropicProxyPlugin(BasePlugin):
                     ),
                 ),
                 PluginVariable(
+                    name="auto_prompt_cache",
+                    label="Automatic Prompt Caching",
+                    type="boolean",
+                    default=True,
+                    description=(
+                        "Add Anthropic cache breakpoints to the system prompt and the last "
+                        "message when the client sends none. Skipped below the model's "
+                        "minimum cacheable prefix (1024 tokens, 2048 for Haiku)."
+                    ),
+                ),
+                PluginVariable(
                     name="proxy_enabled",
                     label="Enable External Proxy",
                     type="boolean",
@@ -576,22 +587,24 @@ class AnthropicProxyPlugin(BasePlugin):
         return system_blocks, anthropic_messages
 
     @staticmethod
-    def _apply_cache_control(payload: Dict[str, Any], request: ChatCompletionRequest) -> None:
+    def _apply_cache_control(payload: Dict[str, Any], request: ChatCompletionRequest) -> bool:
         """Apply a top-level cache_control hint to the final message block.
 
         Anthropic places cache breakpoints on content blocks. Most clients send
         an explicit block-level ``cache_control``, which is preserved as-is. This
         helper additionally accepts the common convenience form
         ``{"cache_control": {"type": "ephemeral"}}`` in ``extra_body``.
+
+        Returns True when an explicit hint was applied.
         """
         extra = request.extra_body if isinstance(request.extra_body, dict) else {}
         cache_control = getattr(request, "cache_control", None) or extra.get("cache_control")
         if not cache_control:
-            return
+            return False
 
         messages = payload.get("messages") or []
         if not messages:
-            return
+            return False
         content = messages[-1].get("content")
         if isinstance(content, list) and content:
             block = content[-1]
@@ -601,6 +614,106 @@ class AnthropicProxyPlugin(BasePlugin):
             messages[-1]["content"] = [
                 {"type": "text", "text": content, "cache_control": cache_control}
             ]
+        return True
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+    @staticmethod
+    def _has_cache_control(payload: Dict[str, Any]) -> bool:
+        """Return True when the payload already carries any cache breakpoint."""
+
+        def scan(value: Any) -> bool:
+            if isinstance(value, dict):
+                if value.get("cache_control"):
+                    return True
+                return any(scan(item) for item in value.values())
+            if isinstance(value, list):
+                return any(scan(item) for item in value)
+            return False
+
+        return any(
+            scan(payload.get(section))
+            for section in ("system", "messages", "tools")
+        )
+
+    @staticmethod
+    def _estimate_payload_tokens(payload: Dict[str, Any]) -> int:
+        """Cheap approximation used only to skip prompts Anthropic cannot cache."""
+        counted = {
+            "system": payload.get("system") or [],
+            "messages": payload.get("messages") or [],
+            "tools": payload.get("tools") or [],
+        }
+        try:
+            serialized = json.dumps(counted, default=str)
+        except Exception:
+            serialized = str(counted)
+        return max(1, len(serialized) // 4)
+
+    @staticmethod
+    def _auto_cache_min_tokens(target_model: str) -> int:
+        # Anthropic's minimum cacheable prefix is 1024 tokens for Opus/Sonnet
+        # and 2048 tokens for Haiku.
+        return 2048 if "haiku" in (target_model or "").lower() else 1024
+
+    def _apply_auto_cache_control(
+        self,
+        payload: Dict[str, Any],
+        variables: Dict[str, Any],
+        target_model: str,
+    ) -> None:
+        """Add cache breakpoints for clients that send no cache_control hints.
+
+        Places at most two ephemeral breakpoints: one at the end of the system
+        prompt and one at the end of the final message. Requests below
+        Anthropic's minimum cacheable size are left untouched because a cache
+        write would cost 1.25x without ever being read.
+        """
+        if not self._as_bool(variables.get("auto_prompt_cache"), True):
+            return
+        if self._has_cache_control(payload):
+            return
+        if self._estimate_payload_tokens(payload) < self._auto_cache_min_tokens(target_model):
+            return
+
+        cache_control = {"type": "ephemeral"}
+        added = 0
+
+        system = payload.get("system")
+        if isinstance(system, list) and system:
+            last_block = system[-1]
+            if isinstance(last_block, dict) and not last_block.get("cache_control"):
+                last_block["cache_control"] = dict(cache_control)
+                added += 1
+
+        messages = payload.get("messages") or []
+        if messages and added < 4:
+            last_message = messages[-1]
+            content = last_message.get("content")
+            if isinstance(content, str) and content:
+                last_message["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": dict(cache_control),
+                    }
+                ]
+            elif isinstance(content, list):
+                for block in reversed(content):
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type")
+                        in ("text", "tool_result", "tool_use", "image", "document")
+                        and not block.get("cache_control")
+                    ):
+                        block["cache_control"] = dict(cache_control)
+                        break
 
     def _build_payload(
         self,
@@ -660,7 +773,9 @@ class AnthropicProxyPlugin(BasePlugin):
                     tool_choice = {"type": "auto"}
                 payload["tool_choice"] = tool_choice
 
-        self._apply_cache_control(payload, request)
+        explicit_cache = self._apply_cache_control(payload, request)
+        if not explicit_cache:
+            self._apply_auto_cache_control(payload, variables, target_model)
         return payload
 
     # ------------------------------------------------------------------
