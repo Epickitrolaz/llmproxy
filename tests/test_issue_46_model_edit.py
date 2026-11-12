@@ -193,7 +193,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_manager, "logs", [])
     monkeypatch.setattr(plugin_manager, "total_requests_count", 0)
 
-    return TestClient(app)
+    return TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
 
 def _create_plugin(client):
