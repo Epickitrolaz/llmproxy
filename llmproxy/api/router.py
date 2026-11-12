@@ -84,10 +84,8 @@ async def _invoke_plugin_completion(plugin, request, model_config, variables, ac
     return await plugin.chat_completion(request, model_config, variables)
 
 
-def _usage_limit_error(provider_id: str, retry_after: Optional[int] = None) -> HTTPException:
+def _usage_limit_error(provider_id: str) -> HTTPException:
     message = f"Usage limit reached for all accounts of provider '{provider_id}'."
-    if retry_after:
-        message = f"{message} Retry in {retry_after}s."
     return HTTPException(
         status_code=429,
         detail={
@@ -97,7 +95,6 @@ def _usage_limit_error(provider_id: str, retry_after: Optional[int] = None) -> H
                 "code": "usage_limit_reached",
             }
         },
-        headers={"Retry-After": str(retry_after)} if retry_after else None,
     )
 
 
@@ -498,7 +495,17 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                         error_message=f"All accounts for provider '{plugin.metadata.id}' are in cooldown.",
                     )
                 )
-                raise _usage_limit_error(plugin.metadata.id, min_wait)
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": {
+                            "message": f"All accounts for provider '{plugin.metadata.id}' are in cooldown. Retry in {min_wait}s.",
+                            "type": "rate_limit_error",
+                            "code": "accounts_rate_limited",
+                        }
+                    },
+                    headers={"Retry-After": str(min_wait)},
+                )
 
             latency_ms = round((time.time() - start_time) * 1000, 2)
             plugin_manager.add_log(
