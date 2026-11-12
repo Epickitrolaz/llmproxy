@@ -39,27 +39,88 @@ def _model(model_id: str = "claude-sonnet-5-5") -> PluginModelConfig:
     return next(m for m in plugin.metadata.models if m.id == model_id)
 
 
+BASE_MODEL_IDS = {
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-fable-5-2",
+}
+
+REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
 def test_metadata_preloads_expected_models_and_reasoning_levels():
     plugin = AnthropicProxyPlugin()
-    model_ids = {m.id for m in plugin.metadata.models}
-    assert model_ids == {
-        "claude-haiku-5-5",
-        "claude-sonnet-5-5",
-        "claude-opus-5-5",
-        "claude-fable-5-2",
-    }
+    models = {m.id: m for m in plugin.metadata.models}
+
+    # Every base model stays available under its unsuffixed ID.
+    assert BASE_MODEL_IDS <= set(models)
+    for model_id in BASE_MODEL_IDS:
+        assert models[model_id].upstream_model == model_id
+
+    # Every reasoning level is exposed as a discoverable model variant.
+    assert len(models) == len(BASE_MODEL_IDS) * (1 + len(REASONING_LEVELS))
+    for model_id in BASE_MODEL_IDS:
+        base_model = models[model_id]
+        for level in REASONING_LEVELS:
+            variant = models[f"{model_id}:{level}"]
+            assert variant.upstream_model == model_id
+            assert variant.context_window == base_model.context_window
+            assert variant.max_tokens == base_model.max_tokens
+            assert variant.parameters == {"reasoning_effort": level}
 
     variables = {v.name: v for v in plugin.metadata.variables}
     assert variables["reasoning_effort"].type == "select"
     assert variables["reasoning_effort"].default == "medium"
-    assert set(variables["reasoning_effort"].options) == {
-        "none",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    }
+    assert set(variables["reasoning_effort"].options) == set(REASONING_LEVELS)
+
+
+def test_every_exposed_reasoning_variant_resolves_to_its_level():
+    plugin = AnthropicProxyPlugin()
+    for model in plugin.metadata.models:
+        if ":" not in model.id:
+            continue
+        base_id, level = model.id.rsplit(":", 1)
+        request = ChatCompletionRequest(
+            model=model.id,
+            messages=[ChatMessage(role="user", content="hi")],
+        )
+        target, effort = plugin._resolve_reasoning(request, model, {})
+        assert target == base_id
+        assert effort == level
+
+
+def test_variant_model_id_builds_expected_thinking_payload():
+    plugin = AnthropicProxyPlugin()
+    for level in REASONING_LEVELS:
+        variant = _model(f"claude-sonnet-5-5:{level}")
+        request = ChatCompletionRequest(
+            model=variant.id,
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=64000,
+        )
+        payload = plugin._build_payload(request, variant, {})
+        assert payload["model"] == "claude-sonnet-5-5"
+        if level == "none":
+            assert "thinking" not in payload
+        else:
+            assert payload["thinking"] == {
+                "type": "enabled",
+                "budget_tokens": plugin._thinking_budget(level, 64000),
+            }
+
+
+def test_reasoning_variant_parameters_apply_when_request_uses_alias():
+    """A load-balancing rule can target a variant while clients send an alias."""
+    plugin = AnthropicProxyPlugin()
+    variant = _model("claude-sonnet-5-5:xhigh")
+    request = ChatCompletionRequest(
+        model="my-claude-rule",
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+    target, effort = plugin._resolve_reasoning(request, variant, {"reasoning_effort": "low"})
+    assert target == "claude-sonnet-5-5"
+    assert effort == "xhigh"
 
 
 def test_reasoning_resolution_precedence_and_suffixes():

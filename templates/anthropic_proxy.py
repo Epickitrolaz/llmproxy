@@ -56,6 +56,36 @@ REASONING_SUFFIXES: Tuple[Tuple[str, str], ...] = (
     ("-max", "max"),
 )
 
+# Every configured reasoning level is also exposed as its own model ID (for
+# example ``claude-sonnet-5-5:high``) so clients such as OpenCode can discover
+# and select them from ``GET /v1/models``.
+REASONING_LEVELS: Tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+
+REASONING_LABELS: Dict[str, str] = {
+    "none": "No Thinking",
+    "low": "Low Thinking",
+    "medium": "Medium Thinking",
+    "high": "High Thinking",
+    "xhigh": "Extra-High Thinking",
+    "max": "Maximum Thinking",
+}
+
+
+def _reasoning_variants(base: PluginModelConfig) -> List[PluginModelConfig]:
+    """Return one discoverable model entry per reasoning level."""
+    upstream_model = base.upstream_model or base.id
+    return [
+        PluginModelConfig(
+            id=f"{base.id}:{level}",
+            name=f"{base.name} ({REASONING_LABELS[level]})",
+            upstream_model=upstream_model,
+            context_window=base.context_window,
+            max_tokens=base.max_tokens,
+            parameters={**base.parameters, "reasoning_effort": level},
+        )
+        for level in REASONING_LEVELS
+    ]
+
 
 class AnthropicProxyPlugin(BasePlugin):
     """Anthropic Messages API provider with an OpenAI-compatible surface."""
@@ -174,37 +204,49 @@ class AnthropicProxyPlugin(BasePlugin):
                     description="Direct HTTP or SOCKS5 proxy URL to route through",
                 ),
             ],
-            models=[
-                PluginModelConfig(
-                    id="claude-haiku-5-5",
-                    name="Claude Haiku 5.5",
-                    upstream_model="claude-haiku-5-5",
-                    context_window=200000,
-                    max_tokens=64000,
-                ),
-                PluginModelConfig(
-                    id="claude-sonnet-5-5",
-                    name="Claude Sonnet 5.5",
-                    upstream_model="claude-sonnet-5-5",
-                    context_window=200000,
-                    max_tokens=64000,
-                ),
-                PluginModelConfig(
-                    id="claude-opus-5-5",
-                    name="Claude Opus 5.5",
-                    upstream_model="claude-opus-5-5",
-                    context_window=200000,
-                    max_tokens=64000,
-                ),
-                PluginModelConfig(
-                    id="claude-fable-5-2",
-                    name="Claude Fable 5.2",
-                    upstream_model="claude-fable-5-2",
-                    context_window=1000000,
-                    max_tokens=64000,
-                ),
-            ],
+            models=self._build_models(),
         )
+
+    @staticmethod
+    def _build_models() -> List[PluginModelConfig]:
+        base_models = [
+            PluginModelConfig(
+                id="claude-haiku-5-5",
+                name="Claude Haiku 5.5",
+                upstream_model="claude-haiku-5-5",
+                context_window=200000,
+                max_tokens=64000,
+            ),
+            PluginModelConfig(
+                id="claude-sonnet-5-5",
+                name="Claude Sonnet 5.5",
+                upstream_model="claude-sonnet-5-5",
+                context_window=200000,
+                max_tokens=64000,
+            ),
+            PluginModelConfig(
+                id="claude-opus-5-5",
+                name="Claude Opus 5.5",
+                upstream_model="claude-opus-5-5",
+                context_window=200000,
+                max_tokens=64000,
+            ),
+            PluginModelConfig(
+                id="claude-fable-5-2",
+                name="Claude Fable 5.2",
+                upstream_model="claude-fable-5-2",
+                context_window=1000000,
+                max_tokens=64000,
+            ),
+        ]
+        return [
+            *base_models,
+            *[
+                variant
+                for base in base_models
+                for variant in _reasoning_variants(base)
+            ],
+        ]
 
     @property
     def metadata(self) -> PluginMetadata:
@@ -253,6 +295,10 @@ class AnthropicProxyPlugin(BasePlugin):
                 break
 
         effort = self._normalize_effort(raw_effort)
+        if effort is None and model_config.parameters:
+            effort = self._normalize_effort(
+                model_config.parameters.get("reasoning_effort")
+            )
         if effort is None:
             effort = self._normalize_effort(variables.get("reasoning_effort")) or "none"
 
