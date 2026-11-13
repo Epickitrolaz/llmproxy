@@ -356,6 +356,8 @@ Before handing back a plugin:
 - [ ] Streaming returns an async iterator of `ChatCompletionChunk`.
 - [ ] First chunk has the assistant role; final chunk has a finish reason.
 - [ ] Tools and tool results are handled.
+- [ ] Image parts are forwarded or translated with `llmproxy.core.multimodal`,
+      and `supports_vision` is set on vision-capable models.
 - [ ] Usage is forwarded when available.
 - [ ] Simulation mode works without credentials.
 - [ ] 429/401/5xx errors propagate.

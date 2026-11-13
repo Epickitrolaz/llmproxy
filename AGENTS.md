@@ -212,7 +212,7 @@ Writes use atomic temp-file replacement. Logs and API key usage are debounced.
   loggers (`logger = logging.getLogger(__name__)`).
 - Pydantic v2: use `model_validate`, `model_dump`, `model_copy`.
 - Keep plugins self-contained. Import only the contract, schemas, OAuth helpers,
-  stdlib, and `httpx`.
+  multimodal helpers (`llmproxy.core.multimodal`), stdlib, and `httpx`.
 - Do not add dependencies unless the feature genuinely requires one; update
   `requirements.txt` if you do.
 - Prefer small helper functions over large `chat_completion` bodies.

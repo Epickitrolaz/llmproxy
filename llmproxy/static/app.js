@@ -39,6 +39,7 @@
     currentFullscreenTab: "code",
     selectedPlaygroundModel: null,
     chatMessages: [],
+    attachedImages: [],
     autoRefreshLogs: false,
     autoRefreshInterval: null,
     cachedQuotaData: null,
@@ -119,6 +120,9 @@
     playgroundPrompt: document.getElementById("playground-prompt"),
     playgroundSendBtn: document.getElementById("playground-send-btn"),
     playgroundClearBtn: document.getElementById("playground-clear-btn"),
+    playgroundAttachBtn: document.getElementById("playground-attach-btn"),
+    playgroundImageInput: document.getElementById("playground-image-input"),
+    playgroundAttachments: document.getElementById("playground-attachments"),
     // Status
     statusProviderTabs: document.getElementById("status-provider-tabs"),
     statusAccountsGrid: document.getElementById("status-accounts-grid"),
@@ -1849,8 +1853,11 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     models.forEach((m) => {
       const tr = document.createElement("tr");
+      const visionBadge = m.supports_vision
+        ? ' <span style="font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border-solid); border-radius: 4px; padding: 1px 5px; color: var(--ink-secondary);">Vision</span>'
+        : "";
       tr.innerHTML = `
-        <td><strong>${escapeHtml(m.id)}</strong></td>
+        <td><strong>${escapeHtml(m.id)}</strong>${visionBadge}</td>
         <td>${escapeHtml(m.name || m.id)}</td>
         <td><code style="font-family: var(--font-mono); font-size: 11.5px;">${escapeHtml(m.upstream_model || m.id)}</code></td>
         <td style="font-family: var(--font-mono);">${m.context_window || 8192} / ${m.max_tokens || 4096}</td>
@@ -1962,6 +1969,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       isEdit && model.parameters && Object.keys(model.parameters).length > 0
         ? JSON.stringify(model.parameters, null, 2)
         : "";
+    document.getElementById("model-form-vision").checked = isEdit ? Boolean(model.supports_vision) : false;
     document.getElementById("model-form-enabled").checked = isEdit ? model.enabled !== false : true;
     document.getElementById("modal-model-title").textContent = isEdit ? "Edit Model" : "Add Custom Model";
     document.getElementById("btn-save-model").textContent = isEdit ? "Save Changes" : "Save Model";
@@ -1986,6 +1994,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       const mUpstream = document.getElementById("model-form-upstream").value.trim() || mId;
       const mContext = parseInt(document.getElementById("model-form-context").value, 10) || 8192;
       const mMaxTokens = parseInt(document.getElementById("model-form-max-tokens").value, 10) || 4096;
+      const mVision = document.getElementById("model-form-vision").checked;
       const mEnabled = document.getElementById("model-form-enabled").checked;
       const paramsText = document.getElementById("model-form-parameters").value.trim();
 
@@ -2013,6 +2022,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         upstream_model: mUpstream,
         context_window: mContext,
         max_tokens: mMaxTokens,
+        supports_vision: mVision,
         enabled: mEnabled,
         parameters: mParameters,
       };
@@ -2565,6 +2575,8 @@ curl -X POST ${baseUrl}/chat/completions \\
   if (el.playgroundClearBtn) {
     el.playgroundClearBtn.addEventListener("click", () => {
       state.chatMessages = [];
+      state.attachedImages = [];
+      renderPlaygroundAttachments();
       if (el.playgroundHistory) el.playgroundHistory.innerHTML = "";
     });
   }
@@ -2582,20 +2594,103 @@ curl -X POST ${baseUrl}/chat/completions \\
     });
   }
 
+  const MAX_PLAYGROUND_IMAGE_BYTES = 20 * 1024 * 1024;
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("Could not read image"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addPlaygroundImages(fileList) {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      if (!file.type || !file.type.startsWith("image/")) {
+        showToast(`'${file.name}' is not an image`, "error");
+        continue;
+      }
+      if (file.size > MAX_PLAYGROUND_IMAGE_BYTES) {
+        showToast(`'${file.name}' is larger than 20 MB`, "error");
+        continue;
+      }
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        state.attachedImages.push({ name: file.name, dataUrl });
+      } catch (err) {
+        showToast(`Could not read '${file.name}': ${err.message}`, "error");
+      }
+    }
+    renderPlaygroundAttachments();
+  }
+
+  function renderPlaygroundAttachments() {
+    if (!el.playgroundAttachments) return;
+    el.playgroundAttachments.innerHTML = "";
+    if (!state.attachedImages.length) {
+      el.playgroundAttachments.hidden = true;
+      return;
+    }
+    el.playgroundAttachments.hidden = false;
+    state.attachedImages.forEach((image, index) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "chat-attachment";
+      const img = document.createElement("img");
+      img.src = image.dataUrl;
+      img.alt = image.name || `Image ${index + 1}`;
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "chat-attachment-remove";
+      removeBtn.textContent = "✕";
+      removeBtn.title = "Remove image";
+      removeBtn.addEventListener("click", () => {
+        state.attachedImages.splice(index, 1);
+        renderPlaygroundAttachments();
+      });
+      wrapper.appendChild(img);
+      wrapper.appendChild(removeBtn);
+      el.playgroundAttachments.appendChild(wrapper);
+    });
+  }
+
+  if (el.playgroundAttachBtn && el.playgroundImageInput) {
+    el.playgroundAttachBtn.addEventListener("click", () => el.playgroundImageInput.click());
+    el.playgroundImageInput.addEventListener("change", async (e) => {
+      await addPlaygroundImages(e.target.files);
+      e.target.value = "";
+    });
+  }
+
+  function buildUserContent(prompt, images) {
+    if (!images.length) return prompt;
+    const parts = [];
+    if (prompt) parts.push({ type: "text", text: prompt });
+    images.forEach((image) => {
+      parts.push({ type: "image_url", image_url: { url: image.dataUrl } });
+    });
+    return parts;
+  }
+
   async function sendPlaygroundMessage() {
     const prompt = (el.playgroundPrompt ? el.playgroundPrompt.value : "").trim();
-    if (!prompt) return;
+    const images = state.attachedImages.slice();
+    if (!prompt && !images.length) return;
 
     const model = el.playgroundModelSelect ? el.playgroundModelSelect.value : (state.selectedSnippetModel || "test-model");
     const temp = parseFloat(el.playgroundTempInput.value) || 1.0;
     const maxTokens = parseInt(el.playgroundTokensInput.value, 10) || undefined;
     const systemPrompt = (el.playgroundSystemInput.value || "").trim();
+    const userContent = buildUserContent(prompt, images);
 
     el.playgroundPrompt.value = "";
+    state.attachedImages = [];
+    renderPlaygroundAttachments();
 
     // Append user message to UI
-    appendChatBubble("user", prompt);
-    state.chatMessages.push({ role: "user", content: prompt });
+    appendChatBubble("user", prompt || "(image)", images.map((image) => image.dataUrl));
+    state.chatMessages.push({ role: "user", content: userContent });
 
     const messagesPayload = [];
     if (systemPrompt) messagesPayload.push({ role: "system", content: systemPrompt });
@@ -2641,7 +2736,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     }
   }
 
-  function appendChatBubble(role, text) {
+  function appendChatBubble(role, text, imageUrls = []) {
     if (!el.playgroundHistory) return null;
     const msgDiv = document.createElement("div");
     msgDiv.className = `chat-msg ${role}`;
@@ -2649,6 +2744,17 @@ curl -X POST ${baseUrl}/chat/completions \\
       <div style="font-size: 11px; color: var(--ink-muted); text-transform: uppercase; font-weight: 600;">${role}</div>
       <div class="chat-bubble" style="background: ${role === 'user' ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)'}; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 14px; font-size: 13px; white-space: pre-wrap; line-height: 1.5;">${escapeHtml(text)}</div>
     `;
+    if (imageUrls.length) {
+      const imagesDiv = document.createElement("div");
+      imagesDiv.className = "chat-message-images";
+      imageUrls.forEach((url, index) => {
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = `Attached image ${index + 1}`;
+        imagesDiv.appendChild(img);
+      });
+      msgDiv.appendChild(imagesDiv);
+    }
     el.playgroundHistory.appendChild(msgDiv);
     el.playgroundHistory.scrollTop = el.playgroundHistory.scrollHeight;
     return msgDiv.querySelector(".chat-bubble");

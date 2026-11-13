@@ -196,17 +196,40 @@ return a fake response.
 
 `ChatMessage.content` can be a string or a list of parts. For OpenAI-compatible
 upstreams, forwarding `message.model_dump(exclude_none=True)` is usually enough.
-For providers with different formats, translate explicitly:
+The router normalises common client spellings (OpenAI `image_url`/`input_image`,
+Anthropic `image` blocks, and Gemini `inlineData`) to OpenAI `image_url` parts
+before dispatching.
+
+For providers with different formats, use the shared helpers instead of
+re-implementing URL parsing:
 
 ```python
+from llmproxy.core.multimodal import (
+    is_image_part,
+    materialize_message_images,
+    to_anthropic_image_block,
+    to_gemini_part,
+    to_openai_image_part,
+)
+
 for message in request.messages:
     if isinstance(message.content, list):
         for part in message.content:
-            if part.get("type") == "text":
-                ...
-            elif part.get("type") == "image_url":
-                ...
+            if is_image_part(part):
+                # Pick the native representation for your upstream.
+                native = to_gemini_part(part)  # or to_anthropic_image_block(part)
 ```
+
+Notes:
+
+- `data:` URLs become base64/inline data; HTTP(S) URLs stay URLs for providers
+  that accept them.
+- Gemini cannot fetch arbitrary HTTP URLs. Call
+  `await materialize_message_images(request.messages, timeout=..., proxy=...)`
+  and rebuild the request before building the payload.
+- Set `supports_vision=True` on `PluginModelConfig` entries so `/v1/models` can
+  advertise `supports_vision` and `input_modalities`.
+- The router already estimates image tokens without counting base64 payloads.
 
 ## 11. Reasoning / model suffixes
 

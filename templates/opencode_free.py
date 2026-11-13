@@ -72,6 +72,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 import httpx
 
 from llmproxy.core.interface import BasePlugin
+from llmproxy.core.multimodal import infer_vision_support
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -215,6 +216,8 @@ DEFAULT_FREE_MODELS: List[PluginModelConfig] = [
         max_tokens=32000,
     ),
 ]
+for _model in DEFAULT_FREE_MODELS:
+    _model.supports_vision = infer_vision_support(_model.id, _model.name)
 
 
 # ==============================================================================

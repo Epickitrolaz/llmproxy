@@ -50,6 +50,13 @@ from llmproxy.core.antigravity_oauth import (
     sanitize_ssl_env,
 )
 from llmproxy.core.interface import BasePlugin
+from llmproxy.core.multimodal import (
+    content_text,
+    is_image_part,
+    materialize_message_images,
+    messages_have_images,
+    to_gemini_part,
+)
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -423,6 +430,8 @@ class AntigravityPlugin(BasePlugin):
                 ),
             ],
         )
+        for model in self._metadata.models:
+            model.supports_vision = True
 
     @property
     def metadata(self) -> PluginMetadata:
@@ -1001,6 +1010,8 @@ class AntigravityPlugin(BasePlugin):
                         if isinstance(part, str):
                             system_instruction_parts.append({"text": part})
                         elif isinstance(part, dict):
+                            if is_image_part(part):
+                                continue
                             text_part: Dict[str, Any] = {
                                 "text": part.get("text", str(part))
                             }
@@ -1039,6 +1050,13 @@ class AntigravityPlugin(BasePlugin):
                         if isinstance(p, str):
                             parts.append({"text": p})
                         elif isinstance(p, dict):
+                            if is_image_part(p):
+                                image_part = to_gemini_part(p)
+                                if image_part is not None:
+                                    parts.append(image_part)
+                                else:
+                                    parts.append({"text": "[Image could not be loaded]"})
+                                continue
                             ptype = p.get("type")
                             if ptype in ("text", "input_text"):
                                 part: Dict[str, Any] = {"text": p.get("text", "")}
@@ -1056,7 +1074,7 @@ class AntigravityPlugin(BasePlugin):
             elif m.role in ("assistant", "model"):
                 parts = []
                 if m.content:
-                    text_val = str(m.content) if isinstance(m.content, str) else "\n".join(str(p) for p in m.content)
+                    text_val = content_text(m.content)
                     # Strip reasoning tags (e.g. <think>...</think>, <thought>...</thought>, <thinking>...</thinking>)
                     # including unclosed trailing tags to prevent upstream model prompt poisoning.
                     cleaned_text = re.sub(
@@ -1210,6 +1228,20 @@ class AntigravityPlugin(BasePlugin):
             )
 
         await self._ensure_token_freshness(account)
+
+        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
+
+        # Gemini accepts inline image data; download remote URLs before building
+        # the request so vision works with ordinary OpenAI ``image_url`` parts.
+        if messages_have_images(request.messages):
+            materialized = await materialize_message_images(
+                request.messages,
+                timeout=min(timeout, 30.0),
+                proxy=proxy,
+            )
+            if materialized is not request.messages:
+                request = request.model_copy(update={"messages": materialized})
+
         headers, body = self._build_upstream_request(
             request,
             model_config,
@@ -1221,8 +1253,6 @@ class AntigravityPlugin(BasePlugin):
         target_model = model_config.id
 
         url = f"{base_url}/v1internal:streamGenerateContent?alt=sse"
-
-        proxy = str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip() or None
 
         if request.stream:
             async def sse_stream_generator() -> AsyncIterator[ChatCompletionChunk]:

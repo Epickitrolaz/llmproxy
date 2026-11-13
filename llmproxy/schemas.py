@@ -157,6 +157,13 @@ class ModelCard(BaseModel):
     # the model has no explicit configuration (for example load-balancer rules).
     context_window: Optional[int] = None
     max_tokens: Optional[int] = None
+    # Vision capability advertised to clients. ``input_modalities`` follows the
+    # OpenRouter/OpenAI-compatible convention used by model catalogues.
+    supports_vision: bool = False
+    input_modalities: List[str] = Field(default_factory=lambda: ["text"])
+    output_modalities: List[str] = Field(default_factory=lambda: ["text"])
+    # OpenRouter-style capability block for clients that read it.
+    architecture: Optional[Dict[str, Any]] = None
 
 
 class ModelListResponse(BaseModel):
@@ -285,6 +292,10 @@ class PluginModelConfig(BaseModel):
     # Reasoning levels this model accepts through ``reasoning_effort``. The
     # proxy maps the level internally; clients use the base model ID.
     reasoning_levels: List[str] = Field(default_factory=list)
+    # Whether the upstream model accepts image parts. Advertised through
+    # ``/v1/models`` and used by the dashboard vision toggle. The proxy always
+    # forwards image parts; this is capability metadata for clients.
+    supports_vision: bool = False
 
 
 class PluginMetadata(BaseModel):

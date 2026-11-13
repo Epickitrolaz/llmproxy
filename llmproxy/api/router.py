@@ -11,6 +11,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from llmproxy.core.manager import plugin_manager
+from llmproxy.core.multimodal import (
+    estimate_content_tokens,
+    is_image_part,
+    messages_have_images,
+    normalize_message_content,
+)
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -29,19 +35,13 @@ router = APIRouter(prefix="/v1")
 
 
 def _estimate_tokens(content: Any) -> int:
-    """Simple token estimation based on character count / standard ratio."""
+    """Estimate tokens, counting image parts instead of their base64 payload."""
     if not content:
         return 0
+    if isinstance(content, list):
+        return max(1, estimate_content_tokens(content))
     if isinstance(content, str):
         return max(1, len(content) // 4)
-    if isinstance(content, list):
-        total = 0
-        for item in content:
-            if isinstance(item, dict):
-                total += _estimate_tokens(item.get("text", json.dumps(item)))
-            else:
-                total += _estimate_tokens(str(item))
-        return max(1, total)
     if isinstance(content, dict):
         return max(1, len(json.dumps(content)) // 4)
     return 1
@@ -257,6 +257,10 @@ def _extract_api_key(req: Request) -> Optional[str]:
 @router.post("/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     start_time = time.time()
+    # Accept image parts in any common client spelling and hand every plugin
+    # the same canonical OpenAI ``image_url`` representation.
+    for message in request.messages:
+        normalize_message_content(message)
     prompt_tokens = _calc_prompt_tokens(request.messages, tools=request.tools)
     # Audit logs report the model that actually served the request. For custom
     # load-balancing rules this is updated to the selected downstream model,
@@ -423,8 +427,12 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             ),
         )
 
-    # 1. Resolve model to plugin, model config, and variables
-    resolved = plugin_manager.resolve_model(request.model)
+    # 1. Resolve model to plugin, model config, and variables. Vision requests
+    # prefer image-capable targets when the model is a load-balancing rule.
+    resolved = plugin_manager.resolve_model(
+        request.model,
+        require_vision=messages_have_images(request.messages),
+    )
     if resolved is None:
         latency_ms = round((time.time() - start_time) * 1000, 2)
         plugin_manager.add_log(
@@ -898,30 +906,61 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     )
 
 
+def _model_card(model_config: Any, owned_by: str) -> ModelCard:
+    supports_vision = bool(getattr(model_config, "supports_vision", False))
+    modalities = ["text", "image"] if supports_vision else ["text"]
+    return ModelCard(
+        id=model_config.id,
+        owned_by=owned_by,
+        reasoning_levels=list(getattr(model_config, "reasoning_levels", []) or []),
+        context_window=getattr(model_config, "context_window", None),
+        max_tokens=getattr(model_config, "max_tokens", None),
+        supports_vision=supports_vision,
+        input_modalities=modalities,
+        architecture={
+            "input_modalities": modalities,
+            "output_modalities": ["text"],
+        },
+    )
+
+
+def _rule_model_card(rule: Any, active_models: List[Tuple[Any, Any]]) -> ModelCard:
+    """Advertise vision only when every target of a rule accepts images."""
+    by_id = {model_config.id: model_config for model_config, _ in active_models}
+    targets = [by_id.get(target) for target in rule.targets]
+    known_targets = [target for target in targets if target is not None]
+    supports_vision = bool(known_targets) and all(
+        bool(getattr(target, "supports_vision", False)) for target in known_targets
+    )
+    modalities = ["text", "image"] if supports_vision else ["text"]
+    return ModelCard(
+        id=rule.model_id,
+        owned_by="load_balancer",
+        supports_vision=supports_vision,
+        input_modalities=modalities,
+        architecture={
+            "input_modalities": modalities,
+            "output_modalities": ["text"],
+        },
+    )
+
+
 @router.get("/models", response_model=ModelListResponse)
 async def list_models():
     """List all available models from active plugins and load balancing rules in OpenAI format."""
     cards: List[ModelCard] = []
     seen = set()
+    active_models = plugin_manager.get_all_active_models()
 
     # Include custom load balancing rule models
     for rule in plugin_manager.get_load_balancing_rules():
         if rule.enabled and rule.model_id not in seen:
-            cards.append(ModelCard(id=rule.model_id, owned_by="load_balancer"))
+            cards.append(_rule_model_card(rule, active_models))
             seen.add(rule.model_id)
 
-    active_models = plugin_manager.get_all_active_models()
     for model_config, plugin in active_models:
         if model_config.id not in seen:
-            cards.append(
-                ModelCard(
-                    id=model_config.id,
-                    owned_by=plugin.metadata.id,
-                    reasoning_levels=list(model_config.reasoning_levels),
-                    context_window=model_config.context_window,
-                    max_tokens=model_config.max_tokens,
-                )
-            )
+            cards.append(_model_card(model_config, plugin.metadata.id))
             seen.add(model_config.id)
     return ModelListResponse(data=cards)
 
@@ -929,20 +968,14 @@ async def list_models():
 @router.get("/models/{model_id}", response_model=ModelCard)
 async def get_model(model_id: str):
     """Get information about a specific model."""
+    active_models = plugin_manager.get_all_active_models()
     for rule in plugin_manager.get_load_balancing_rules():
         if rule.enabled and rule.model_id == model_id:
-            return ModelCard(id=rule.model_id, owned_by="load_balancer")
+            return _rule_model_card(rule, active_models)
 
-    active_models = plugin_manager.get_all_active_models()
     for model_config, plugin in active_models:
         if model_config.id == model_id:
-            return ModelCard(
-                id=model_config.id,
-                owned_by=plugin.metadata.id,
-                reasoning_levels=list(model_config.reasoning_levels),
-                context_window=model_config.context_window,
-                max_tokens=model_config.max_tokens,
-            )
+            return _model_card(model_config, plugin.metadata.id)
     raise HTTPException(
         status_code=404,
         detail={
