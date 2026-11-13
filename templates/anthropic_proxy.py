@@ -72,6 +72,23 @@ REASONING_LEVELS: Tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "
 _THINKING_BLOCKS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _THINKING_BLOCKS_LIMIT = 512
 
+# Anthropic reports a safety-classifier fallback in two places: the top-level
+# ``model`` field names the model that actually answered, and ``usage.iterations``
+# records the hop as a ``fallback_message`` entry. Sticky routing sends later
+# turns straight to the fallback model, so the ``fallback`` content block is not
+# always present and must not be relied on. Detection keys on the model field,
+# using ``usage.iterations`` only to reject unrelated alias/date differences.
+FALLBACK_NOTICE_TEMPLATE = "The model has been downgraded to {model}"
+FALLBACK_BETA_HEADER = "server-side-fallback-2026-07-01"
+
+
+def _normalize_model_id(value: Any) -> str:
+    """Normalize a model ID for comparison (case and dated snapshots)."""
+    name = str(value or "").strip().lower()
+    if not name:
+        return ""
+    return re.sub(r"-\d{8}$", "", name)
+
 
 def remember_thinking_blocks(
     tool_use_id: Optional[str], blocks: Optional[List[Dict[str, Any]]]
@@ -119,7 +136,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 "Anthropic Claude Messages API provider with streaming, tool calls, "
                 "and extended thinking support"
             ),
-            version="2.1.0",
+            version="2.2.0",
             author="Anthropic",
             enabled=True,
             filename="anthropic_proxy.py",
@@ -190,6 +207,30 @@ class AnthropicProxyPlugin(BasePlugin):
                     description=(
                         "Default extended-thinking level. Request-level reasoning_effort "
                         "or a model suffix such as ':high' takes precedence."
+                    ),
+                ),
+                PluginVariable(
+                    name="thinking_display",
+                    label="Thinking Display",
+                    type="select",
+                    default="summarized",
+                    options=["summarized", "omitted"],
+                    description=(
+                        "Anthropic hides reasoning text by default on current models. "
+                        "'summarized' asks for readable reasoning summaries in "
+                        "reasoning_content; 'omitted' keeps the signature only."
+                    ),
+                ),
+                PluginVariable(
+                    name="fallbacks",
+                    label="Safety Fallbacks",
+                    type="select",
+                    default="off",
+                    options=["off", "default"],
+                    description=(
+                        "Opt into Anthropic server-side safety fallbacks. 'default' "
+                        "retries a declined request on Anthropic's recommended model; "
+                        "downgrades are reported to the client."
                     ),
                 ),
                 PluginVariable(
@@ -297,6 +338,164 @@ class AnthropicProxyPlugin(BasePlugin):
         if raw in ("low", "medium", "high", "xhigh", "max"):
             return raw
         return None
+
+    @staticmethod
+    def _normalize_thinking_display(value: Any) -> Optional[str]:
+        raw = str(value or "").strip().lower()
+        if raw in ("summarized", "summary", "summaries"):
+            return "summarized"
+        if raw in ("omitted", "omit", "hidden", "off"):
+            return "omitted"
+        return None
+
+    def _resolve_thinking_display(
+        self,
+        request: ChatCompletionRequest,
+        variables: Dict[str, Any],
+    ) -> str:
+        """Return the ``thinking.display`` value to send upstream.
+
+        Current Anthropic models default to ``"omitted"``, which returns empty
+        thinking text. The proxy asks for summaries so reasoning reaches clients
+        as ``reasoning_content`` unless the client or provider opts out.
+        """
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        requested: Any = None
+        thinking = extra.get("thinking")
+        if isinstance(thinking, dict):
+            requested = thinking.get("display")
+        if requested is None:
+            requested = extra.get("thinking_display")
+        display = self._normalize_thinking_display(requested)
+        if display is None:
+            display = self._normalize_thinking_display(variables.get("thinking_display"))
+        return display or "summarized"
+
+    @staticmethod
+    def _thinking_text(block: Dict[str, Any]) -> str:
+        """Extract readable reasoning from a thinking block or delta.
+
+        Summarized thinking normally arrives in ``thinking``. Some gateways move
+        the summary to ``summaries`` (a list of ``summary_text`` items) or a
+        plain ``summary`` string, so accept those shapes too instead of dropping
+        the reasoning entirely.
+        """
+        if not isinstance(block, dict):
+            return ""
+        text = block.get("thinking")
+        if isinstance(text, str) and text:
+            return text
+        for key in ("summaries", "summary"):
+            value = block.get(key)
+            parts: List[str] = []
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        part = (
+                            item.get("text")
+                            or item.get("summary_text")
+                            or item.get("thinking")
+                        )
+                        if isinstance(part, str):
+                            parts.append(part)
+            joined = "".join(parts)
+            if joined:
+                return joined
+        return text if isinstance(text, str) else ""
+
+    @staticmethod
+    def _served_model(payload: Dict[str, Any]) -> Optional[str]:
+        """Return the model that actually produced a Messages API response."""
+        if not isinstance(payload, dict):
+            return None
+        model = payload.get("model")
+        return model.strip() if isinstance(model, str) and model.strip() else None
+
+    @staticmethod
+    def _fallback_evidence(payload: Dict[str, Any]) -> bool:
+        """Return True when the response records a server-side fallback hop."""
+        content = payload.get("content")
+        if isinstance(content, list):
+            if any(
+                isinstance(block, dict) and block.get("type") == "fallback"
+                for block in content
+            ):
+                return True
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            iterations = usage.get("iterations")
+            if isinstance(iterations, list):
+                return any(
+                    isinstance(attempt, dict)
+                    and attempt.get("type") == "fallback_message"
+                    for attempt in iterations
+                )
+        return False
+
+    def _downgrade_notice(
+        self,
+        requested_model: str,
+        payload: Dict[str, Any],
+    ) -> Optional[str]:
+        """Return a user-facing notice when Anthropic served a fallback model."""
+        served = self._served_model(payload)
+        if not served:
+            return None
+        if _normalize_model_id(served) == _normalize_model_id(requested_model):
+            return None
+
+        # When fallback metadata is present, require it to agree. This rejects
+        # gateways that merely normalize a dated snapshot; sticky fallback turns
+        # still record a ``fallback_message`` iteration, so they are caught even
+        # though they omit the ``fallback`` content block.
+        usage = payload.get("usage")
+        has_metadata = bool(
+            isinstance(usage, dict) and usage.get("iterations")
+        ) or any(
+            isinstance(block, dict) and block.get("type") == "fallback"
+            for block in (payload.get("content") or [])
+        )
+        if has_metadata and not self._fallback_evidence(payload):
+            return None
+        return FALLBACK_NOTICE_TEMPLATE.format(model=served)
+
+    @staticmethod
+    def _resolve_fallbacks(
+        request: ChatCompletionRequest,
+        variables: Dict[str, Any],
+    ) -> Optional[Any]:
+        """Return the ``fallbacks`` request value, if any."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        if "fallbacks" in extra:
+            return extra.get("fallbacks")
+        value = variables.get("fallbacks")
+        if isinstance(value, str) and value.strip().lower() == "default":
+            return "default"
+        if isinstance(value, list) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _beta_header(
+        request: ChatCompletionRequest,
+        fallbacks: Optional[Any],
+    ) -> Optional[str]:
+        """Return the ``anthropic-beta`` header value for the request."""
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        raw = extra.get("anthropic_beta")
+        values: List[str] = []
+        if isinstance(raw, str):
+            values = [item.strip() for item in raw.split(",") if item.strip()]
+        elif isinstance(raw, list):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+        if fallbacks and FALLBACK_BETA_HEADER not in values:
+            values.append(FALLBACK_BETA_HEADER)
+        return ",".join(values) or None
+
 
     def _resolve_reasoning(
         self,
@@ -751,10 +950,17 @@ class AnthropicProxyPlugin(BasePlugin):
 
         if effort_active:
             if adaptive:
-                payload["thinking"] = {"type": "adaptive"}
+                payload["thinking"] = {
+                    "type": "adaptive",
+                    "display": self._resolve_thinking_display(request, variables),
+                }
                 payload["output_config"] = {"effort": effort}
             elif budget is not None:
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        fallbacks = self._resolve_fallbacks(request, variables)
+        if fallbacks:
+            payload["fallbacks"] = fallbacks
 
         # Anthropic rejects temperature/top_p when extended thinking is active.
         if not thinking_active:
@@ -1132,6 +1338,12 @@ class AnthropicProxyPlugin(BasePlugin):
                         message = event.get("message") or {}
                         chunk_id = f"chatcmpl-{message.get('id', uuid.uuid4().hex[:12])}"
                         last_usage = self._build_usage(message.get("usage"))
+                        # The routing decision is made before the stream opens, so
+                        # ``message.model`` already names the served model. Surface
+                        # a downgrade in the first chunk, ahead of any answer text.
+                        notice = self._downgrade_notice(
+                            str(body.get("model") or ""), message
+                        )
                         yield ChatCompletionChunk(
                             id=chunk_id,
                             created=created,
@@ -1139,7 +1351,10 @@ class AnthropicProxyPlugin(BasePlugin):
                             choices=[
                                 ChatChoiceDelta(
                                     index=0,
-                                    delta={"role": "assistant", "content": ""},
+                                    delta={
+                                        "role": "assistant",
+                                        "content": f"{notice}\n\n" if notice else "",
+                                    },
                                     finish_reason=None,
                                 )
                             ],
@@ -1151,7 +1366,7 @@ class AnthropicProxyPlugin(BasePlugin):
                         if block_type == "thinking":
                             current_thinking = {
                                 "type": "thinking",
-                                "thinking": block.get("thinking", ""),
+                                "thinking": self._thinking_text(block),
                             }
                             if block.get("signature"):
                                 current_thinking["signature"] = block["signature"]
@@ -1212,23 +1427,24 @@ class AnthropicProxyPlugin(BasePlugin):
                                 ],
                             )
                         elif delta_type == "thinking_delta":
-                            if current_thinking is not None:
+                            reasoning_text = self._thinking_text(delta)
+                            if current_thinking is not None and reasoning_text:
                                 current_thinking["thinking"] = (
-                                    current_thinking.get("thinking", "")
-                                    + delta.get("thinking", "")
+                                    current_thinking.get("thinking", "") + reasoning_text
                                 )
-                            yield ChatCompletionChunk(
-                                id=chunk_id,
-                                created=created,
-                                model=model_config.id,
-                                choices=[
-                                    ChatChoiceDelta(
-                                        index=0,
-                                        delta={"reasoning_content": delta.get("thinking", "")},
-                                        finish_reason=None,
-                                    )
-                                ],
-                            )
+                            if reasoning_text:
+                                yield ChatCompletionChunk(
+                                    id=chunk_id,
+                                    created=created,
+                                    model=model_config.id,
+                                    choices=[
+                                        ChatChoiceDelta(
+                                            index=0,
+                                            delta={"reasoning_content": reasoning_text},
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                )
                         elif delta_type == "signature_delta" and current_thinking is not None:
                             current_thinking["signature"] = delta.get("signature", "")
                         elif delta_type == "input_json_delta" and current_tool_call is not None:
@@ -1336,6 +1552,9 @@ class AnthropicProxyPlugin(BasePlugin):
             "anthropic-version": version,
             "content-type": "application/json",
         }
+        beta = self._beta_header(request, self._resolve_fallbacks(request, variables))
+        if beta:
+            headers["anthropic-beta"] = beta
         url = f"{base_url}/messages"
         proxy = (
             str(variables.get("proxy") or (getattr(account, "proxy_url", None) or "")).strip()
@@ -1368,10 +1587,12 @@ class AnthropicProxyPlugin(BasePlugin):
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
             elif block_type == "thinking":
-                thinking_parts.append(block.get("thinking", ""))
+                thinking_text = self._thinking_text(block)
+                if thinking_text:
+                    thinking_parts.append(thinking_text)
                 thinking_block: Dict[str, Any] = {
                     "type": "thinking",
-                    "thinking": block.get("thinking", ""),
+                    "thinking": thinking_text,
                 }
                 if block.get("signature"):
                     thinking_block["signature"] = block["signature"]
@@ -1405,6 +1626,9 @@ class AnthropicProxyPlugin(BasePlugin):
             else (raw_stop or "stop")
         )
         text_content = "".join(text_parts) if text_parts else (None if tool_calls else "")
+        notice = self._downgrade_notice(str(payload.get("model") or ""), data)
+        if notice:
+            text_content = f"{notice}\n\n{text_content}" if text_content else notice
         reasoning_content = "".join(thinking_parts) or None
 
         message_kwargs: Dict[str, Any] = {
