@@ -21,11 +21,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import httpx
 
-from llmproxy.core.multimodal import (
-    content_text,
-    is_image_part,
-    to_openai_image_part,
-)
 from llmproxy.core.codex_oauth import (
     CODEX_BACKEND_API,
     CODEX_CLIENT_ID,
@@ -36,6 +31,11 @@ from llmproxy.core.codex_oauth import (
     sanitize_ssl_env,
 )
 from llmproxy.core.interface import BasePlugin
+from llmproxy.core.multimodal import (
+    content_text,
+    is_image_part,
+    to_openai_image_part,
+)
 from llmproxy.schemas import (
     Account,
     ChatChoice,

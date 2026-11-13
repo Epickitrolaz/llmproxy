@@ -697,12 +697,9 @@ class AnthropicProxyPlugin(BasePlugin):
 
                     part_type = str(part.get("type") or "").lower()
                     if part_type in ("text", "input_text"):
-                        text_block: Dict[str, Any] = {
-                            "type": "text",
-                            "text": str(part.get("text") or ""),
-                        }
-                        if part.get("cache_control"):
-                            text_block["cache_control"] = part["cache_control"]
+                        text_block = dict(part)
+                        text_block["type"] = "text"
+                        text_block["text"] = str(part.get("text") or "")
                         blocks.append(text_block)
                         continue
 

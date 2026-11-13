@@ -298,6 +298,63 @@ def test_materialize_remote_images_replaces_urls_and_falls_back(monkeypatch):
     }
 
 
+def test_load_balancing_prefers_vision_targets_for_image_requests(tmp_path):
+    from llmproxy.core.manager import PluginManager
+    from llmproxy.schemas import LoadBalancingRuleCreate
+
+    plugin_code = '''
+from llmproxy.core.interface import BasePlugin
+from llmproxy.schemas import PluginMetadata, PluginModelConfig
+
+class VisionPlugin(BasePlugin):
+    @property
+    def metadata(self):
+        return PluginMetadata(
+            id="vision_rule_test",
+            name="Vision Rule Test",
+            models=[
+                PluginModelConfig(id="text-model", name="Text"),
+                PluginModelConfig(id="vision-model", name="Vision", supports_vision=True),
+            ],
+        )
+
+    async def chat_completion(self, request, model_config, variables, account=None):
+        raise NotImplementedError
+
+plugin = VisionPlugin()
+'''
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    (plugins_dir / "vision_rule_test.py").write_text(plugin_code, encoding="utf-8")
+
+    manager = PluginManager(plugins_dir=plugins_dir, data_dir=tmp_path / "data")
+    manager.discover_and_load_all()
+    manager.update_plugin_config("vision_rule_test", enabled=True, variables={})
+    rule = manager.add_load_balancing_rule(
+        LoadBalancingRuleCreate(
+            model_id="virtual-vision",
+            name="Virtual Vision",
+            strategy="round_robin",
+            targets=["text-model", "vision-model"],
+        )
+    )
+
+    selected = {
+        manager.select_rule_target(rule, require_vision=True) for _ in range(6)
+    }
+    assert selected == {"vision-model"}
+
+    resolved = manager.resolve_model("virtual-vision", require_vision=True)
+    assert resolved is not None
+    assert resolved[0].id == "vision-model"
+
+    # Without image input the rule still balances across both targets.
+    all_targets = {
+        manager.select_rule_target(rule, require_vision=False) for _ in range(6)
+    }
+    assert all_targets == {"text-model", "vision-model"}
+
+
 def test_model_cards_advertise_vision(monkeypatch):
     from llmproxy.api.router import _model_card
 
