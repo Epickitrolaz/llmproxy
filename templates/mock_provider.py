@@ -81,6 +81,7 @@ class MockProviderPlugin(BasePlugin):
                     upstream_model="mock-gpt-4o",
                     context_window=128000,
                     max_tokens=4096,
+                    supports_vision=True,
                 ),
                 PluginModelConfig(
                     id="mock-claude-3-5",
@@ -88,6 +89,7 @@ class MockProviderPlugin(BasePlugin):
                     upstream_model="mock-claude-3-5-sonnet",
                     context_window=200000,
                     max_tokens=8192,
+                    supports_vision=True,
                 ),
             ],
         )

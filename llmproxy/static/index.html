@@ -345,9 +345,14 @@
           </div>
 
           <div class="chat-input-area">
+            <div class="chat-attachments" id="playground-attachments" hidden></div>
             <textarea class="chat-textarea" id="playground-prompt" placeholder="Send a message to test this model (Ctrl+Enter to send)..."></textarea>
             <div class="chat-input-footer">
-              <span class="input-hint">Press Ctrl + Enter to send</span>
+              <div class="chat-input-tools">
+                <button class="btn btn-secondary btn-sm" id="playground-attach-btn" type="button">Attach Image</button>
+                <input type="file" id="playground-image-input" accept="image/*" multiple hidden>
+                <span class="input-hint">Press Ctrl + Enter to send</span>
+              </div>
               <button class="btn btn-primary" id="playground-send-btn">Send Message</button>
             </div>
           </div>
@@ -935,6 +940,16 @@
           <label class="form-label">Parameters (JSON)</label>
           <textarea class="form-input" id="model-form-parameters" rows="3" placeholder='{"temperature": 0.7}' style="font-family: var(--font-mono); font-size: 12px;"></textarea>
           <span class="form-hint">Optional provider parameters merged into requests for this model.</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+          <div>
+            <label class="form-label" style="margin-bottom: 2px;">Vision</label>
+            <span class="form-hint">Accept image parts and advertise image input in /v1/models</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="model-form-vision">
+            <span class="slider"></span>
+          </label>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
           <div>

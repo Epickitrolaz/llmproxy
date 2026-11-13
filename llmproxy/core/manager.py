@@ -633,7 +633,15 @@ class PluginManager:
             return True
         return False
 
-    def select_rule_target(self, rule: LoadBalancingRule) -> Optional[str]:
+    def _model_id_supports_vision(self, model_id: str) -> bool:
+        for model_config, _plugin in self.get_all_active_models():
+            if model_config.id == model_id:
+                return bool(getattr(model_config, "supports_vision", False))
+        return False
+
+    def select_rule_target(
+        self, rule: LoadBalancingRule, require_vision: bool = False
+    ) -> Optional[str]:
         """Select a target model ID based on the rule's load balancing strategy."""
         if not rule.targets:
             return None
@@ -641,6 +649,17 @@ class PluginManager:
         valid_targets = [t for t in rule.targets if t and t.strip()]
         if not valid_targets:
             return None
+
+        if require_vision:
+            vision_targets = [
+                target
+                for target in valid_targets
+                if self._model_id_supports_vision(target)
+            ]
+            # Prefer vision-capable targets, but never make an image request
+            # unroutable just because capability metadata is missing.
+            if vision_targets:
+                valid_targets = vision_targets
 
         strat = (rule.strategy or "round_robin").lower().replace("-", "_")
 
@@ -1515,15 +1534,15 @@ class PluginManager:
         return active
 
     def resolve_model(
-        self, model_id: str
+        self, model_id: str, require_vision: bool = False
     ) -> Optional[Tuple[PluginModelConfig, BasePlugin, Dict[str, Any]]]:
         """Resolve a model ID to its plugin, model config, and active variables."""
         # 1. First check if model_id is a custom load balancing rule
         for rule in self.rules.values():
             if rule.enabled and rule.model_id == model_id:
-                target_model_id = self.select_rule_target(rule)
+                target_model_id = self.select_rule_target(rule, require_vision=require_vision)
                 if target_model_id and target_model_id != model_id:
-                    res = self.resolve_model(target_model_id)
+                    res = self.resolve_model(target_model_id, require_vision=require_vision)
                     if res is not None:
                         return res
 

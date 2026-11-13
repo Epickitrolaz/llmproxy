@@ -23,6 +23,17 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
+- **Image / Vision Input Across Providers**:
+  - Accepts OpenAI `image_url` parts plus Anthropic (`image`) and Gemini
+    (`inlineData`) spellings on the same `/v1/chat/completions` endpoint.
+  - Data URLs are passed inline, and provider adapters translate them to
+    Anthropic `image` blocks, Gemini `inlineData`, and Codex `input_image`.
+  - Remote HTTP(S) image URLs are downloaded for Gemini-backed providers that
+    cannot fetch arbitrary URLs.
+  - Vision-capable models advertise `supports_vision`, `input_modalities`, and
+    `architecture.input_modalities` in `GET /v1/models`.
+  - Load-balancing rules prefer vision-capable targets for image requests.
+  - The Playground can attach images, and the Models tab has a Vision toggle.
 - **Context Caching Passthrough**:
   - Anthropic `cache_control` breakpoints are preserved on system prompts, messages, and tools.
   - `anthropic_proxy` automatically adds cache breakpoints when an OpenAI-style client sends none (`auto_prompt_cache`, enabled by default).
@@ -251,6 +262,28 @@ curl -X POST http://localhost:8000/v1/chat/completions \
     ]
   }'
 ```
+
+#### Image / Vision Completion
+Send an OpenAI-style image part. `image_url` accepts either an `http(s)` URL or
+a `data:` URL; the proxy translates it for the selected provider.
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-proxy-your-key" \
+  -d '{
+    "model": "gemini-3.8-flash",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is in this image?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+      ]
+    }]
+  }'
+```
+
+`GET /v1/models` reports `supports_vision` and `input_modalities` so clients can
+show a vision selector without guessing from the model name.
 
 #### Chat Completion (Streaming SSE)
 ```bash

@@ -24,6 +24,7 @@ from llmproxy.core.codex_oauth import (
     codex_oauth,
 )
 from llmproxy.core.manager import plugin_manager
+from llmproxy.core.multimodal import normalize_message_content
 from llmproxy.core.security import redact_account, redact_api_key, require_admin
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
@@ -76,6 +77,7 @@ class PluginModelUpdate(BaseModel):
     enabled: Optional[bool] = None
     context_window: Optional[int] = None
     max_tokens: Optional[int] = None
+    supports_vision: Optional[bool] = None
     parameters: Optional[Dict[str, Any]] = None
 
 
@@ -599,6 +601,8 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
         target_model.context_window = body.context_window
     if body.max_tokens is not None:
         target_model.max_tokens = body.max_tokens
+    if body.supports_vision is not None:
+        target_model.supports_vision = body.supports_vision
     if body.parameters is not None:
         target_model.parameters = body.parameters
 
@@ -1497,6 +1501,9 @@ async def test_chat(req: TestChatRequest):
         messages = [ChatMessage(role="user", content=req.prompt)]
     else:
         raise HTTPException(status_code=400, detail="Either 'prompt' or 'messages' must be provided")
+
+    for message in messages:
+        normalize_message_content(message)
 
     chat_request = ChatCompletionRequest(
         model=req.model,

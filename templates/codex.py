@@ -21,6 +21,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import httpx
 
+from llmproxy.core.multimodal import (
+    content_text,
+    is_image_part,
+    to_openai_image_part,
+)
 from llmproxy.core.codex_oauth import (
     CODEX_BACKEND_API,
     CODEX_CLIENT_ID,
@@ -221,6 +226,8 @@ class CodexPlugin(BasePlugin):
                 ),
             ],
         )
+        for model in self._metadata.models:
+            model.supports_vision = True
 
     @property
     def metadata(self) -> PluginMetadata:
@@ -708,24 +715,32 @@ class CodexPlugin(BasePlugin):
         for msg in request.messages:
             role = msg.role
             if role in ("system", "developer"):
-                text = str(msg.content or "")
+                text = content_text(msg.content)
                 input_items.append({"role": "developer", "content": [{"type": "input_text", "text": text}]})
             elif role == "user":
                 if isinstance(msg.content, list):
                     parts: List[Dict[str, Any]] = []
                     for p in msg.content:
                         if isinstance(p, dict):
+                            if is_image_part(p):
+                                image_part = to_openai_image_part(p)
+                                if image_part is not None:
+                                    parts.append(image_part)
+                                else:
+                                    parts.append({"type": "input_text", "text": "[Image could not be loaded]"})
+                                continue
                             ptype = p.get("type")
                             if ptype in ("text", "input_text"):
                                 parts.append({"type": "input_text", "text": p.get("text", "")})
-                            elif ptype == "image_url":
-                                url_val = p.get("image_url", {}).get("url", "")
-                                parts.append({"type": "input_image", "image_url": url_val})
+                            else:
+                                text = p.get("text")
+                                if isinstance(text, str):
+                                    parts.append({"type": "input_text", "text": text})
                         elif isinstance(p, str):
                             parts.append({"type": "input_text", "text": p})
                     input_items.append({"role": "user", "content": parts})
                 else:
-                    text = str(msg.content or "")
+                    text = content_text(msg.content)
                     input_items.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
             elif role == "assistant":
                 if getattr(msg, "tool_calls", None):
@@ -741,10 +756,12 @@ class CodexPlugin(BasePlugin):
                             "arguments": fargs if isinstance(fargs, str) else json.dumps(fargs),
                         })
                 if msg.content:
-                    input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": str(msg.content)}]})
+                    assistant_text = content_text(msg.content)
+                    if assistant_text:
+                        input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": assistant_text}]})
             elif role in ("tool", "function"):
                 cid = getattr(msg, "tool_call_id", None) or getattr(msg, "id", None) or ""
-                out = str(msg.content) if msg.content is not None else ""
+                out = content_text(msg.content) if msg.content is not None else ""
                 input_items.append({
                     "type": "function_call_output",
                     "call_id": cid,

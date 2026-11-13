@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 import httpx
 
 from llmproxy.core.interface import BasePlugin
+from llmproxy.core.multimodal import infer_vision_support
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -218,6 +219,8 @@ class OpenRouterPlugin(BasePlugin):
                 ),
             ],
         )
+        for model in self._metadata.models:
+            model.supports_vision = infer_vision_support(model.id, model.name)
 
     @property
     def metadata(self) -> PluginMetadata:

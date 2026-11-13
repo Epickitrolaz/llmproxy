@@ -17,6 +17,10 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 import httpx
 
 from llmproxy.core.interface import BasePlugin
+from llmproxy.core.multimodal import (
+    is_image_part,
+    to_anthropic_image_block,
+)
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -283,7 +287,7 @@ class AnthropicProxyPlugin(BasePlugin):
     @staticmethod
     def _build_models() -> List[PluginModelConfig]:
         reasoning_levels = list(REASONING_LEVELS)
-        return [
+        models = [
             PluginModelConfig(
                 id="claude-haiku-5-5",
                 name="Claude Haiku 5.5",
@@ -317,6 +321,9 @@ class AnthropicProxyPlugin(BasePlugin):
                 reasoning_levels=reasoning_levels,
             ),
         ]
+        for model in models:
+            model.supports_vision = True
+        return models
 
     @property
     def metadata(self) -> PluginMetadata:
@@ -660,7 +667,7 @@ class AnthropicProxyPlugin(BasePlugin):
         system_blocks: List[Dict[str, Any]] = []
         anthropic_messages: List[Dict[str, Any]] = []
 
-        def _text_blocks(content: Any) -> List[Dict[str, Any]]:
+        def _text_blocks(content: Any, allow_images: bool = True) -> List[Dict[str, Any]]:
             """Normalize content into Anthropic blocks while preserving cache_control."""
             if isinstance(content, str):
                 return [{"type": "text", "text": content}]
@@ -669,13 +676,42 @@ class AnthropicProxyPlugin(BasePlugin):
                 for part in content:
                     if isinstance(part, str):
                         blocks.append({"type": "text", "text": part})
-                    elif isinstance(part, dict):
-                        blocks.append(dict(part))
+                        continue
+                    if not isinstance(part, dict):
+                        continue
+
+                    if is_image_part(part):
+                        if not allow_images:
+                            blocks.append(
+                                {"type": "text", "text": "[Image omitted: images are not allowed in this message role]"}
+                            )
+                            continue
+                        image_block = to_anthropic_image_block(part)
+                        if image_block is not None:
+                            if part.get("cache_control"):
+                                image_block.setdefault("cache_control", part["cache_control"])
+                            blocks.append(image_block)
+                        else:
+                            blocks.append({"type": "text", "text": "[Image could not be loaded]"})
+                        continue
+
+                    part_type = str(part.get("type") or "").lower()
+                    if part_type in ("text", "input_text"):
+                        text_block: Dict[str, Any] = {
+                            "type": "text",
+                            "text": str(part.get("text") or ""),
+                        }
+                        if part.get("cache_control"):
+                            text_block["cache_control"] = part["cache_control"]
+                        blocks.append(text_block)
+                        continue
+
+                    blocks.append(dict(part))
             return blocks
 
         for message in messages:
             if message.role == "system":
-                system_blocks.extend(_text_blocks(message.content))
+                system_blocks.extend(_text_blocks(message.content, allow_images=False))
                 continue
 
             if message.role in ("tool", "function"):
@@ -704,7 +740,7 @@ class AnthropicProxyPlugin(BasePlugin):
 
             if message.role == "assistant":
                 text_blocks: List[Dict[str, Any]] = (
-                    _text_blocks(message.content) if message.content else []
+                    _text_blocks(message.content, allow_images=False) if message.content else []
                 )
                 explicit_thinking = getattr(message, "thinking_blocks", None)
 
