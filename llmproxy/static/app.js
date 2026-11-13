@@ -102,6 +102,7 @@
     statTotalAccounts: document.getElementById("stat-total-accounts"),
     statActiveAccounts: document.getElementById("stat-active-accounts"),
     statCooldownAccounts: document.getElementById("stat-cooldown-accounts"),
+    statProviderModels: document.getElementById("stat-provider-models"),
     providersGrid: document.getElementById("providers-grid"),
     btnNewProvider: document.getElementById("btn-new-provider"),
     btnTemplatesGallery: document.getElementById("btn-templates-gallery"),
@@ -993,6 +994,12 @@ curl -X POST ${baseUrl}/chat/completions \\
       const data = await api("/api/plugins");
       state.plugins = data || [];
       if (el.statProvidersCount) el.statProvidersCount.textContent = state.plugins.length;
+      if (el.statProviderModels) {
+        el.statProviderModels.textContent = state.plugins.reduce(
+          (total, p) => total + (p.models || []).filter((m) => m.enabled).length,
+          0
+        );
+      }
       renderProvidersGrid();
       populateSnippetModels();
     } catch (err) {

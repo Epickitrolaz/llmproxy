@@ -258,6 +258,10 @@ def _extract_api_key(req: Request) -> Optional[str]:
 async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     start_time = time.time()
     prompt_tokens = _calc_prompt_tokens(request.messages, tools=request.tools)
+    # Audit logs report the model that actually served the request. For custom
+    # load-balancing rules this is updated to the selected downstream model,
+    # not the virtual rule ID the client sent.
+    log_model = request.model
 
     # 0. Local API Key Authentication & Verification
     matched_api_key = None
@@ -331,7 +335,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         plugin_manager.add_log(
             RequestLogEntry(
                 id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                model=request.model,
+                model=log_model,
                 plugin_id=None,
                 api_key_id=matched_api_key.id if matched_api_key else None,
                 status="success",
@@ -426,7 +430,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         plugin_manager.add_log(
             RequestLogEntry(
                 id=f"req-{uuid.uuid4().hex[:12]}",
-                model=request.model,
+                model=log_model,
                 plugin_id=None,
                 api_key_id=matched_api_key.id if matched_api_key else None,
                 status="error",
@@ -449,6 +453,10 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         )
 
     model_config, plugin, variables = resolved
+    # A custom load-balancing rule is only a virtual entry point. Logs and the
+    # dashboard should attribute the request to the model that actually served
+    # it, together with that model's provider.
+    log_model = model_config.id
 
     # 2. Validate variables for the plugin
     var_errors = plugin.validate_variables(variables)
@@ -458,7 +466,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         plugin_manager.add_log(
             RequestLogEntry(
                 id=f"req-{uuid.uuid4().hex[:12]}",
-                model=request.model,
+                model=log_model,
                 plugin_id=plugin.metadata.id,
                 status="error",
                 status_code=400,
@@ -505,7 +513,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=f"req-{uuid.uuid4().hex[:12]}",
-                        model=request.model,
+                        model=log_model,
                         plugin_id=plugin.metadata.id,
                         api_key_id=matched_api_key.id if matched_api_key else None,
                         status="error",
@@ -532,7 +540,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             plugin_manager.add_log(
                 RequestLogEntry(
                     id=f"req-{uuid.uuid4().hex[:12]}",
-                    model=request.model,
+                    model=log_model,
                     plugin_id=plugin.metadata.id,
                     api_key_id=matched_api_key.id if matched_api_key else None,
                     status="error",
@@ -601,7 +609,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             plugin_manager.add_log(
                 RequestLogEntry(
                     id=f"req-{uuid.uuid4().hex[:12]}",
-                    model=request.model,
+                    model=log_model,
                     plugin_id=plugin.metadata.id,
                     api_key_id=matched_api_key.id if matched_api_key else None,
                     status="error",
@@ -647,8 +655,16 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                             prompt_tokens = chunk.usage.prompt_tokens
                         if chunk.usage.completion_tokens:
                             completion_tokens = chunk.usage.completion_tokens
-                        cache_read_tokens, cache_creation_tokens = _usage_cache_tokens(
+                        # Cache counters can arrive in an earlier chunk (for
+                        # example Anthropic's ``message_start``) and be absent
+                        # from the terminal usage chunk. Keep the largest value
+                        # seen so the request log never drops cached tokens.
+                        chunk_cache_read, chunk_cache_created = _usage_cache_tokens(
                             chunk.usage
+                        )
+                        cache_read_tokens = max(cache_read_tokens, chunk_cache_read)
+                        cache_creation_tokens = max(
+                            cache_creation_tokens, chunk_cache_created
                         )
                     else:
                         for choice in chunk.choices:
@@ -709,7 +725,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=log_id,
-                        model=request.model,
+                        model=log_model,
                         plugin_id=plugin.metadata.id,
                         api_key_id=matched_api_key.id if matched_api_key else None,
                         status="success",
@@ -742,7 +758,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 plugin_manager.add_log(
                     RequestLogEntry(
                         id=log_id,
-                        model=request.model,
+                        model=log_model,
                         plugin_id=plugin.metadata.id,
                         api_key_id=matched_api_key.id if matched_api_key else None,
                         status="error",
@@ -788,21 +804,27 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
 
             completion_tokens = 0
             if isinstance(response, ChatCompletionResponse):
-                if response.usage and response.usage.prompt_tokens:
-                    prompt_tokens = response.usage.prompt_tokens
-                if response.usage and response.usage.completion_tokens:
+                if response.usage is not None:
+                    if response.usage.prompt_tokens:
+                        prompt_tokens = response.usage.prompt_tokens
                     completion_tokens = response.usage.completion_tokens
-                elif response.choices:
+                if not completion_tokens and response.choices:
                     msg = response.choices[0].message
                     if msg.content:
                         completion_tokens += _estimate_tokens(msg.content)
                     if getattr(msg, "tool_calls", None):
                         completion_tokens += _estimate_tokens(msg.tool_calls)
-                    response.usage = CompletionUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_tokens + completion_tokens,
-                    )
+                    # Keep the provider's cache counters and prompt details when
+                    # only the completion side is missing from usage data.
+                    if response.usage is None:
+                        response.usage = CompletionUsage(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=prompt_tokens + completion_tokens,
+                        )
+                    else:
+                        response.usage.completion_tokens = completion_tokens
+                        response.usage.total_tokens = prompt_tokens + completion_tokens
 
             cache_read_tokens, cache_creation_tokens = _usage_cache_tokens(
                 response.usage if isinstance(response, ChatCompletionResponse) else None
@@ -822,7 +844,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             plugin_manager.add_log(
                 RequestLogEntry(
                     id=getattr(response, "id", f"req-{uuid.uuid4().hex[:12]}"),
-                    model=request.model,
+                    model=log_model,
                     plugin_id=plugin.metadata.id,
                     api_key_id=matched_api_key.id if matched_api_key else None,
                     status="success",
@@ -851,7 +873,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     plugin_manager.add_log(
         RequestLogEntry(
             id=f"req-{uuid.uuid4().hex[:12]}",
-            model=request.model,
+            model=log_model,
             plugin_id=plugin.metadata.id,
             api_key_id=matched_api_key.id if matched_api_key else None,
             status="error",

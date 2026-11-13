@@ -52,6 +52,8 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Ordered target list: in Fallback mode the first entry is the primary and lower
     entries are the next fallbacks; Round Robin follows the same order.
   - Transparently exposed in `GET /v1/models` and routed dynamically during completions.
+  - Request logs and status views attribute each call to the target model that
+    actually served it and that model's provider, not the virtual rule ID.
 - **Unified Status & Limits Dashboard**:
   - Multi-provider tabbed view designed to scale cleanly across 50+ providers.
   - Two-row layout of rounded square account cards sorted by provider name (pinned providers first).
