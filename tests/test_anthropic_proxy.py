@@ -107,7 +107,10 @@ def test_base_model_with_effort_builds_expected_thinking_payload():
             assert "thinking" not in payload
             assert "output_config" not in payload
         else:
-            assert payload["thinking"] == {"type": "adaptive"}
+            assert payload["thinking"] == {
+                "type": "adaptive",
+                "display": "summarized",
+            }
             assert payload["output_config"] == {"effort": level}
 
 
@@ -196,7 +199,7 @@ def test_payload_enables_thinking_and_omits_sampling():
         reasoning_effort="high",
     )
     payload = plugin._build_payload(request, _model(), {"reasoning_effort": "medium"})
-    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert payload["output_config"] == {"effort": "high"}
     assert "temperature" not in payload
     assert "top_p" not in payload
@@ -406,7 +409,10 @@ def test_real_anthropic_response_is_translated(monkeypatch):
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["x-api-key"] == "sk-live-123"
-    assert captured["json"]["thinking"] == {"type": "adaptive"}
+    assert captured["json"]["thinking"] == {
+        "type": "adaptive",
+        "display": "summarized",
+    }
     assert captured["json"]["output_config"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello from Claude."
     assert response.choices[0].message.reasoning_content == "Let me think."
@@ -760,3 +766,354 @@ def test_extra_body_reasoning_object_is_resolved():
     target, effort = plugin._resolve_reasoning(request, model, {})
     assert target == model.id
     assert effort == "max"
+
+
+def test_payload_asks_for_summarized_thinking_and_can_opt_out():
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=20000,
+        reasoning_effort="high",
+    )
+
+    # Current Anthropic models omit thinking text unless display is summarized.
+    assert plugin._build_payload(request, model, {})["thinking"] == {
+        "type": "adaptive",
+        "display": "summarized",
+    }
+    assert plugin._build_payload(
+        request, model, {"thinking_display": "omitted"}
+    )["thinking"] == {"type": "adaptive", "display": "omitted"}
+
+    # A client-supplied thinking.display wins over the provider default.
+    override = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=20000,
+        reasoning_effort="high",
+        extra_body={"thinking": {"display": "summarized"}},
+    )
+    assert plugin._build_payload(
+        override, model, {"thinking_display": "omitted"}
+    )["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+def test_payload_forwards_fallbacks_and_beta_header(monkeypatch):
+    captured = {}
+    _fake_httpx_client(
+        monkeypatch,
+        payload={
+            "id": "msg_1",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "Hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        captured=captured,
+    )
+    plugin = AnthropicProxyPlugin()
+    request = ChatCompletionRequest(
+        model="claude-opus-5-5",
+        messages=[ChatMessage(role="user", content="hi")],
+        extra_body={"fallbacks": "default"},
+    )
+    asyncio.run(
+        plugin.chat_completion(
+            request,
+            _model("claude-opus-5-5"),
+            {"api_key": "sk-live-123"},
+        )
+    )
+
+    assert captured["json"]["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in captured["headers"]["anthropic-beta"]
+
+
+def test_non_streaming_fallback_prepends_downgrade_notice(monkeypatch):
+    payload = {
+        "id": "msg_fb",
+        "model": "claude-opus-4-8",
+        "content": [
+            {
+                "type": "fallback",
+                "from": {"model": "claude-fable-5-2"},
+                "to": {"model": "claude-opus-4-8"},
+                "trigger": {"type": "refusal", "category": "cyber"},
+            },
+            {"type": "text", "text": "Hi! How can I help?"},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 535,
+            "output_tokens": 264,
+            "iterations": [
+                {
+                    "type": "message",
+                    "model": "claude-fable-5-2",
+                    "input_tokens": 535,
+                    "output_tokens": 0,
+                },
+                {
+                    "type": "fallback_message",
+                    "model": "claude-opus-4-8",
+                    "input_tokens": 412,
+                    "output_tokens": 264,
+                },
+            ],
+        },
+    }
+    _fake_httpx_client(monkeypatch, payload=payload)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-fable-5-2")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    response = asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+
+    assert response.choices[0].message.content == (
+        "The model has been downgraded to claude-opus-4-8\n\nHi! How can I help?"
+    )
+
+
+def test_sticky_fallback_is_detected_without_fallback_block(monkeypatch):
+    payload = {
+        "id": "msg_sticky",
+        "model": "claude-opus-4-8",
+        "content": [{"type": "text", "text": "Continuing."}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "iterations": [
+                {
+                    "type": "fallback_message",
+                    "model": "claude-opus-4-8",
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                }
+            ],
+        },
+    }
+    _fake_httpx_client(monkeypatch, payload=payload)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-fable-5-2")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    response = asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+
+    assert response.choices[0].message.content.startswith(
+        "The model has been downgraded to claude-opus-4-8"
+    )
+
+
+def test_dated_snapshot_model_does_not_trigger_notice(monkeypatch):
+    payload = {
+        "id": "msg_alias",
+        "model": "claude-opus-5-5-20260101",
+        "content": [{"type": "text", "text": "Same model."}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "iterations": [
+                {
+                    "type": "message",
+                    "model": "claude-opus-5-5",
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                }
+            ],
+        },
+    }
+    _fake_httpx_client(monkeypatch, payload=payload)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-opus-5-5")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    response = asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+
+    assert response.choices[0].message.content == "Same model."
+
+
+def test_streaming_fallback_notice_is_in_first_chunk(monkeypatch):
+    sse_lines = [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"msg_stream","model":"claude-opus-4-8","usage":{"input_tokens":9,"output_tokens":0,"iterations":[{"type":"fallback_message","model":"claude-opus-4-8"}]}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
+        '',
+        'event: content_block_stop',
+        'data: {"type":"content_block_stop","index":0}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+    ]
+    _fake_httpx_client(monkeypatch, sse_lines=sse_lines)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-fable-5-2")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+    )
+
+    chunks = _collect_stream(plugin, request, model)
+
+    assert chunks[0].choices[0].delta["content"] == (
+        "The model has been downgraded to claude-opus-4-8\n\n"
+    )
+    answer = "".join(
+        chunk.choices[0].delta.get("content", "")
+        for chunk in chunks
+        if chunk.choices
+    )
+    assert answer.endswith("Hello")
+
+
+def test_thinking_summaries_are_exposed_as_reasoning(monkeypatch):
+    payload = {
+        "id": "msg_summary",
+        "model": "claude-opus-5-5",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "",
+                "signature": "SIG==",
+                "summaries": [
+                    {"type": "summary_text", "text": "Checked the units first. "},
+                    {"type": "summary_text", "text": "Then rounded."},
+                ],
+            },
+            {"type": "text", "text": "The answer is 42."},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 5, "output_tokens": 3},
+    }
+    _fake_httpx_client(monkeypatch, payload=payload)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-opus-5-5")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        reasoning_effort="high",
+    )
+
+    response = asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+
+    assert response.choices[0].message.reasoning_content == (
+        "Checked the units first. Then rounded."
+    )
+
+
+def test_streaming_thinking_summaries_are_exposed_as_reasoning(monkeypatch):
+    sse_lines = [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"msg_summary","model":"claude-opus-5-5","usage":{"input_tokens":5,"output_tokens":0}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","summaries":[{"type":"summary_text","text":"Step one."}]}}',
+        '',
+        'event: content_block_stop',
+        'data: {"type":"content_block_stop","index":0}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done."}}',
+        '',
+        'event: content_block_stop',
+        'data: {"type":"content_block_stop","index":1}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+    ]
+    _fake_httpx_client(monkeypatch, sse_lines=sse_lines)
+    plugin = AnthropicProxyPlugin()
+    model = _model("claude-opus-5-5")
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        reasoning_effort="high",
+        stream=True,
+    )
+
+    chunks = _collect_stream(plugin, request, model)
+    reasoning = "".join(
+        chunk.choices[0].delta.get("reasoning_content", "")
+        for chunk in chunks
+        if chunk.choices
+    )
+    assert reasoning == "Step one."
+
+
+def test_streaming_same_model_has_no_downgrade_notice(monkeypatch):
+    sse_lines = [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"msg_ok","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"All good."}}',
+        '',
+        'event: content_block_stop',
+        'data: {"type":"content_block_stop","index":0}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+    ]
+    _fake_httpx_client(monkeypatch, sse_lines=sse_lines)
+    plugin = AnthropicProxyPlugin()
+    model = _model()
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+    )
+
+    chunks = _collect_stream(plugin, request, model)
+
+    assert "downgraded" not in "".join(
+        chunk.choices[0].delta.get("content", "")
+        for chunk in chunks
+        if chunk.choices
+    )

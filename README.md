@@ -88,11 +88,22 @@ models fall back to an explicit thinking budget.
 
 Reasoning is returned to OpenAI-compatible clients as `reasoning_content` in
 both streaming deltas and non-streaming messages, and the dashboard Playground
-renders it above the answer. The plugin also keeps the signed thinking blocks
-from a tool-use turn and replays them when the tool result is sent back, which
-Anthropic requires to continue a reasoning chain across tool calls. Requests
-may pass the level as `reasoning_effort`, as a `<model>:<level>` suffix, or as
-`extra_body.reasoning.effort`.
+renders it above the answer. Current Anthropic models omit thinking text unless
+the request asks for it, so the plugin sends `thinking.display: "summarized"` by
+default (`thinking_display`, or `extra_body.thinking.display`, can switch it to
+`omitted`). When a gateway still returns empty thinking text, summaries carried
+in `summaries`/`summary` fields are surfaced instead. The plugin also keeps the
+signed thinking blocks from a tool-use turn and replays them when the tool result
+is sent back, which Anthropic requires to continue a reasoning chain across tool
+calls. Requests may pass the level as `reasoning_effort`, as a `<model>:<level>`
+suffix, or as `extra_body.reasoning.effort`.
+
+Anthropic can answer a request with a different model when a safety classifier
+declines the requested one (server-side fallback). The plugin opts in with the
+`fallbacks` variable (or `extra_body.fallbacks`) and inspects the response's
+top-level `model`, `fallback` content blocks, and `usage.iterations` records. A
+fallback-served turn is prefixed with `The model has been downgraded to <model>`
+in the assistant content, including the very first streamed chunk.
 
 The plugin also enables Anthropic prompt caching for OpenAI-style clients that
 do not send `cache_control` themselves. With `auto_prompt_cache` on (the
