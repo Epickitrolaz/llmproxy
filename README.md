@@ -71,7 +71,8 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Clean limit progress bars with an option to hide specific limits that do not apply to a given account.
   - OpenAI-compatible and Anthropic-compatible accounts can disable **Track usage &amp; quota** individually, which stops local request counters and rate-limit cooldowns for unlimited or externally billed endpoints.
   - OpenRouter accounts display their live available credit balance as prominent text instead of a usage bar.
-  - **CLIProxyAPI-compatible usage hub**: T3 Code and OpenCode can read pooled account limits through `/v0/management/auth-files` and `/v0/management/api-call`. The hub URL and management key are shown on the **Overview** tab.
+  - OpenCode Go accounts display live rolling, weekly, and monthly usage from the Go usage API.
+  - **CLIProxyAPI-compatible usage hub**: T3 Code and OpenCode can read pooled account limits through `/v0/management/auth-files` and `/v0/management/api-call`. The hub URL and management key are shown on the **Overview** tab. OpenCode Go accounts are included with the `opencode` provider kind.
   - **Persistent Request Audit Logs**: All requests, latency metrics, token estimations, and errors are saved to disk (`data/request_logs.json`) and preserved across server restarts.
 - **Interactive Chat Playground**:
   - Balanced 1:1 split between model parameters and the chat thread.

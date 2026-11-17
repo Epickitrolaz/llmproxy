@@ -2961,6 +2961,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
       const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
       const openrouterAccounts = accountsToDisplay.filter((a) => a.provider_id === "openrouter");
+      const opencodeGoAccounts = accountsToDisplay.filter((a) => a.provider_id === "opencode_go");
 
       const antigravityPromise = antigravityAccounts.length > 0
         ? api("/api/antigravity/status")
@@ -3004,7 +3005,21 @@ curl -X POST ${baseUrl}/chat/completions \\
             .catch(() => {})
         : Promise.resolve();
 
-      await Promise.all([antigravityPromise, codexPromise, openrouterPromise]);
+      const opencodeGoPromise = opencodeGoAccounts.length > 0
+        ? api("/api/opencode-go/status")
+            .then((ocGoStatusRes) => {
+              if (ocGoStatusRes && ocGoStatusRes.accounts) {
+                ocGoStatusRes.accounts.forEach((item) => {
+                  if (item.quota) {
+                    state.cachedQuotaData[item.account_id] = item.quota;
+                  }
+                });
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      await Promise.all([antigravityPromise, codexPromise, openrouterPromise, opencodeGoPromise]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
 
