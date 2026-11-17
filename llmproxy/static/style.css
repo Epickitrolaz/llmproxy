@@ -2019,26 +2019,6 @@ input:checked + .slider:before {
   font-variant-numeric: tabular-nums;
 }
 
-/* Accounts opted out of local usage/quota bookkeeping. */
-.usage-tracking-disabled {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-badge);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink-secondary);
-}
-
-.usage-tracking-hint {
-  font-size: 10.5px;
-  font-weight: 400;
-  color: var(--ink-muted);
-}
-
 .btn-hide-limit {
   background: none;
   border: none;
