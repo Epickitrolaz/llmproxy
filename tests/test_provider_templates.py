@@ -13,6 +13,43 @@ from fastapi.testclient import TestClient
 
 from llmproxy.main import app
 from llmproxy.core.manager import PluginManager, plugin_manager
+from llmproxy.schemas import Account
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "anthropic_proxy",
+        "antigravity",
+        "codex",
+        "gemini",
+        "opencode_go",
+        "openrouter",
+    ],
+)
+def test_templates_do_not_simulate_for_real_account_without_key(template):
+    from llmproxy.dashboard.loader import load_plugin_from_file
+
+    plugin = load_plugin_from_file(
+        Path(__file__).resolve().parent.parent / "templates" / f"{template}.py"
+    )
+    real_account = Account(
+        id="acc_real",
+        provider_id=template,
+        name="Real Account",
+        api_key="",
+    )
+    with pytest.raises(ValueError, match="no API key configured"):
+        plugin._is_test_mode("", real_account)
+
+    default_account = Account(
+        id=f"default-{template}",
+        provider_id=template,
+        name="Default Account",
+        api_key="",
+    )
+    assert plugin._is_test_mode("", default_account) is True
+    assert plugin._is_test_mode("test-key", real_account) is True
 @pytest.fixture(autouse=True)
 def clean_keys():
     orig = dict(plugin_manager.api_keys)

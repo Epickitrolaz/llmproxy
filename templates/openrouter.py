@@ -225,10 +225,14 @@ class OpenRouterPlugin(BasePlugin):
         return self._metadata
 
     @staticmethod
-    def _is_test_mode(api_key: str) -> bool:
-        if not api_key:
+    def _is_test_mode(api_key: str, account: Optional[Account] = None) -> bool:
+        key = (api_key or "").lower().strip()
+        if not key:
+            if account is not None and not str(account.id).startswith("default-"):
+                raise ValueError(
+                    f"Account '{account.name}' has no API key configured."
+                )
             return True
-        key = api_key.lower().strip()
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
         return any(key.startswith(p) for p in prefixes) or key in (
             "test-key",
@@ -620,7 +624,7 @@ class OpenRouterPlugin(BasePlugin):
             else str(variables.get("base_url") or OPENROUTER_BASE_URL)
         ).rstrip("/")
 
-        if self._is_test_mode(api_key):
+        if self._is_test_mode(api_key, account):
             if request.stream:
                 return self._mock_stream(request, model_config, account=account)
             return self._mock_response(request, model_config, account=account)

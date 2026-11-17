@@ -141,7 +141,28 @@ Blocked or filtered content is a valid upstream result. Return it with
 `finish_reason="content_filter"` (or an explicit error) rather than pretending it
 was a normal answer.
 
-## 7. Tests before handoff
+## 7. Simulation mode must never hide real failures
+
+Simulation exists for offline tests, explicit test keys, and the synthetic
+default account used when no provider account is configured. It must not turn a
+real failure into a fake success.
+
+- Never simulate when a real account was selected but its request failed,
+  including rate limits, quota exhaustion, auth failures, or upstream errors.
+- Never simulate when a real account exists but is in cooldown, disabled, or
+  missing a credential the provider requires.
+- Only treat an empty credential as simulation when there is no configured
+  account (the synthetic `default-*` account) or the provider intentionally
+  allows anonymous access.
+- Raise a clear credential/auth error for a real account with a missing
+  credential. Do not return a simulated response.
+- The dashboard test/playground endpoints must surface cooldown and no-account
+  errors instead of falling back to a no-key synthetic account.
+- Treat keys starting with `test`, `mock`, `dummy`, `fake`, `offline`, or
+  `sample` as explicit simulation requests; never infer simulation from a
+  failed real request.
+
+## 8. Tests before handoff
 
 Every plugin needs focused tests under `tests/` that cover:
 
@@ -153,6 +174,7 @@ Every plugin needs focused tests under `tests/` that cover:
 - Streaming chunks, finish reason, and final usage.
 - Rate-limit/error propagation.
 - Simulation mode with no credentials.
+- Real-account credential/cooldown failures never returning simulation output.
 - Usage counters reaching the dashboard log and cache statistics.
 
 Run:
@@ -163,7 +185,7 @@ python skills/llmproxy-plugin/scripts/validate_plugin.py templates/<provider>.py
 pytest -q --ignore=tests/test_codex_and_example_response.py
 ```
 
-## 8. Definition of done
+## 9. Definition of done
 
 - The plugin is in `templates/` (tracked), not `plugins/` (runtime data).
 - The model prefix is added to `README.md`, `AGENTS.md`, and

@@ -198,6 +198,21 @@ Add focused tests for reasoning translation and cache telemetry. A new provider
 is not complete until its cache hits appear in the dashboard log table and cache
 hit rate, and its reasoning controls reach the upstream.
 
+## Simulation mode and account failures
+
+Simulation is only for offline tests, explicit test/mock keys, and the synthetic
+default account used when no provider account is configured. It must never hide
+a real failure.
+
+- Do not simulate when a real account is in cooldown, disabled, missing a
+  required credential, rate limited, or the upstream returned an error.
+- Raise a clear credential error when a real account has no API key. Providers
+  that intentionally allow anonymous access may still work without one.
+- Dashboard test/playground endpoints must return the real cooldown/503/auth
+  error instead of falling back to a no-key synthetic account.
+- Explicit keys starting with `test`, `mock`, `dummy`, `fake`, `offline`, or
+  `sample` may trigger simulation; failed real requests may not.
+
 ## Where to make changes
 
 | Task | Location |
