@@ -95,7 +95,7 @@ async def test_issue1_test_chat_failover_to_higher_priority_account(monkeypatch)
 
     resp = client.post(
         "/api/test-chat",
-        json={"model": "mock-gpt-4o", "prompt": "ping", "max_tokens": 5},
+        json={"model": "mock/mock-gpt-4o", "prompt": "ping", "max_tokens": 5},
     )
     assert resp.status_code == 200
     data = resp.json()

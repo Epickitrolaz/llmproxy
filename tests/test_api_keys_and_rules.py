@@ -84,7 +84,7 @@ def test_api_key_auth_and_usage_tracking():
     # When no keys configured, completion works without key
     res = client.post(
         "/v1/chat/completions",
-        json={"model": "gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "ag/gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
     )
     # Could succeed or mock error, but should NOT be 401
     assert res.status_code != 401
@@ -98,7 +98,7 @@ def test_api_key_auth_and_usage_tracking():
     # Now request without key should fail with 401
     res = client.post(
         "/v1/chat/completions",
-        json={"model": "gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "ag/gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
     )
     assert res.status_code == 401
     assert res.json()["detail"]["error"]["code"] == "missing_api_key"
@@ -107,7 +107,7 @@ def test_api_key_auth_and_usage_tracking():
     res = client.post(
         "/v1/chat/completions",
         headers={"Authorization": "Bearer sk-proxy-wrong"},
-        json={"model": "gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "ag/gemini-3.8-flash", "messages": [{"role": "user", "content": "Hello"}]},
     )
     assert res.status_code == 401
     assert res.json()["detail"]["error"]["code"] == "invalid_api_key"
@@ -155,7 +155,7 @@ def test_load_balancing_rules_crud_and_routing():
         "name": "Custom Fast Router",
         "enabled": True,
         "strategy": "round_robin",
-        "targets": ["gemini-3.8-flash", "gpt-6-luna"],
+        "targets": ["ag/gemini-3.8-flash", "cx/gpt-6-luna"],
         "description": "Load balances fast models",
     }
     res = client.post("/api/load-balancing-rules", json=rule_payload)
@@ -164,7 +164,7 @@ def test_load_balancing_rules_crud_and_routing():
     rule_id = rule_data["id"]
     assert rule_data["model_id"] == "custom-fast-router"
     assert rule_data["strategy"] == "round_robin"
-    assert rule_data["targets"] == ["gemini-3.8-flash", "gpt-6-luna"]
+    assert rule_data["targets"] == ["ag/gemini-3.8-flash", "cx/gpt-6-luna"]
 
     # 2. List rules
     res = client.get("/api/load-balancing-rules")
@@ -189,8 +189,8 @@ def test_load_balancing_rules_crud_and_routing():
     resolved = plugin_manager.resolve_model("custom-fast-router")
     assert resolved is not None
     model_config, plugin, vars_dict = resolved
-    # Should resolve to one of the targets: gemini-3.8-flash or gpt-6-luna
-    assert model_config.id in ["gemini-3.8-flash", "gpt-6-luna"]
+    # Should resolve to one of the targets: ag/gemini-3.8-flash or cx/gpt-6-luna
+    assert model_config.id in ["ag/gemini-3.8-flash", "cx/gpt-6-luna"]
 
     # 6. Update rule
     res = client.put(
@@ -198,12 +198,12 @@ def test_load_balancing_rules_crud_and_routing():
         json={
             "strategy": "random",
             "name": "Random Fast Router",
-            "targets": ["gpt-6-luna", "gemini-3.8-flash"],
+            "targets": ["cx/gpt-6-luna", "ag/gemini-3.8-flash"],
         },
     )
     assert res.status_code == 200
     assert res.json()["strategy"] == "random"
-    assert res.json()["targets"] == ["gpt-6-luna", "gemini-3.8-flash"]
+    assert res.json()["targets"] == ["cx/gpt-6-luna", "ag/gemini-3.8-flash"]
 
     # 7. Delete rule
     res = client.delete(f"/api/load-balancing-rules/{rule_id}")

@@ -123,10 +123,10 @@ def test_models_managed_via_models_tab(tmp_path, monkeypatch):
 
     # 2. Default models are populated in metadata.models
     default_ids = {m.id for m in plugin.metadata.models}
-    assert "mimo-v2.6-flash-free" in default_ids
-    assert "deepseek-v4.1-flash-free" in default_ids
-    assert "glm-5.3-flash-free" in default_ids
-    assert "big-pickle" in default_ids
+    assert "oc/mimo-v2.6-flash-free" in default_ids
+    assert "oc/deepseek-v4.1-flash-free" in default_ids
+    assert "oc/glm-5.3-flash-free" in default_ids
+    assert "oc/big-pickle" in default_ids
 
     # 3. Models tab integration: adding and editing custom models in plugin_manager
     temp_plugins = tmp_path / "plugins"
@@ -151,7 +151,7 @@ def test_models_managed_via_models_tab(tmp_path, monkeypatch):
     active_models = plugin_manager.get_plugin_models("opencode_free")
     active_ids = {m.id for m in active_models}
     assert "my-custom-model" in active_ids
-    assert "mimo-v2.6-flash-free" in active_ids
+    assert "oc/mimo-v2.6-flash-free" in active_ids
 
 
 def test_proxy_configuration_passed_to_client():

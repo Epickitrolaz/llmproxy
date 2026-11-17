@@ -46,40 +46,40 @@ def test_plugin_discovery_and_metadata():
     assert ag.metadata.name == "Antigravity"
     assert ag.metadata.filename == "antigravity.py"
     ag_model_ids = {m.id for m in ag.metadata.models}
-    assert "gemini-3.8-flash" in ag_model_ids
-    assert "claude-sonnet-4-6" in ag_model_ids
-    assert "claude-opus-4-6-thinking" in ag_model_ids
+    assert "ag/gemini-3.8-flash" in ag_model_ids
+    assert "ag/claude-sonnet-4-6" in ag_model_ids
+    assert "ag/claude-opus-4-6-thinking" in ag_model_ids
 
     # Check codex metadata
     codex = plugin_manager.get_plugin("codex")
     assert codex is not None
     assert codex.metadata.id == "codex"
     codex_models = {m.id for m in codex.metadata.models}
-    assert "gpt-6-luna" in codex_models
-    assert "gpt-4o" in codex_models
-    assert "gpt-4o-mini" in codex_models
+    assert "cx/gpt-6-luna" in codex_models
+    assert "cx/gpt-4o" in codex_models
+    assert "cx/gpt-4o-mini" in codex_models
 
     # Check anthropic_proxy metadata
     anthropic = plugin_manager.get_plugin("anthropic_proxy")
     assert anthropic is not None
     anthropic_models = {m.id for m in anthropic.metadata.models}
-    assert "claude-haiku-5-5" in anthropic_models
-    assert "claude-sonnet-5-5" in anthropic_models
-    assert "claude-opus-5-5" in anthropic_models
-    assert "claude-fable-5-2" in anthropic_models
+    assert "ap/claude-haiku-5-5" in anthropic_models
+    assert "ap/claude-sonnet-5-5" in anthropic_models
+    assert "ap/claude-opus-5-5" in anthropic_models
+    assert "ap/claude-fable-5-2" in anthropic_models
 
     # Check openrouter metadata
     openrouter = plugin_manager.get_plugin("openrouter")
     assert openrouter is not None
     openrouter_models = {m.id for m in openrouter.metadata.models}
-    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in openrouter_models
+    assert "or/nvidia/nemotron-3-ultra-550b-a55b:free" in openrouter_models
     assert all(":free" in model_id for model_id in openrouter_models)
 
     # Check openai_compatible metadata
     oai = plugin_manager.get_plugin("openai_compatible")
     assert oai is not None
     oai_models = {m.id for m in oai.metadata.models}
-    assert "default-model" in oai_models
+    assert "compat/default-model" in oai_models
 
 
 def test_variable_validation():
@@ -506,11 +506,11 @@ class BareClassPlugin(BasePlugin):
 async def test_all_plugins_chat_completion_non_streaming():
     """Verify all 4 provider plugins handle non-streaming chat completions with fallback."""
     cases = [
-        ("antigravity", "gemini-3.8-flash"),
-        ("codex", "gpt-4o"),
-        ("anthropic_proxy", "claude-sonnet-5-5"),
-        ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
-        ("openai_compatible", "default-model"),
+        ("antigravity", "ag/gemini-3.8-flash"),
+        ("codex", "cx/gpt-4o"),
+        ("anthropic_proxy", "ap/claude-sonnet-5-5"),
+        ("openrouter", "or/nvidia/nemotron-3-ultra-550b-a55b:free"),
+        ("openai_compatible", "compat/default-model"),
     ]
 
     for plugin_id, model_id in cases:
@@ -537,11 +537,11 @@ async def test_all_plugins_chat_completion_non_streaming():
 async def test_all_plugins_chat_completion_streaming():
     """Verify all 4 provider plugins handle streaming chat completions with fallback."""
     cases = [
-        ("antigravity", "gemini-3.8-flash"),
-        ("codex", "gpt-4o"),
-        ("anthropic_proxy", "claude-sonnet-5-5"),
-        ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
-        ("openai_compatible", "default-model"),
+        ("antigravity", "ag/gemini-3.8-flash"),
+        ("codex", "cx/gpt-4o"),
+        ("anthropic_proxy", "ap/claude-sonnet-5-5"),
+        ("openrouter", "or/nvidia/nemotron-3-ultra-550b-a55b:free"),
+        ("openai_compatible", "compat/default-model"),
     ]
 
     for plugin_id, model_id in cases:

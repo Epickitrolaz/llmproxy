@@ -26,23 +26,23 @@ def test_e2e_plugins_and_models_catalog(e2e_client):
     model_ids = [m["id"] for m in models_resp.json()["data"]]
 
     # Antigravity models
-    assert "gemini-3.8-flash" in model_ids
-    assert "claude-sonnet-4-6" in model_ids
+    assert "ag/gemini-3.8-flash" in model_ids
+    assert "ag/claude-sonnet-4-6" in model_ids
     # Codex models
-    assert "gpt-6-luna" in model_ids
-    assert "gpt-4o" in model_ids
+    assert "cx/gpt-6-luna" in model_ids
+    assert "cx/gpt-4o" in model_ids
     # Anthropic Messages models
-    assert "claude-sonnet-5-5" in model_ids
+    assert "ap/claude-sonnet-5-5" in model_ids
     # OpenRouter free models
-    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
+    assert "or/nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
     # OpenAI compatible models
-    assert "default-model" in model_ids
+    assert "compat/default-model" in model_ids
 
 
 def test_e2e_openai_chat_completion(e2e_client):
     """Verify standard non-streaming /v1/chat/completions."""
     payload = {
-        "model": "gemini-3.8-flash",
+        "model": "ag/gemini-3.8-flash",
         "messages": [
             {"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": "Hello LLMProxy"},
@@ -53,7 +53,7 @@ def test_e2e_openai_chat_completion(e2e_client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["object"] == "chat.completion"
-    assert data["model"] == "gemini-3.8-flash"
+    assert data["model"] == "ag/gemini-3.8-flash"
     assert len(data["choices"]) > 0
     assert data["choices"][0]["message"]["role"] == "assistant"
     assert len(data["choices"][0]["message"]["content"]) > 0
@@ -62,7 +62,7 @@ def test_e2e_openai_chat_completion(e2e_client):
 def test_e2e_openai_streaming_completion(e2e_client):
     """Verify standard streaming SSE /v1/chat/completions."""
     payload = {
-        "model": "gpt-6-luna",
+        "model": "cx/gpt-6-luna",
         "messages": [{"role": "user", "content": "Stream me a response"}],
         "stream": True,
     }

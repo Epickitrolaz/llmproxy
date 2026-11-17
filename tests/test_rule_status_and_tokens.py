@@ -54,7 +54,7 @@ def test_rule_logs_downstream_model_and_anthropic_token_totals(monkeypatch):
             model_id="orchestrator-free",
             name="Orchestrator Free",
             strategy="round_robin",
-            targets=["mock-gpt-4o"],
+            targets=["mock/mock-gpt-4o"],
         )
     )
 
@@ -94,7 +94,7 @@ def test_rule_logs_downstream_model_and_anthropic_token_totals(monkeypatch):
     assert response.status_code == 200
 
     log = client.get("/api/logs", params={"limit": 1}).json()[0]
-    assert log["model"] == "mock-gpt-4o"
+    assert log["model"] == "mock/mock-gpt-4o"
     assert log["plugin_id"] == "mock_provider"
     assert log["prompt_tokens"] == 1000  # 120 raw + 700 cached read + 180 written
     assert log["completion_tokens"] == 30
@@ -134,7 +134,7 @@ def test_missing_completion_usage_preserves_cache_counters(monkeypatch):
 
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "mock/mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
     )
     assert response.status_code == 200
 
@@ -181,7 +181,7 @@ def test_streaming_usage_keeps_cache_counters_from_earlier_chunks(monkeypatch):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "mock-gpt-4o",
+            "model": "mock/mock-gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
             "stream": True,
         },

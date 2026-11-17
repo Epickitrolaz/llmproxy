@@ -90,7 +90,7 @@ def test_non_streaming_failover_tries_every_account(monkeypatch):
 
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "mock/mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
     )
 
     assert response.status_code == 200
@@ -108,7 +108,7 @@ def test_non_streaming_all_accounts_limited_returns_usage_limit(monkeypatch):
 
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "mock/mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
     )
 
     assert response.status_code == 429
@@ -157,7 +157,7 @@ def test_streaming_failover_before_first_content(monkeypatch):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "mock-gpt-4o",
+            "model": "mock/mock-gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
             "stream": True,
         },
@@ -192,7 +192,7 @@ def test_streaming_include_usage_emits_terminal_usage_chunk(monkeypatch):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "mock-gpt-4o",
+            "model": "mock/mock-gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
             "stream": True,
             "stream_options": {"include_usage": True},

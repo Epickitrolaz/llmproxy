@@ -39,15 +39,15 @@ def test_models_endpoint_list():
         model_ids = {m["id"] for m in data["data"]}
 
         # All provider plugins' default models should be listed
-        assert "gemini-3.8-flash" in model_ids
-        assert "claude-sonnet-4-6" in model_ids
-        assert "gpt-4o" in model_ids
-        assert "gpt-6-luna" in model_ids
-        assert "claude-sonnet-5-5" in model_ids
+        assert "ag/gemini-3.8-flash" in model_ids
+        assert "ag/claude-sonnet-4-6" in model_ids
+        assert "cx/gpt-4o" in model_ids
+        assert "cx/gpt-6-luna" in model_ids
+        assert "ap/claude-sonnet-5-5" in model_ids
         # Reasoning levels are metadata on the base model, not separate models.
-        assert "claude-sonnet-5-5:high" not in model_ids
-        assert "claude-fable-5-2:max" not in model_ids
-        anthropic_card = next(m for m in data["data"] if m["id"] == "claude-sonnet-5-5")
+        assert "ap/claude-sonnet-5-5:high" not in model_ids
+        assert "ap/claude-fable-5-2:max" not in model_ids
+        anthropic_card = next(m for m in data["data"] if m["id"] == "ap/claude-sonnet-5-5")
         assert anthropic_card["reasoning_levels"] == [
             "none",
             "low",
@@ -56,22 +56,22 @@ def test_models_endpoint_list():
             "xhigh",
             "max",
         ]
-        assert "nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
-        assert "default-model" in model_ids
+        assert "or/nvidia/nemotron-3-ultra-550b-a55b:free" in model_ids
+        assert "compat/default-model" in model_ids
 
 
 def test_models_endpoint_get_single():
     """Verify GET /v1/models/{model_id} returns single ModelCard or 404."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
-        resp = client.get("/v1/models/gpt-4o")
+        resp = client.get("/v1/models/cx/gpt-4o")
         assert resp.status_code == 200
         card = resp.json()
-        assert card["id"] == "gpt-4o"
+        assert card["id"] == "cx/gpt-4o"
         assert card["object"] == "model"
         assert card["owned_by"] == "codex"
 
         # Reasoning suffixes are request routing, not separate model cards.
-        resp_variant = client.get("/v1/models/claude-sonnet-5-5:high")
+        resp_variant = client.get("/v1/models/ap/claude-sonnet-5-5:high")
         assert resp_variant.status_code == 404
 
         # Non-existent model
@@ -84,7 +84,7 @@ def test_chat_completions_non_streaming():
     """Verify POST /v1/chat/completions non-streaming response."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
-            "model": "gpt-4o",
+            "model": "cx/gpt-4o",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "What is the capital of France?"},
@@ -97,7 +97,7 @@ def test_chat_completions_non_streaming():
         data = resp.json()
 
         assert data["object"] == "chat.completion"
-        assert data["model"] == "gpt-4o"
+        assert data["model"] == "cx/gpt-4o"
         assert len(data["choices"]) == 1
         assert data["choices"][0]["finish_reason"] == "stop"
         assert len(data["choices"][0]["message"]["content"]) > 0
@@ -108,7 +108,7 @@ def test_chat_completions_streaming_sse():
     """Verify POST /v1/chat/completions SSE streaming with data: <json> and data: [DONE]."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         payload = {
-            "model": "gemini-3.8-flash",
+            "model": "ag/gemini-3.8-flash",
             "messages": [{"role": "user", "content": "Stream me a response"}],
             "stream": True,
         }
@@ -132,7 +132,7 @@ def test_chat_completions_streaming_sse():
                 raw_json = line[6:]
                 chunk = json.loads(raw_json)
                 assert chunk["object"] == "chat.completion.chunk"
-                assert chunk["model"] == "gemini-3.8-flash"
+                assert chunk["model"] == "ag/gemini-3.8-flash"
                 chunks.append(chunk)
 
             # Check chunk content aggregation
@@ -149,11 +149,11 @@ def test_routing_across_plugins():
     """Verify model routing sends requests to the appropriate plugin."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
         test_routes = [
-            ("gemini-3.8-flash", "Antigravity"),
-            ("gpt-6-luna", "Codex"),
-            ("claude-sonnet-5-5", "Anthropic"),
-            ("nvidia/nemotron-3-ultra-550b-a55b:free", "OpenRouter"),
-            ("default-model", "OpenAI Compatible"),
+            ("ag/gemini-3.8-flash", "Antigravity"),
+            ("cx/gpt-6-luna", "Codex"),
+            ("ap/claude-sonnet-5-5", "Anthropic"),
+            ("or/nvidia/nemotron-3-ultra-550b-a55b:free", "OpenRouter"),
+            ("compat/default-model", "OpenAI Compatible"),
         ]
 
         for model_id, provider_keyword in test_routes:
@@ -193,7 +193,7 @@ def test_error_handling_disabled_plugin():
 
         resp = client.post(
             "/v1/chat/completions",
-            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
+            json={"model": "cx/gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
         )
         assert resp.status_code == 404
 
@@ -201,7 +201,7 @@ def test_error_handling_disabled_plugin():
         plugin_manager.update_plugin_config("codex", enabled=True)
         resp2 = client.post(
             "/v1/chat/completions",
-            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
+            json={"model": "cx/gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
         )
         assert resp2.status_code == 200
 
@@ -215,7 +215,7 @@ def test_error_handling_variable_validation():
         resp = client.post(
             "/v1/chat/completions",
             json={
-                "model": "gemini-3.8-flash",
+                "model": "ag/gemini-3.8-flash",
                 "messages": [{"role": "user", "content": "Hello"}],
             },
         )
@@ -236,7 +236,7 @@ def test_telemetry_logs_recording():
         client.post(
             "/v1/chat/completions",
             json={
-                "model": "gpt-4o",
+                "model": "cx/gpt-4o",
                 "messages": [{"role": "user", "content": "Telemetry test prompt"}],
                 "stream": False,
             },
@@ -245,7 +245,7 @@ def test_telemetry_logs_recording():
         logs = plugin_manager.get_logs()
         assert len(logs) > initial_log_count
         latest_log = logs[0]
-        assert latest_log.model == "gpt-4o"
+        assert latest_log.model == "cx/gpt-4o"
         assert latest_log.plugin_id == "codex"
         assert latest_log.status == "success"
         assert latest_log.status_code == 200
@@ -264,7 +264,7 @@ def test_streaming_error_handling(monkeypatch):
             async def fail_stream():
                 yield ChatCompletionChunk(
                     id="chunk-1",
-                    model="default-model",
+                    model="compat/default-model",
                     choices=[ChatChoiceDelta(index=0, delta={"content": "Start"})],
                 )
                 raise RuntimeError("Mid-stream connection dropped")
@@ -276,7 +276,7 @@ def test_streaming_error_handling(monkeypatch):
         with client.stream(
             "POST",
             "/v1/chat/completions",
-            json={"model": "default-model", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+            json={"model": "compat/default-model", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
         ) as resp:
             lines = [l.strip() for l in resp.iter_lines() if l.strip()]
             assert any("Mid-stream connection dropped" in l for l in lines)

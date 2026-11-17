@@ -965,7 +965,7 @@ async def list_models():
     return ModelListResponse(data=cards)
 
 
-@router.get("/models/{model_id}", response_model=ModelCard)
+@router.get("/models/{model_id:path}", response_model=ModelCard)
 async def get_model(model_id: str):
     """Get information about a specific model."""
     active_models = plugin_manager.get_all_active_models()

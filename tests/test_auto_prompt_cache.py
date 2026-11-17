@@ -22,7 +22,11 @@ MEDIUM_TEXT = "prefix " * 500
 
 def _model(model_id: str = "claude-sonnet-5-5") -> PluginModelConfig:
     plugin = AnthropicProxyPlugin()
-    return next(m for m in plugin.metadata.models if m.id == model_id)
+    return next(
+        m
+        for m in plugin.metadata.models
+        if m.id == model_id or m.id.endswith(f"/{model_id}")
+    )
 
 
 def _count_breakpoints(value) -> int:

@@ -52,6 +52,19 @@ from llmproxy.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Public model IDs are namespaced by provider. Reasoning levels are advertised
+# only on models that accept the Codex reasoning control.
+CODEX_REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh", "max", "ultra")
+CODEX_REASONING_MODELS = {
+    "gpt-6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-reserve",
+    "codex-auto-review",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+}
+
 
 class CodexPlugin(BasePlugin):
     """
@@ -162,63 +175,63 @@ class CodexPlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="gpt-6-luna",
+                    id="cx/gpt-6-luna",
                     name="GPT-6 Luna",
                     upstream_model="gpt-6-luna",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-5.6-terra",
+                    id="cx/gpt-5.6-terra",
                     name="GPT-5.6 Terra",
                     upstream_model="gpt-5.6-terra",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-5.6-luna",
+                    id="cx/gpt-5.6-luna",
                     name="GPT-5.6 Luna",
                     upstream_model="gpt-5.6-luna",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-reserve",
+                    id="cx/gpt-reserve",
                     name="GPT Reserve",
                     upstream_model="gpt-reserve",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="codex-auto-review",
+                    id="cx/codex-auto-review",
                     name="Codex Auto Review",
                     upstream_model="codex-auto-review",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-6-astra",
+                    id="cx/gpt-6-astra",
                     name="GPT-6 Astra",
                     upstream_model="gpt-6-astra",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-6.1-sol",
+                    id="cx/gpt-6.1-sol",
                     name="GPT-6.1 Sol",
                     upstream_model="gpt-6.1-sol",
                     context_window=272000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gpt-4o",
+                    id="cx/gpt-4o",
                     name="GPT-4o",
                     upstream_model="gpt-4o",
                     context_window=128000,
                     max_tokens=4096,
                 ),
                 PluginModelConfig(
-                    id="gpt-4o-mini",
+                    id="cx/gpt-4o-mini",
                     name="GPT-4o Mini",
                     upstream_model="gpt-4o-mini",
                     context_window=128000,
@@ -228,6 +241,8 @@ class CodexPlugin(BasePlugin):
         )
         for model in self._metadata.models:
             model.supports_vision = True
+            if (model.upstream_model or model.id) in CODEX_REASONING_MODELS:
+                model.reasoning_levels = list(CODEX_REASONING_LEVELS)
 
     @property
     def metadata(self) -> PluginMetadata:

@@ -44,14 +44,18 @@ SAMPLE_TOOLS = [
 
 def _model(model_id: str = "claude-sonnet-5-5") -> PluginModelConfig:
     plugin = AnthropicProxyPlugin()
-    return next(m for m in plugin.metadata.models if m.id == model_id)
+    return next(
+        m
+        for m in plugin.metadata.models
+        if m.id == model_id or m.id.endswith(f"/{model_id}")
+    )
 
 
 BASE_MODEL_IDS = {
-    "claude-haiku-5-5",
-    "claude-sonnet-5-5",
-    "claude-opus-5-5",
-    "claude-fable-5-2",
+    "ap/claude-haiku-5-5",
+    "ap/claude-sonnet-5-5",
+    "ap/claude-opus-5-5",
+    "ap/claude-fable-5-2",
 }
 
 REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
@@ -64,7 +68,7 @@ def test_metadata_preloads_expected_models_and_reasoning_levels():
     # Every base model stays available under its unsuffixed ID.
     assert BASE_MODEL_IDS <= set(models)
     for model_id in BASE_MODEL_IDS:
-        assert models[model_id].upstream_model == model_id
+        assert models[model_id].upstream_model == model_id.split("/", 1)[1]
 
     # Reasoning levels belong to the base model instead of separate model IDs.
     assert len(models) == len(BASE_MODEL_IDS)
@@ -682,7 +686,7 @@ def test_simulation_emits_reasoning_content():
     )
     response = plugin._mock_response(request, model, variables={"reasoning_effort": "high"})
     assert response.choices[0].message.reasoning_content.startswith(
-        "Simulated reasoning for claude-sonnet-5-5 at high effort"
+        f"Simulated reasoning for {model.id} at high effort"
     )
 
     disabled = ChatCompletionRequest(
@@ -764,7 +768,7 @@ def test_extra_body_reasoning_object_is_resolved():
         extra_body={"reasoning": {"effort": "max"}},
     )
     target, effort = plugin._resolve_reasoning(request, model, {})
-    assert target == model.id
+    assert target == model.upstream_model
     assert effort == "max"
 
 

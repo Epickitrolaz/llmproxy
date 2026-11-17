@@ -76,7 +76,7 @@ class MockProviderPlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="mock-gpt-4o",
+                    id="mock/mock-gpt-4o",
                     name="Mock GPT-4o",
                     upstream_model="mock-gpt-4o",
                     context_window=128000,
@@ -84,7 +84,7 @@ class MockProviderPlugin(BasePlugin):
                     supports_vision=True,
                 ),
                 PluginModelConfig(
-                    id="mock-claude-3-5",
+                    id="mock/mock-claude-3-5",
                     name="Mock Claude 3.5 Sonnet",
                     upstream_model="mock-claude-3-5-sonnet",
                     context_window=200000,

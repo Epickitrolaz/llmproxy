@@ -89,7 +89,7 @@ def test_openai_style_cache_usage_is_logged(monkeypatch):
 
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "mock/mock-gpt-4o", "messages": [{"role": "user", "content": "ping"}]},
     )
     assert response.status_code == 200
     assert response.json()["usage"]["cache_read_input_tokens"] == 800
@@ -128,7 +128,7 @@ def test_openai_style_cache_usage_is_logged_from_streams(monkeypatch):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "mock-gpt-4o",
+            "model": "mock/mock-gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
             "stream": True,
         },

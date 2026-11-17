@@ -162,43 +162,43 @@ def test_test_keys_not_displayed_in_key_list(tmp_path, monkeypatch):
 
 
 def test_antigravity_reasoning_effort_routing():
-    """Verify gemini-3.8-flash dynamically routes to gemini-3.8-flash-high/-medium/-low."""
+    """Verify ag/gemini-3.8-flash dynamically routes to ag/gemini-3.8-flash-high/-medium/-low."""
     client = TestClient(app, headers={"X-Admin-Token": "test-admin-token"})
 
     # 1. Normal call with default effort -> routes to high
     res_high = client.post(
         "/v1/chat/completions",
         json={
-            "model": "gemini-3.8-flash",
+            "model": "ag/gemini-3.8-flash",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "high",
         },
     )
     assert res_high.status_code == 200
     data = res_high.json()
-    assert data["model"] == "gemini-3.8-flash"
+    assert data["model"] == "ag/gemini-3.8-flash"
     assert "<think>" not in data["choices"][0]["message"]["content"]
 
     # 2. Medium effort
     res_med = client.post(
         "/v1/chat/completions",
         json={
-            "model": "gemini-3.8-flash",
+            "model": "ag/gemini-3.8-flash",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "medium",
         },
     )
     assert res_med.status_code == 200
-    assert res_med.json()["model"] == "gemini-3.8-flash"
+    assert res_med.json()["model"] == "ag/gemini-3.8-flash"
 
     # 3. None effort
     res_none = client.post(
         "/v1/chat/completions",
         json={
-            "model": "gemini-3.8-flash",
+            "model": "ag/gemini-3.8-flash",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "none",
         },
     )
     assert res_none.status_code == 200
-    assert res_none.json()["model"] == "gemini-3.8-flash"
+    assert res_none.json()["model"] == "ag/gemini-3.8-flash"
