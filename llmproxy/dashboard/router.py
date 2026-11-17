@@ -1289,6 +1289,137 @@ async def get_codex_all_status():
 
 
 # =========================================================================
+# OpenRouter Credits
+# =========================================================================
+
+OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _openrouter_settings(account: Account) -> tuple[str, str]:
+    """Resolve the OpenRouter API key and base URL for an account."""
+    cfg = plugin_manager.configs.get("openrouter", {}) or {}
+    variables = cfg.get("variables") if isinstance(cfg.get("variables"), dict) else {}
+    api_key = str(account.api_key or variables.get("api_key") or "").strip()
+    base_url = str(
+        account.base_url or variables.get("base_url") or OPENROUTER_DEFAULT_BASE_URL
+    ).rstrip("/")
+    return api_key, base_url
+
+
+async def fetch_openrouter_credits(account: Account) -> Dict[str, Any]:
+    """Fetch live available credits for an OpenRouter account.
+
+    OpenRouter exposes per-key limits on ``/key`` and account-wide purchased
+    credits on ``/credits``. Prefer the key limit when it is set, otherwise
+    fall back to ``total_credits - total_usage``.
+    """
+    import httpx
+
+    api_key, base_url = _openrouter_settings(account)
+    if not api_key:
+        return {"error": "OpenRouter API key is missing"}
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    result: Dict[str, Any] = {
+        "account_id": account.id,
+        "account_name": account.name,
+        "currency": "USD",
+    }
+    last_error = ""
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            key_resp = await client.get(f"{base_url}/key", headers=headers)
+            if key_resp.status_code == 200:
+                key_data = (key_resp.json() or {}).get("data") or {}
+                result["key_label"] = key_data.get("label")
+                result["limit"] = key_data.get("limit")
+                result["limit_remaining"] = key_data.get("limit_remaining")
+                result["total_usage"] = key_data.get("usage")
+                result["is_free_tier"] = key_data.get("is_free_tier")
+                remaining = key_data.get("limit_remaining")
+                if remaining is not None:
+                    result["available_credits"] = float(remaining)
+                    result["source"] = "key"
+            else:
+                last_error = f"OpenRouter /key returned HTTP {key_resp.status_code}"
+        except Exception as exc:
+            last_error = f"OpenRouter /key request failed: {exc}"
+
+        if result.get("available_credits") is None:
+            try:
+                credits_resp = await client.get(f"{base_url}/credits", headers=headers)
+                if credits_resp.status_code == 200:
+                    credit_data = (credits_resp.json() or {}).get("data") or {}
+                    total_credits = credit_data.get("total_credits")
+                    total_usage = credit_data.get("total_usage")
+                    result["total_credits"] = total_credits
+                    if total_usage is not None:
+                        result["total_usage"] = total_usage
+                    if total_credits is not None and total_usage is not None:
+                        result["available_credits"] = float(total_credits) - float(total_usage)
+                        result["source"] = "credits"
+                else:
+                    last_error = (
+                        f"OpenRouter /credits returned HTTP {credits_resp.status_code}"
+                    )
+            except Exception as exc:
+                last_error = f"OpenRouter /credits request failed: {exc}"
+
+    if result.get("available_credits") is None and last_error:
+        result["error"] = last_error
+    return result
+
+
+@router.get("/openrouter/credits/{account_id}")
+async def get_openrouter_account_credits(account_id: str):
+    """Fetch live available credits for a specific OpenRouter account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    if account.provider_id != "openrouter":
+        raise HTTPException(status_code=400, detail="Account is not an OpenRouter account")
+    return await fetch_openrouter_credits(account)
+
+
+@router.get("/openrouter/status")
+async def get_openrouter_all_status():
+    """Fetch live credit balances for all connected OpenRouter accounts."""
+    accounts = [a for a in plugin_manager.get_accounts() if a.provider_id == "openrouter"]
+    if not accounts:
+        return {"accounts": [], "message": "No OpenRouter accounts configured"}
+
+    async def build(acc: Account) -> Dict[str, Any]:
+        credits = await fetch_openrouter_credits(acc)
+        return {
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "enabled": acc.enabled,
+            "rate_limited": not acc.is_available(),
+            "credits": credits,
+        }
+
+    results = await asyncio.gather(*(build(acc) for acc in accounts), return_exceptions=True)
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            acc = accounts[index]
+            items.append({
+                "account_id": acc.id,
+                "account_name": acc.name,
+                "enabled": acc.enabled,
+                "rate_limited": not acc.is_available(),
+                "credits": {"error": str(item)},
+            })
+        else:
+            items.append(item)
+    return {"accounts": items}
+
+
+# =========================================================================
 # Telemetry, Stats, and Logs
 # =========================================================================
 

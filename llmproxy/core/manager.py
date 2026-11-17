@@ -454,6 +454,7 @@ class PluginManager:
                 weight=account_data.weight,
                 enabled=account_data.enabled,
                 pinned=account_data.pinned,
+                disable_usage_tracking=account_data.disable_usage_tracking,
                 proxy_id=account_data.proxy_id,
                 proxy_url=account_data.proxy_url,
                 extra_config=account_data.extra_config,
@@ -693,6 +694,10 @@ class PluginManager:
             if v is not None and hasattr(account, k):
                 setattr(account, k, v)
 
+        # Turning tracking off also clears any lingering quota cooldown.
+        if account.disable_usage_tracking:
+            account.rate_limited_until = None
+
         if "priority" in upd:
             self._ensure_unique_priorities(account.provider_id, preferred_account_id=account.id)
 
@@ -796,9 +801,15 @@ class PluginManager:
         is_rate_limit: bool = False,
         cooldown_seconds: float = 60.0,
     ) -> None:
-        """Record success or error/rate-limit result for an account."""
+        """Record success or error/rate-limit result for an account.
+
+        Accounts with ``disable_usage_tracking`` opt out of local counters and
+        quota cooldowns. Failover still works because the router reacts to the
+        raised exception directly; only persisted per-account bookkeeping is
+        skipped.
+        """
         account = self.accounts.get(account_id)
-        if not account:
+        if not account or account.disable_usage_tracking:
             return
         if success:
             account.success_count += 1

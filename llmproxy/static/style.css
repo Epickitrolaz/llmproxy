@@ -1907,6 +1907,61 @@ input:checked + .slider:before {
   justify-content: space-between;
 }
 
+/* OpenRouter: show the live credit balance directly, without a usage bar. */
+.credits-panel {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-badge);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.credits-value {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--ink-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.credits-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+.credits-panel-unavailable .credits-value {
+  color: var(--ink-muted);
+}
+
+/* Accounts opted out of local usage/quota bookkeeping. */
+.usage-tracking-disabled {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-badge);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.usage-tracking-hint {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--ink-muted);
+}
+
 .btn-hide-limit {
   background: none;
   border: none;

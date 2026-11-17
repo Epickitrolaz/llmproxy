@@ -2960,6 +2960,7 @@ curl -X POST ${baseUrl}/chat/completions \\
 
       const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
       const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
+      const openrouterAccounts = accountsToDisplay.filter((a) => a.provider_id === "openrouter");
 
       const antigravityPromise = antigravityAccounts.length > 0
         ? api("/api/antigravity/status")
@@ -2989,7 +2990,21 @@ curl -X POST ${baseUrl}/chat/completions \\
             .catch(() => {})
         : Promise.resolve();
 
-      await Promise.all([antigravityPromise, codexPromise]);
+      const openrouterPromise = openrouterAccounts.length > 0
+        ? api("/api/openrouter/status")
+            .then((orStatusRes) => {
+              if (orStatusRes && orStatusRes.accounts) {
+                orStatusRes.accounts.forEach((item) => {
+                  if (item.credits) {
+                    state.cachedQuotaData[item.account_id] = item.credits;
+                  }
+                });
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      await Promise.all([antigravityPromise, codexPromise, openrouterPromise]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
 
@@ -3012,8 +3027,38 @@ curl -X POST ${baseUrl}/chat/completions \\
       // Render limits cleanly without verbose boilerplate
       let limitsHtml = "";
       const quota = quotaDataMap[acc.id];
+      const isOpenRouterAccount = acc.provider_id === "openrouter";
 
-      if (quota && quota.groups && quota.groups.length > 0) {
+      if (isOpenRouterAccount) {
+        // OpenRouter has no per-account quota bars; show the live credit
+        // balance directly and prominently.
+        const availableCredits = quota && typeof quota.available_credits === "number"
+          ? quota.available_credits
+          : null;
+        if (availableCredits !== null) {
+          limitsHtml = `
+            <div class="credits-panel">
+              <span class="credits-value">$${availableCredits.toFixed(2)}</span>
+              <span class="credits-label">available credits</span>
+            </div>
+          `;
+        } else {
+          const creditsError = quota && quota.error ? quota.error : "loading credits...";
+          limitsHtml = `
+            <div class="credits-panel credits-panel-unavailable" title="${escapeHtml(creditsError)}">
+              <span class="credits-value">—</span>
+              <span class="credits-label">${quota && quota.error ? "credits unavailable" : "loading credits..."}</span>
+            </div>
+          `;
+        }
+      } else if (acc.disable_usage_tracking) {
+        limitsHtml = `
+          <div class="usage-tracking-disabled">
+            <span>Usage tracking disabled</span>
+            <span class="usage-tracking-hint">No quota, counters, or cooldowns for this account</span>
+          </div>
+        `;
+      } else if (quota && quota.groups && quota.groups.length > 0) {
         quota.groups.forEach((grp) => {
           (grp.buckets || []).forEach((b) => {
             const bucketKey = b.bucketId || b.displayName || "limit";
@@ -3368,6 +3413,14 @@ curl -X POST ${baseUrl}/chat/completions \\
     const agSection = document.getElementById("antigravity-oauth-section");
     const codexSection = document.getElementById("codex-oauth-section");
     const keyGroup = document.getElementById("account-key-group");
+    const usageGroup = document.getElementById("account-usage-tracking-group");
+
+    // Generic OpenAI/Anthropic-compatible endpoints may be unlimited or billed
+    // elsewhere, so let each account opt out of local usage/quota bookkeeping.
+    const tracksUsage = selectedProvider === "openai_compatible" || selectedProvider === "anthropic_proxy";
+    if (usageGroup) {
+      usageGroup.style.display = tracksUsage ? "flex" : "none";
+    }
 
     if (agSection) {
       agSection.style.display = (isAg && !isEditing) ? "block" : "none";
@@ -3663,6 +3716,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     const priorityInput = document.getElementById("account-priority");
     const weightInput = document.getElementById("account-weight");
     const enabledInput = document.getElementById("account-enabled-toggle");
+    const usageTrackingInput = document.getElementById("account-usage-tracking-toggle");
     const title = document.getElementById("modal-account-title");
 
     provSelect.innerHTML = "";
@@ -3690,6 +3744,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       priorityInput.value = account.priority || 1;
       weightInput.value = account.weight || 1;
       enabledInput.checked = !!account.enabled;
+      if (usageTrackingInput) usageTrackingInput.checked = !account.disable_usage_tracking;
     } else {
       title.textContent = "Connect Provider Account";
       idInput.value = "";
@@ -3702,6 +3757,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       priorityInput.value = getNextAvailablePriority(initialProvId);
       weightInput.value = 1;
       enabledInput.checked = true;
+      if (usageTrackingInput) usageTrackingInput.checked = true;
     }
 
     provSelect.onchange = () => {
@@ -3725,10 +3781,15 @@ curl -X POST ${baseUrl}/chat/completions \\
       const priorityInput = document.getElementById("account-priority");
       const weightInput = document.getElementById("account-weight");
       const enabledInput = document.getElementById("account-enabled-toggle");
+      const usageTrackingInput = document.getElementById("account-usage-tracking-toggle");
 
       const name = nameInput.value.trim();
       const provId = provSelect.value;
       const isEditing = Boolean(idInput.value);
+      const tracksUsage = provId === "openai_compatible" || provId === "anthropic_proxy";
+      const disableUsageTracking = tracksUsage
+        ? !(usageTrackingInput && usageTrackingInput.checked)
+        : undefined;
 
       if (!isEditing && provId === "antigravity") {
         showToast("Please use 'Sign in with Google (OAuth)' or 'Auto-Import' to connect a Google Antigravity account", "warning");
@@ -3774,6 +3835,9 @@ curl -X POST ${baseUrl}/chat/completions \\
           if (keyInput.value) {
             updatePayload.api_key = keyInput.value;
           }
+          if (disableUsageTracking !== undefined) {
+            updatePayload.disable_usage_tracking = disableUsageTracking;
+          }
 
           await api(`/api/accounts/${idInput.value}`, {
             method: "PUT",
@@ -3782,17 +3846,21 @@ curl -X POST ${baseUrl}/chat/completions \\
           showToast(`Account '${name}' updated`);
         } else {
           // Create
+          const createPayload = {
+            provider_id: provId,
+            name,
+            api_key: keyInput.value,
+            base_url: baseInput.value || undefined,
+            priority: chosenPriority,
+            weight: parseInt(weightInput.value, 10) || 1,
+            enabled: enabledInput.checked,
+          };
+          if (disableUsageTracking !== undefined) {
+            createPayload.disable_usage_tracking = disableUsageTracking;
+          }
           await api("/api/accounts", {
             method: "POST",
-            body: JSON.stringify({
-              provider_id: provId,
-              name,
-              api_key: keyInput.value,
-              base_url: baseInput.value || undefined,
-              priority: chosenPriority,
-              weight: parseInt(weightInput.value, 10) || 1,
-              enabled: enabledInput.checked,
-            }),
+            body: JSON.stringify(createPayload),
           });
           showToast(`Account '${name}' connected`);
         }
