@@ -43,6 +43,7 @@
     autoRefreshLogs: false,
     autoRefreshInterval: null,
     cachedQuotaData: null,
+    usageProviderIds: null,
     hiddenLimits: {}, // { [accountId]: Set of bucketIds/limitNames }
   };
 
@@ -2770,8 +2771,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       fetchAccounts(),
       fetchLogs(),
     ]);
-    renderStatusProviderTabs();
     await renderStatusAccountsGrid(fetchFreshQuota);
+    renderStatusProviderTabs();
   }
 
   async function togglePluginPin(plugin) {
@@ -2817,11 +2818,14 @@ curl -X POST ${baseUrl}/chat/completions \\
     el.statusProviderTabs.appendChild(allBtn);
 
     // Sort providers by name with pinned first
-    const sortedPlugins = [...state.plugins].sort((a, b) => {
-      if (a.pinned && !b.pinned) return -1;
-      if (!a.pinned && b.pinned) return 1;
-      return a.name.localeCompare(b.name);
-    });
+    const usageProviders = state.usageProviderIds instanceof Set ? state.usageProviderIds : null;
+    const sortedPlugins = [...state.plugins]
+      .filter((plugin) => !usageProviders || usageProviders.has(plugin.id))
+      .sort((a, b) => {
+        if (a.pinned && !b.pinned) return -1;
+        if (!a.pinned && b.pinned) return 1;
+        return a.name.localeCompare(b.name);
+      });
 
     sortedPlugins.forEach((p) => {
       const btn = document.createElement("button");
@@ -3051,6 +3055,11 @@ curl -X POST ${baseUrl}/chat/completions \\
       const quota = quotaDataMap[acc.id];
       return Boolean(quota && !quota.error);
     });
+
+    state.usageProviderIds = new Set(usageAccounts.map((account) => account.provider_id));
+    if (state.statusProviderFilter && !state.usageProviderIds.has(state.statusProviderFilter)) {
+      state.statusProviderFilter = "";
+    }
 
     if (usageAccounts.length === 0) {
       el.statusAccountsGrid.innerHTML = `
