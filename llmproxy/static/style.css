@@ -710,7 +710,9 @@ button {
 .switch {
   position: relative;
   display: inline-block;
-  flex: 0 0 36px;
+  flex: 0 0 auto;
+  width: 36px;
+  min-width: 36px;
   height: 20px;
   vertical-align: middle;
 }
