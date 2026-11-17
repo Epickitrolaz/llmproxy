@@ -282,7 +282,7 @@ class AnthropicProxyPlugin(BasePlugin):
         reasoning_levels = list(REASONING_LEVELS)
         models = [
             PluginModelConfig(
-                id="claude-haiku-5-5",
+                id="ap/claude-haiku-5-5",
                 name="Claude Haiku 5.5",
                 upstream_model="claude-haiku-5-5",
                 context_window=200000,
@@ -290,7 +290,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 reasoning_levels=reasoning_levels,
             ),
             PluginModelConfig(
-                id="claude-sonnet-5-5",
+                id="ap/claude-sonnet-5-5",
                 name="Claude Sonnet 5.5",
                 upstream_model="claude-sonnet-5-5",
                 context_window=200000,
@@ -298,7 +298,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 reasoning_levels=reasoning_levels,
             ),
             PluginModelConfig(
-                id="claude-opus-5-5",
+                id="ap/claude-opus-5-5",
                 name="Claude Opus 5.5",
                 upstream_model="claude-opus-5-5",
                 context_window=200000,
@@ -306,7 +306,7 @@ class AnthropicProxyPlugin(BasePlugin):
                 reasoning_levels=reasoning_levels,
             ),
             PluginModelConfig(
-                id="claude-fable-5-2",
+                id="ap/claude-fable-5-2",
                 name="Claude Fable 5.2",
                 upstream_model="claude-fable-5-2",
                 context_window=1000000,

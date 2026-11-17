@@ -86,7 +86,7 @@ def test_schema_tool_fields():
     assert req.tools[0]["function"]["name"] == "get_weather"
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
+@pytest.mark.parametrize("model_id", ["compat/default-model", "cx/gpt-4o", "ap/claude-sonnet-5-5", "ag/gemini-3.8-flash", "or/nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_non_streaming(model_id):
     """Verify all providers return valid tool_calls when tools are supplied."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
@@ -111,7 +111,7 @@ def test_all_providers_mock_tool_calling_non_streaming(model_id):
         assert "location" in message["tool_calls"][0]["function"]["arguments"]
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
+@pytest.mark.parametrize("model_id", ["compat/default-model", "cx/gpt-4o", "ap/claude-sonnet-5-5", "ag/gemini-3.8-flash", "or/nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_mock_tool_calling_streaming(model_id):
     """Verify all providers stream tool_calls via SSE chunks properly."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
@@ -144,7 +144,7 @@ def test_all_providers_mock_tool_calling_streaming(model_id):
         assert final_finish_reason == "tool_calls", f"Expected finish_reason tool_calls for {model_id}, got {final_finish_reason}"
 
 
-@pytest.mark.parametrize("model_id", ["default-model", "gpt-4o", "claude-sonnet-5-5", "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free"])
+@pytest.mark.parametrize("model_id", ["compat/default-model", "cx/gpt-4o", "ap/claude-sonnet-5-5", "ag/gemini-3.8-flash", "or/nvidia/nemotron-3-ultra-550b-a55b:free"])
 def test_all_providers_tool_followup_roundtrip(model_id):
     """Verify follow-up message with tool role completes conversation with finish_reason stop."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:

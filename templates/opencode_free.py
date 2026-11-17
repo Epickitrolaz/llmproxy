@@ -132,84 +132,84 @@ EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 # Default OpenCode free models exposed in the Models tab
 DEFAULT_FREE_MODELS: List[PluginModelConfig] = [
     PluginModelConfig(
-        id="mimo-v2.6-flash-free",
+        id="oc/mimo-v2.6-flash-free",
         name="MiMo-V2.6-Flash Free",
         upstream_model="mimo-v2.6-flash-free",
         context_window=1048576,
         max_tokens=131072,
     ),
     PluginModelConfig(
-        id="deepseek-v4.1-flash-free",
+        id="oc/deepseek-v4.1-flash-free",
         name="DeepSeek V4.1 Flash Free",
         upstream_model="deepseek-v4.1-flash-free",
         context_window=330000,
         max_tokens=128000,
     ),
     PluginModelConfig(
-        id="glm-5.3-flash-free",
+        id="oc/glm-5.3-flash-free",
         name="GLM-5.3-Flash Free",
         upstream_model="glm-5.3-flash-free",
         context_window=1000000,
         max_tokens=128000,
     ),
     PluginModelConfig(
-        id="crouton-alpha-free",
+        id="oc/crouton-alpha-free",
         name="Crouton Alpha Free",
         upstream_model="crouton-alpha-free",
         context_window=1048576,
         max_tokens=270000,
     ),
     PluginModelConfig(
-        id="longcat-2.5-free",
+        id="oc/longcat-2.5-free",
         name="LongCat 2.5 Free",
         upstream_model="longcat-2.5-free",
         context_window=1000000,
         max_tokens=262144,
     ),
     PluginModelConfig(
-        id="iceman-free",
+        id="oc/iceman-free",
         name="Iceman Free",
         upstream_model="iceman-free",
         context_window=262144,
         max_tokens=131072,
     ),
     PluginModelConfig(
-        id="inkling-2-small-free",
+        id="oc/inkling-2-small-free",
         name="Inkling 2 Small Free",
         upstream_model="inkling-2-small-free",
         context_window=131072,
         max_tokens=8192,
     ),
     PluginModelConfig(
-        id="beam-free",
+        id="oc/beam-free",
         name="Beam Free",
         upstream_model="beam-free",
         context_window=1048576,
         max_tokens=131072,
     ),
     PluginModelConfig(
-        id="flint-40b-free",
+        id="oc/flint-40b-free",
         name="Flint 40B Free",
         upstream_model="flint-40b-free",
         context_window=131072,
         max_tokens=8192,
     ),
     PluginModelConfig(
-        id="nemotron-3.5-super-vl-free",
+        id="oc/nemotron-3.5-super-vl-free",
         name="Nemotron 3.5 Super VL Free",
         upstream_model="nemotron-3.5-super-vl-free",
         context_window=128000,
         max_tokens=64000,
     ),
     PluginModelConfig(
-        id="nemotron-3.5-lightning-free",
+        id="oc/nemotron-3.5-lightning-free",
         name="Nemotron 3.5 Lightning Free",
         upstream_model="nemotron-3.5-lightning-free",
         context_window=128000,
         max_tokens=64000,
     ),
     PluginModelConfig(
-        id="big-pickle",
+        id="oc/big-pickle",
         name="Big Pickle",
         upstream_model="big-pickle",
         context_window=200000,
@@ -218,6 +218,7 @@ DEFAULT_FREE_MODELS: List[PluginModelConfig] = [
 ]
 for _model in DEFAULT_FREE_MODELS:
     _model.supports_vision = infer_vision_support(_model.id, _model.name)
+    _model.reasoning_levels = list(EFFORT_LEVELS)
 
 
 # ==============================================================================

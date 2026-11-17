@@ -73,6 +73,10 @@ from llmproxy.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Public model IDs are namespaced by provider. The upstream model ID stays
+# unprefixed in each model config.
+ANTIGRAVITY_REASONING_LEVELS = ("none", "low", "medium", "high")
+
 _THOUGHT_SIGNATURES: Dict[str, str] = {}
 _THOUGHT_SIGNATURES_FILE: Optional[str] = None
 
@@ -387,42 +391,42 @@ class AntigravityPlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="gemini-3.8-flash",
+                    id="ag/gemini-3.8-flash",
                     name="Gemini 3.8 Flash",
                     upstream_model="gemini-3.8-flash",
                     context_window=1048576,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gemini-3.1-pro",
+                    id="ag/gemini-3.1-pro",
                     name="Gemini 3.1 Pro",
                     upstream_model="gemini-3.1-pro",
                     context_window=2097152,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="gemini-2.5-pro",
+                    id="ag/gemini-2.5-pro",
                     name="Gemini 2.5 Pro",
                     upstream_model="gemini-2.5-pro",
                     context_window=1048576,
                     max_tokens=8192,
                 ),
                 PluginModelConfig(
-                    id="gemini-2.5-flash",
+                    id="ag/gemini-2.5-flash",
                     name="Gemini 2.5 Flash",
                     upstream_model="gemini-2.5-flash",
                     context_window=1048576,
                     max_tokens=8192,
                 ),
                 PluginModelConfig(
-                    id="claude-sonnet-4-6",
+                    id="ag/claude-sonnet-4-6",
                     name="Claude Sonnet 4.6",
                     upstream_model="claude-sonnet-4-6",
                     context_window=200000,
                     max_tokens=8192,
                 ),
                 PluginModelConfig(
-                    id="claude-opus-4-6-thinking",
+                    id="ag/claude-opus-4-6-thinking",
                     name="Claude Opus 4.6 Thinking",
                     upstream_model="claude-opus-4-6-thinking",
                     context_window=200000,
@@ -432,6 +436,7 @@ class AntigravityPlugin(BasePlugin):
         )
         for model in self._metadata.models:
             model.supports_vision = True
+            model.reasoning_levels = list(ANTIGRAVITY_REASONING_LEVELS)
 
     @property
     def metadata(self) -> PluginMetadata:

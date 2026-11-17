@@ -33,6 +33,10 @@ from llmproxy.schemas import (
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Public model IDs are namespaced by provider. These are the reasoning levels
+# the OpenRouter adapter forwards through its ``reasoning`` object.
+OPENROUTER_REASONING_LEVELS = ("none", "low", "medium", "high")
+
 REASONING_SUFFIXES: Tuple[Tuple[str, str], ...] = (
     (":none", "none"),
     ("-none", "none"),
@@ -169,42 +173,42 @@ class OpenRouterPlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="nvidia/nemotron-3-ultra-550b-a55b:free",
+                    id="or/nvidia/nemotron-3-ultra-550b-a55b:free",
                     name="Nemotron 3 Ultra (free)",
                     upstream_model="nvidia/nemotron-3-ultra-550b-a55b:free",
                     context_window=1000000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="baidu/ernie-5.5-flash-preview:free",
+                    id="or/baidu/ernie-5.5-flash-preview:free",
                     name="ERNIE 5.5 Flash Preview (free)",
                     upstream_model="baidu/ernie-5.5-flash-preview:free",
                     context_window=1000000,
                     max_tokens=65536,
                 ),
                 PluginModelConfig(
-                    id="thinkingmachines/inkling-2-small:free",
+                    id="or/thinkingmachines/inkling-2-small:free",
                     name="Inkling 2 Small (free)",
                     upstream_model="thinkingmachines/inkling-2-small:free",
                     context_window=1048576,
                     max_tokens=131072,
                 ),
                 PluginModelConfig(
-                    id="nvidia/nemotron-3.5-super-vl:free",
+                    id="or/nvidia/nemotron-3.5-super-vl:free",
                     name="Nemotron 3.5 Super VL (free)",
                     upstream_model="nvidia/nemotron-3.5-super-vl:free",
                     context_window=1000000,
                     max_tokens=131072,
                 ),
                 PluginModelConfig(
-                    id="google/gemma-4-31b-it:free",
+                    id="or/google/gemma-4-31b-it:free",
                     name="Gemma 4 31B (free)",
                     upstream_model="google/gemma-4-31b-it:free",
                     context_window=262144,
                     max_tokens=32768,
                 ),
                 PluginModelConfig(
-                    id="cohere/north-mini-code:free",
+                    id="or/cohere/north-mini-code:free",
                     name="North Mini Code (free)",
                     upstream_model="cohere/north-mini-code:free",
                     context_window=256000,
@@ -214,6 +218,7 @@ class OpenRouterPlugin(BasePlugin):
         )
         for model in self._metadata.models:
             model.supports_vision = infer_vision_support(model.id, model.name)
+            model.reasoning_levels = list(OPENROUTER_REASONING_LEVELS)
 
     @property
     def metadata(self) -> PluginMetadata:

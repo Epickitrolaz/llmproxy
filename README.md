@@ -129,13 +129,31 @@ minimum cacheable size (1024 tokens, or 2048 for Haiku). Explicit client
 breakpoints and `extra_body.cache_control` are left untouched. Set
 `auto_prompt_cache` to `false` if you prefer to control cache writes yourself.
 
-`GET /v1/models` lists each model once under its base ID. Models that support
-reasoning also carry a `reasoning_levels` field, and every plugin-backed model
-reports its configured limits through `context_window` and `max_tokens`:
+`GET /v1/models` lists each model once under a provider-namespaced ID. The
+built-in templates use these short prefixes, while each plugin keeps the
+provider's native ID in `upstream_model`:
+
+| Template | Prefix | Example exposed ID |
+|---|---|---|
+| `anthropic_proxy` | `ap` | `ap/claude-opus-5-5` |
+| `antigravity` | `ag` | `ag/gemini-3.8-flash` |
+| `codex` | `cx` | `cx/gpt-6-luna` |
+| `mock_provider` | `mock` | `mock/mock-gpt-4o` |
+| `openai_compatible` | `compat` | `compat/default-model` |
+| `opencode_free` | `oc` | `oc/deepseek-v4.1-flash-free` |
+| `opencode_go` | `ocg` | `ocg/gpt-6-luna` |
+| `openrouter` | `or` | `or/google/gemma-4-31b-it:free` |
+
+Existing clients and load-balancing rules must use the prefixed IDs. Custom
+models added from the dashboard keep the ID you give them.
+
+Models that support reasoning also carry a `reasoning_levels` field, and every
+plugin-backed model reports its configured limits through `context_window` and
+`max_tokens`:
 
 ```json
 {
-  "id": "claude-opus-5-5",
+  "id": "ap/claude-opus-5-5",
   "object": "model",
   "owned_by": "anthropic_proxy",
   "reasoning_levels": ["none", "low", "medium", "high", "xhigh", "max"],
@@ -149,9 +167,9 @@ level as `reasoning_effort` in the request body. The proxy maps it internally;
 no separate model IDs are required.
 
 The `:<level>` suffix is also accepted generically for any provider model and is
-stripped before routing. For example `gpt-6-luna:high` resolves to `gpt-6-luna`
-with the per-request `reasoning_effort` set to `high`. Custom load balancing
-rules use this to attach a reasoning level to each target.
+stripped before routing. For example `cx/gpt-6-luna:high` resolves to
+`cx/gpt-6-luna` with the per-request `reasoning_effort` set to `high`. Custom
+load balancing rules use this to attach a reasoning level to each target.
 
 ---
 
@@ -250,7 +268,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-proxy-your-key" \
   -d '{
-    "model": "gemini-3.8-flash",
+    "model": "ag/gemini-3.8-flash",
     "messages": [
       {"role": "user", "content": "Hello LLMProxy!"}
     ]
@@ -279,7 +297,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-proxy-your-key" \
   -d '{
-    "model": "gemini-3.8-flash",
+    "model": "ag/gemini-3.8-flash",
     "messages": [{
       "role": "user",
       "content": [
@@ -299,7 +317,7 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-proxy-your-key" \
   -d '{
-    "model": "gpt-6-luna",
+    "model": "cx/gpt-6-luna",
     "messages": [
       {"role": "user", "content": "Explain quantum computing briefly."}
     ],
@@ -320,7 +338,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gemini-3.8-flash-high",
+    model="ag/gemini-3.8-flash:high",
     messages=[{"role": "user", "content": "Hello from OpenAI Python SDK!"}],
     stream=True
 )
@@ -345,7 +363,7 @@ To route OpenCode requests through LLMProxy, configure a provider in your `openc
         "apiKey": "sk-proxy-your-key"
       },
       "models": {
-        "gemini-3.8-flash-high": {
+        "ag/gemini-3.8-flash": {
           "limit": {
             "context": 512000
           }
@@ -359,7 +377,7 @@ To route OpenCode requests through LLMProxy, configure a provider in your `openc
 
 Then run OpenCode with:
 ```bash
-opencode run -m llmproxy/gemini-3.8-flash-high "Explain quantum computing briefly."
+opencode run -m llmproxy/ag/gemini-3.8-flash:high "Explain quantum computing briefly."
 ```
 
 ---

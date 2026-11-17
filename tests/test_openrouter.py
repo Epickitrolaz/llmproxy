@@ -18,18 +18,22 @@ from templates.openrouter import OpenRouterPlugin
 
 
 FREE_MODEL_IDS = {
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "baidu/ernie-5.5-flash-preview:free",
-    "thinkingmachines/inkling-2-small:free",
-    "nvidia/nemotron-3.5-super-vl:free",
-    "google/gemma-4-31b-it:free",
-    "cohere/north-mini-code:free",
+    "or/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "or/baidu/ernie-5.5-flash-preview:free",
+    "or/thinkingmachines/inkling-2-small:free",
+    "or/nvidia/nemotron-3.5-super-vl:free",
+    "or/google/gemma-4-31b-it:free",
+    "or/cohere/north-mini-code:free",
 }
 
 
 def _model(model_id: str = "nvidia/nemotron-3-ultra-550b-a55b:free") -> PluginModelConfig:
     plugin = OpenRouterPlugin()
-    return next(m for m in plugin.metadata.models if m.id == model_id)
+    return next(
+        m
+        for m in plugin.metadata.models
+        if m.id == model_id or m.id.endswith(f"/{model_id}")
+    )
 
 
 def test_metadata_preloads_free_models():
@@ -176,7 +180,7 @@ def test_real_openrouter_request_is_forwarded(monkeypatch):
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer sk-or-live-123"
     assert captured["headers"]["HTTP-Referer"] == "https://example.com"
-    assert captured["json"]["model"] == model.id
+    assert captured["json"]["model"] == model.upstream_model
     assert captured["json"]["reasoning"] == {"effort": "high"}
     assert response.choices[0].message.content == "Hello via OpenRouter."
     assert response.usage.total_tokens == 7

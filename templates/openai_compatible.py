@@ -122,7 +122,7 @@ class OpenAICompatiblePlugin(BasePlugin):
             ],
             models=[
                 PluginModelConfig(
-                    id="default-model",
+                    id="compat/default-model",
                     name="Default Model",
                     upstream_model="default-model",
                     context_window=8192,

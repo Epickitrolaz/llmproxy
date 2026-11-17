@@ -70,16 +70,16 @@ def test_antigravity_models_exposed_without_suffix():
     model_ids = {m.id for m in plugin.metadata.models}
 
     # Default exposed models without suffix
-    assert "gemini-3.8-flash" in model_ids
-    assert "gemini-3.1-pro" in model_ids
-    assert "claude-sonnet-4-6" in model_ids
-    assert "claude-opus-4-6-thinking" in model_ids
+    assert "ag/gemini-3.8-flash" in model_ids
+    assert "ag/gemini-3.1-pro" in model_ids
+    assert "ag/claude-sonnet-4-6" in model_ids
+    assert "ag/claude-opus-4-6-thinking" in model_ids
 
     # Suffix variants should NOT be exposed in the default models list
-    assert "gemini-3.8-flash-high" not in model_ids
-    assert "gemini-3.8-flash-medium" not in model_ids
-    assert "gemini-3.8-flash-low" not in model_ids
-    assert "gemini-3.1-pro-high" not in model_ids
+    assert "ag/gemini-3.8-flash-high" not in model_ids
+    assert "ag/gemini-3.8-flash-medium" not in model_ids
+    assert "ag/gemini-3.8-flash-low" not in model_ids
+    assert "ag/gemini-3.1-pro-high" not in model_ids
 
 
 def test_reasoning_effort_maps_to_google_upstream_model_variants():
