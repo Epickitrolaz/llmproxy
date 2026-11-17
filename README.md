@@ -202,6 +202,11 @@ A client request with `"reasoning_effort": "high"` then reaches the first two
 targets as `high` and the third as `max`. Levels that cannot be served by every
 target (directly or through a remap) are never advertised.
 
+A target that has no reasoning support at all can be mapped to
+`__default__` (shown as **Default / unspecified** in the rule editor). The
+exposed level is still accepted for rule selection, but no reasoning control is
+forwarded to that target.
+
 ---
 
 ## Quickstart with Docker

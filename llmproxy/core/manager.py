@@ -49,6 +49,10 @@ REASONING_EFFORT_SUFFIXES = frozenset(
 # before invoking the plugin and strips it from the plugin variables.
 RULE_REASONING_OVERRIDE_KEY = "__llmproxy_rule_reasoning_effort"
 
+# Sentinel used by per-target reasoning maps for models that do not support
+# reasoning at all: the requested level is accepted but not forwarded upstream.
+DEFAULT_REASONING_LEVEL = "__default__"
+
 
 def split_reasoning_suffix(model_id: str) -> Tuple[str, Optional[str]]:
     """Split ``<model>:<level>`` into its base model ID and reasoning level."""
@@ -615,7 +619,10 @@ class PluginManager:
                     destination = str(raw_destination or "").strip().lower()
                     if (
                         source in REASONING_EFFORT_SUFFIXES
-                        and destination in REASONING_EFFORT_SUFFIXES
+                        and (
+                            destination in REASONING_EFFORT_SUFFIXES
+                            or destination == DEFAULT_REASONING_LEVEL
+                        )
                     ):
                         clean[source] = destination
                 if clean:
@@ -666,7 +673,7 @@ class PluginManager:
             native = set(self._model_reasoning_levels(model_config, plugin))
             target_valid = set(native)
             for source, destination in (rule.reasoning_overrides.get(target_id) or {}).items():
-                if destination in native:
+                if destination in native or destination == DEFAULT_REASONING_LEVEL:
                     target_valid.add(source)
             valid = target_valid if valid is None else valid & target_valid
 
@@ -1680,8 +1687,12 @@ class PluginManager:
                 target_overrides = rule.reasoning_overrides.get(target_base) or {}
                 mapped_level = target_overrides.get(selected_level, selected_level)
                 vars_dict = dict(vars_dict)
-                vars_dict["reasoning_effort"] = mapped_level
-                vars_dict[RULE_REASONING_OVERRIDE_KEY] = mapped_level
+                if mapped_level == DEFAULT_REASONING_LEVEL:
+                    vars_dict["reasoning_effort"] = "default"
+                    vars_dict[RULE_REASONING_OVERRIDE_KEY] = DEFAULT_REASONING_LEVEL
+                else:
+                    vars_dict["reasoning_effort"] = mapped_level
+                    vars_dict[RULE_REASONING_OVERRIDE_KEY] = mapped_level
             return (model_config, plugin, vars_dict)
 
         # 2. Check directly across active plugin models

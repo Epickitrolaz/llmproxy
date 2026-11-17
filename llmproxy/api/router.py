@@ -10,7 +10,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from llmproxy.core.manager import RULE_REASONING_OVERRIDE_KEY, plugin_manager
+from llmproxy.core.manager import (
+    DEFAULT_REASONING_LEVEL,
+    RULE_REASONING_OVERRIDE_KEY,
+    plugin_manager,
+    split_reasoning_suffix,
+)
 from llmproxy.core.multimodal import (
     estimate_content_tokens,
     is_image_part,
@@ -488,7 +493,23 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     variables = dict(variables)
     rule_reasoning = variables.pop(RULE_REASONING_OVERRIDE_KEY, None)
     if rule_reasoning:
-        request = request.model_copy(update={"reasoning_effort": rule_reasoning})
+        updates: dict[str, Any] = {
+            "model": split_reasoning_suffix(request.model)[0],
+        }
+        if rule_reasoning == DEFAULT_REASONING_LEVEL:
+            # This target has no reasoning support. Accept the client's level
+            # for rule resolution but do not forward it upstream.
+            updates["reasoning_effort"] = None
+            extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+            if extra:
+                updates["extra_body"] = {
+                    key: value
+                    for key, value in extra.items()
+                    if key not in ("reasoning_effort", "reasoning")
+                }
+        else:
+            updates["reasoning_effort"] = rule_reasoning
+        request = request.model_copy(update=updates)
     # A custom load-balancing rule is only a virtual entry point. Logs and the
     # dashboard should attribute the request to the model that actually served
     # it, together with that model's provider.

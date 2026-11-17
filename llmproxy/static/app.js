@@ -2201,6 +2201,7 @@ curl -X POST ${baseUrl}/chat/completions \\
   }
 
   const RULE_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const RULE_DEFAULT_REASONING = "__default__";
 
   /** Split a `<model>:<level>` ID into its base model and reasoning level. */
   function splitReasoningSuffix(modelId) {
@@ -2307,7 +2308,10 @@ curl -X POST ${baseUrl}/chat/completions \\
       Object.entries(mapping).forEach(([source, destination]) => {
         const from = String(source || "").toLowerCase();
         const to = String(destination || "").toLowerCase();
-        if (RULE_REASONING_LEVELS.includes(from) && RULE_REASONING_LEVELS.includes(to)) {
+        if (
+          RULE_REASONING_LEVELS.includes(from) &&
+          (RULE_REASONING_LEVELS.includes(to) || to === RULE_DEFAULT_REASONING)
+        ) {
           clean[from] = to;
         }
       });
@@ -2361,7 +2365,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       const native = nativeLevelsForTarget(targetId);
       const valid = new Set(native);
       Object.entries(reasoningOverrides[targetId] || {}).forEach(([source, destination]) => {
-        if (valid.has(destination)) valid.add(source);
+        if (destination === RULE_DEFAULT_REASONING || valid.has(destination)) {
+          valid.add(source);
+        }
       });
       return valid;
     }
@@ -2425,7 +2431,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       if (exposedReasoningHint) {
         exposedReasoningHint.textContent = valid.size
           ? "Only levels supported by every selected target (or remapped below) can be advertised."
-          : "No level is supported by every selected target yet. Add a per-target reasoning mapping to make one available.";
+          : "No level is supported by every selected target yet. Add a per-target mapping, or map it to Default / unspecified for models without reasoning support.";
       }
     }
 
@@ -2549,11 +2555,17 @@ curl -X POST ${baseUrl}/chat/completions \\
                     `<option value="${escapeHtml(level)}"${level === source ? " selected" : ""}>${escapeHtml(level)}</option>`
                 )
                 .join("");
-              const destinationOptions = nativeLevels
-                .map(
-                  (level) =>
-                    `<option value="${escapeHtml(level)}"${level === destination ? " selected" : ""}>${escapeHtml(level)}</option>`
-                )
+              const destinationLevels = nativeLevels.slice();
+              if (!destinationLevels.includes(RULE_DEFAULT_REASONING)) {
+                destinationLevels.push(RULE_DEFAULT_REASONING);
+              }
+              const destinationOptions = destinationLevels
+                .map((level) => {
+                  const label = level === RULE_DEFAULT_REASONING
+                    ? "Default / unspecified"
+                    : level;
+                  return `<option value="${escapeHtml(level)}"${level === destination ? " selected" : ""}>${escapeHtml(label)}</option>`;
+                })
                 .join("");
               return `<div class="rule-reasoning-map-row">
                 <span class="rule-reasoning-map-label">client asks</span>
@@ -2568,7 +2580,7 @@ curl -X POST ${baseUrl}/chat/completions \\
           reasoningHtml = `<div class="rule-reasoning-overrides">
             <div class="rule-selected-controls">
               <span class="rule-reasoning-label">Reasoning mapping</span>
-              <button type="button" class="btn btn-secondary btn-sm rule-add-reasoning-map" ${nativeLevels.length ? "" : "disabled"}>+ Add mapping</button>
+              <button type="button" class="btn btn-secondary btn-sm rule-add-reasoning-map">+ Add mapping</button>
             </div>
             ${mappingRows || `<span class="rule-reasoning-empty">Uses the client's requested level.</span>`}
           </div>`;
@@ -2629,8 +2641,8 @@ curl -X POST ${baseUrl}/chat/completions \\
           addMappingBtn.addEventListener("click", () => {
             const mapping = reasoningOverrides[target.id] || {};
             const source = RULE_REASONING_LEVELS.find((level) => !mapping[level]);
-            const destination = nativeLevels[0];
-            if (!source || !destination) return;
+            const destination = nativeLevels[0] || RULE_DEFAULT_REASONING;
+            if (!source) return;
             reasoningOverrides[target.id] = { ...mapping, [source]: destination };
             renderSelectedTargets();
           });
