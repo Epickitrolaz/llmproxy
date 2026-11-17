@@ -2085,6 +2085,8 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (!el.rulesTableBody) return;
     el.rulesTableBody.innerHTML = "";
 
+    const activeTargetIds = new Set(buildRuleTargetCatalog().map((model) => model.id));
+
     let rulesToDisplay = state.rules;
     if (state.rulesSearchQuery) {
       const q = state.rulesSearchQuery.toLowerCase().trim();
@@ -2119,10 +2121,15 @@ curl -X POST ${baseUrl}/chat/completions \\
       const targetsBadges = (r.targets || [])
         .map((target) => {
           const parsed = splitReasoningSuffix(target);
-          const label = parsed ? `${parsed.baseId} · ${parsed.level}` : target;
+          const baseId = parsed ? parsed.baseId : target;
+          if (!activeTargetIds.has(baseId)) return "";
+          const label = parsed ? `${baseId} · ${parsed.level}` : target;
           return `<span class="badge">${escapeHtml(label)}</span>`;
         })
+        .filter(Boolean)
         .join(" ");
+      const targetCell = targetsBadges ||
+        `<span class="badge badge-muted">No active targets</span>`;
 
       const manualReasoning = r.manual_reasoning !== false;
       const exposedLevels = Array.isArray(r.exposed_reasoning_levels)
@@ -2139,7 +2146,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
         <td>${escapeHtml(r.name || r.model_id)}</td>
         <td><code style="font-family: var(--font-mono); text-transform: uppercase; font-size: 11.5px;">${escapeHtml(r.strategy)}</code></td>
-        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetsBadges}</div></td>
+        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetCell}</div></td>
         <td>${reasoningCell}</td>
         <td>
           <label class="switch">
@@ -2247,12 +2254,14 @@ curl -X POST ${baseUrl}/chat/completions \\
     }
 
     state.plugins.forEach((p) => {
+      if (p.enabled === false) return;
       const reasoningVar = (p.variables || []).find((v) => v.name === "reasoning_effort");
       const providerLevels = reasoningVar && Array.isArray(reasoningVar.options)
         ? reasoningVar.options
         : [];
 
       (p.models || []).forEach((m) => {
+        if (m.enabled === false) return;
         const parsed = splitReasoningSuffix(m.id);
         const entry = ensureEntry(parsed ? parsed.baseId : m.id, p);
         if (!parsed) {
@@ -2326,8 +2335,13 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     (rule && rule.targets ? rule.targets : []).forEach((target) => {
       const parsed = splitReasoningSuffix(target);
+      const targetId = parsed ? parsed.baseId : target;
+      // Ignore targets from removed providers or disabled models. They remain
+      // in the stored rule until it is saved again, but the editor should not
+      // present them as selectable.
+      if (!catalogById.has(targetId)) return;
       selectedTargets.push(
-        parsed ? { id: parsed.baseId, level: parsed.level } : { id: target, level: "" }
+        parsed ? { id: targetId, level: parsed.level } : { id: target, level: "" }
       );
     });
 

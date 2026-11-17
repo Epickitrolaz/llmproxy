@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from llmproxy.core.manager import (
     DEFAULT_REASONING_LEVEL,
+    REASONING_EFFORT_SUFFIXES,
     RULE_REASONING_OVERRIDE_KEY,
     plugin_manager,
     split_reasoning_suffix,
@@ -955,13 +956,36 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     )
 
 
-def _model_card(model_config: Any, owned_by: str) -> ModelCard:
+def _provider_reasoning_levels(plugin: Any) -> List[str]:
+    """Return provider-level reasoning options used when a model omits its own."""
+    for variable in getattr(plugin.metadata, "variables", []) or []:
+        if variable.name != "reasoning_effort" or not variable.options:
+            continue
+        levels: List[str] = []
+        for option in variable.options:
+            level = str(option or "").strip().lower()
+            if level in REASONING_EFFORT_SUFFIXES and level not in levels:
+                levels.append(level)
+        return levels
+    return []
+
+
+def _model_card(
+    model_config: Any, owned_by: str, plugin: Optional[Any] = None
+) -> ModelCard:
     supports_vision = bool(getattr(model_config, "supports_vision", False))
     modalities = ["text", "image"] if supports_vision else ["text"]
+    reasoning_levels = [
+        str(level).strip().lower()
+        for level in (getattr(model_config, "reasoning_levels", []) or [])
+        if str(level).strip().lower() in REASONING_EFFORT_SUFFIXES
+    ]
+    if not reasoning_levels and plugin is not None:
+        reasoning_levels = _provider_reasoning_levels(plugin)
     return ModelCard(
         id=model_config.id,
         owned_by=owned_by,
-        reasoning_levels=list(getattr(model_config, "reasoning_levels", []) or []),
+        reasoning_levels=reasoning_levels,
         context_window=getattr(model_config, "context_window", None),
         max_tokens=getattr(model_config, "max_tokens", None),
         supports_vision=supports_vision,
@@ -1010,7 +1034,7 @@ async def list_models():
 
     for model_config, plugin in active_models:
         if model_config.id not in seen:
-            cards.append(_model_card(model_config, plugin.metadata.id))
+            cards.append(_model_card(model_config, plugin.metadata.id, plugin))
             seen.add(model_config.id)
     return ModelListResponse(data=cards)
 
@@ -1025,7 +1049,7 @@ async def get_model(model_id: str):
 
     for model_config, plugin in active_models:
         if model_config.id == model_id:
-            return _model_card(model_config, plugin.metadata.id)
+            return _model_card(model_config, plugin.metadata.id, plugin)
     raise HTTPException(
         status_code=404,
         detail={
