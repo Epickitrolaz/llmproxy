@@ -64,13 +64,6 @@ class OpenRouterPlugin(BasePlugin):
             filename="openrouter.py",
             variables=[
                 PluginVariable(
-                    name="api_key",
-                    label="OpenRouter API Key",
-                    type="secret",
-                    default="",
-                    description="OpenRouter API key (accounts can also supply this)",
-                ),
-                PluginVariable(
                     name="base_url",
                     label="Base URL",
                     type="string",

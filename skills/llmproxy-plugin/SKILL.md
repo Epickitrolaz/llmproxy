@@ -128,7 +128,6 @@ Common variables:
 ```python
 PluginVariable(name="timeout", label="Timeout (seconds)", type="number", default=60)
 PluginVariable(name="base_url", label="Default Base URL", type="string", default="https://api.example.com/v1")
-PluginVariable(name="api_key", label="Default API Key", type="secret", default="")
 PluginVariable(name="load_balancing_strategy", label="Load Balancing Strategy", type="select",
                default="round_robin", options=["round_robin", "least_used", "fallback", "random"])
 PluginVariable(name="account_switch_cooldown", label="Account Cooldown (s)", type="number", default=10)
@@ -152,7 +151,9 @@ Rules:
 - `select` variables must have `options`.
 - `default` should be usable without editing.
 - Never put a real secret in `default`.
-- Use `secret` for API keys so the dashboard masks the value.
+- Never declare provider credentials (`api_key`, tokens, passwords) as
+  `PluginVariable`s. Credentials belong in the Accounts tab only; read them from
+  `account.api_key`.
 
 ## Model conventions
 
@@ -259,11 +260,13 @@ Do not send a new tool call when the last messages already contain tool output.
 The router selects an account and passes it as `account`:
 
 ```python
-api_key = account.api_key if account else str(variables.get("api_key") or "")
+api_key = account.api_key if account else ""
 base_url = (account.base_url if account and account.base_url else variables.get("base_url"))
 ```
 
-- `account.api_key` is the credential.
+- `account.api_key` is the only credential source. Do not add an `api_key`
+  plugin variable or read keys from `variables`.
+- The synthetic default account created by the Playground has no credentials.
 - `account.base_url` overrides the provider default.
 - `account.extra_config` holds provider-specific fields (`email`, `account_id`,
   `refresh_token`, `expires_at`, `project_id`, etc.).

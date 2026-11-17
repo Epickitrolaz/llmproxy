@@ -178,7 +178,8 @@ If local API keys exist, add `-H "Authorization: Bearer <key>"`.
   in the fixture or pass a valid key.
 - Plugin not found — the test loaded a template path that is not in `plugins/`.
   `tests/conftest.py` copies templates into `plugins/` if missing.
-- Network timeout — the plugin did not enter simulation mode. Use a test key such
-  as `test-key` or pass `account=None` with an empty `api_key` variable.
+- Network timeout — the plugin did not enter simulation mode. Pass an `Account`
+  with a test key such as `account.api_key="test-key"`, or pass `account=None`
+  so the plugin uses its offline simulation path.
 - `RuntimeError: no running event loop` — an async generator or coroutine was
   created outside `asyncio.run`/pytest-asyncio.

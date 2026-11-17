@@ -146,13 +146,6 @@ class AnthropicProxyPlugin(BasePlugin):
             filename="anthropic_proxy.py",
             variables=[
                 PluginVariable(
-                    name="api_key",
-                    label="Anthropic API Key",
-                    type="secret",
-                    default="",
-                    description="Anthropic console API key (accounts can also supply this)",
-                ),
-                PluginVariable(
                     name="base_url",
                     label="Base URL",
                     type="string",

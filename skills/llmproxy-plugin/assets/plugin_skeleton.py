@@ -64,13 +64,6 @@ class MyProviderPlugin(BasePlugin):
                     description="Upstream OpenAI-compatible base URL",
                 ),
                 PluginVariable(
-                    name="api_key",
-                    label="Default API Key",
-                    type="secret",
-                    default="",
-                    description="Used when no account is configured. Accounts override this.",
-                ),
-                PluginVariable(
                     name="load_balancing_strategy",
                     label="Load Balancing Strategy",
                     type="select",
@@ -343,7 +336,7 @@ class MyProviderPlugin(BasePlugin):
         variables: Dict[str, Any],
         account: Optional[Account],
     ) -> tuple[str, str, Optional[str]]:
-        api_key = account.api_key if account else str(variables.get("api_key") or "")
+        api_key = account.api_key if account else ""
         base_url = (
             account.base_url
             if (account and account.base_url)
