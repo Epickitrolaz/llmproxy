@@ -95,6 +95,41 @@ def test_templates_gallery_and_install_to_plugins(tmp_path, monkeypatch):
     assert vars_dict["account_switch_wait"]["default"] == 60
 
 
+def test_templates_do_not_expose_api_key_config_variables():
+    """Provider credentials belong to accounts, not plugin configuration variables."""
+    from llmproxy.dashboard.loader import load_plugin_from_file
+
+    templates_dir = Path(__file__).resolve().parent.parent / "templates"
+    credential_names = {
+        "api_key",
+        "anthropic_api_key",
+        "openai_api_key",
+        "openrouter_api_key",
+        "token",
+        "secret",
+        "password",
+        "bearer_token",
+    }
+
+    skeleton_path = (
+        Path(__file__).resolve().parent.parent
+        / "skills"
+        / "llmproxy-plugin"
+        / "assets"
+        / "plugin_skeleton.py"
+    )
+    template_paths = sorted(templates_dir.glob("*.py")) + [skeleton_path]
+
+    for template_path in template_paths:
+        plugin = load_plugin_from_file(template_path)
+        variable_names = {variable.name for variable in plugin.metadata.variables}
+        exposed = variable_names & credential_names
+        assert not exposed, (
+            f"{template_path.name} exposes credential configuration variable(s): "
+            f"{sorted(exposed)}"
+        )
+
+
 def test_test_keys_not_displayed_in_key_list(tmp_path, monkeypatch):
     """Verify that temporary test keys are not returned by GET /api/keys or added to the key list."""
     temp_plugins = tmp_path / "plugins"

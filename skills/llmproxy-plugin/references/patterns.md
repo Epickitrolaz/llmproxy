@@ -10,7 +10,7 @@ This is the most common case. The upstream accepts
 
 ```python
 async def chat_completion(self, request, model_config, variables, account=None):
-    api_key = account.api_key if account else str(variables.get("api_key") or "")
+    api_key = account.api_key if account else ""
     base_url = (
         account.base_url if account and account.base_url else str(variables["base_url"])
     ).rstrip("/")
