@@ -1364,9 +1364,9 @@ class AnthropicProxyPlugin(BasePlugin):
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async with client.stream("POST", url, headers=headers, json=body) as response:
-                response.raise_for_status()
                 if account is not None:
                     capture_rate_limit_headers(account, response.headers)
+                response.raise_for_status()
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line or line.startswith(":"):
@@ -1631,9 +1631,9 @@ class AnthropicProxyPlugin(BasePlugin):
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
             if account is not None:
                 capture_rate_limit_headers(account, response.headers)
+            response.raise_for_status()
             data = response.json()
 
         text_parts: List[str] = []
