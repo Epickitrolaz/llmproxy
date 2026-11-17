@@ -1,0 +1,4 @@
+services:
+  llmproxy:
+    volumes:
+      - ./llmproxy:/app/llmproxy
