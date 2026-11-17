@@ -98,7 +98,8 @@ button {
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* Equal side columns keep the tab selector centered in the viewport. */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   padding: 0 24px;
   position: sticky;
@@ -112,6 +113,7 @@ button {
   align-items: center;
   gap: 12px;
   justify-self: start;
+  min-width: 0;
 }
 
 .brand-logo {
@@ -595,6 +597,8 @@ button {
   flex-direction: column;
   justify-content: space-between;
   gap: 16px;
+  min-width: 0;
+  overflow: hidden;
   transition: border-color 0.15s ease;
 }
 
@@ -607,6 +611,12 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+}
+
+.provider-title-group {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .provider-title-group h3 {
@@ -614,13 +624,25 @@ button {
   font-weight: 600;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .provider-title-group .provider-id {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.provider-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  align-self: flex-start;
 }
 
 .provider-desc {
@@ -1968,6 +1990,34 @@ input:checked + .slider:before {
 
 .credits-panel-unavailable .credits-value {
   color: var(--ink-muted);
+}
+
+/* Non-bar usage details, used by providers that report totals or balances. */
+.usage-summary-panel {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-badge);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.usage-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+
+.usage-summary-row strong {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Accounts opted out of local usage/quota bookkeeping. */

@@ -23,9 +23,11 @@ from llmproxy.core.codex_oauth import (
     CODEX_SCOPES,
     codex_oauth,
 )
+from llmproxy.core.interface import BasePlugin
 from llmproxy.core.manager import plugin_manager
 from llmproxy.core.multimodal import normalize_message_content
 from llmproxy.core.security import redact_account, redact_api_key, require_admin
+from llmproxy.core.usage import stored_usage_limits
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
     find_plugin_file_path,
@@ -1579,6 +1581,76 @@ async def get_opencode_go_all_status():
                 "quota": {"error": str(item)},
             })
         else:
+            items.append(item)
+    return {"accounts": items}
+
+
+# =========================================================================
+# Generic plugin usage meters
+# =========================================================================
+
+@router.get("/provider-usage/status")
+async def get_provider_usage_status():
+    """Return live usage meters for every account whose provider exposes one.
+
+    Providers can either capture rate-limit headers on each upstream response
+    (stored in ``account.extra_config["usage_limits"]``) or implement
+    ``BasePlugin.fetch_usage_quota`` for a dedicated usage endpoint. Accounts
+    from providers without a meter are omitted entirely.
+    """
+    accounts = plugin_manager.get_accounts()
+
+    def _variables_for(provider_id: str) -> Dict[str, Any]:
+        cfg = plugin_manager.configs.get(provider_id) or {}
+        variables = cfg.get("variables") if isinstance(cfg, dict) else {}
+        return variables if isinstance(variables, dict) else {}
+
+    async def build(acc: Account) -> Optional[Dict[str, Any]]:
+        if acc.disable_usage_tracking:
+            return None
+
+        quota: Optional[Dict[str, Any]] = stored_usage_limits(acc)
+
+        if quota is None:
+            plugin = plugin_manager.get_plugin(acc.provider_id)
+            if plugin is None:
+                return None
+            implementation = getattr(type(plugin), "fetch_usage_quota", None)
+            if implementation is None or implementation is BasePlugin.fetch_usage_quota:
+                return None
+            try:
+                quota = await plugin.fetch_usage_quota(acc, _variables_for(acc.provider_id))
+            except Exception as exc:  # pragma: no cover - defensive
+                quota = {"error": str(exc)}
+            if not isinstance(quota, dict):
+                return None
+
+        payload = dict(quota)
+        payload.setdefault("account_id", acc.id)
+        payload.setdefault("account_name", acc.name)
+        return {
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "enabled": acc.enabled,
+            "rate_limited": not acc.is_available(),
+            "quota": payload,
+        }
+
+    results = await asyncio.gather(*(build(acc) for acc in accounts), return_exceptions=True)
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            acc = accounts[index]
+            items.append(
+                {
+                    "account_id": acc.id,
+                    "account_name": acc.name,
+                    "enabled": acc.enabled,
+                    "rate_limited": not acc.is_available(),
+                    "quota": {"error": str(item)},
+                }
+            )
+        elif item is not None:
             items.append(item)
     return {"accounts": items}
 

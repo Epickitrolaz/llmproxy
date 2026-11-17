@@ -255,6 +255,25 @@ Do not send a new tool call when the last messages already contain tool output.
   from streamed content and prompt tokens from the request. Do not invent precise
   numbers.
 
+## Provider usage meters
+
+The token usage above is per-request accounting. Account quota meters in the
+dashboard are separate and must come from the upstream.
+
+- Set `PluginMetadata(supports_usage_meter=True)` only when the provider exposes
+  a real quota, balance, or rate-limit window.
+- If the provider returns rate-limit headers, import
+  `capture_rate_limit_headers` from `llmproxy.core.usage` and call it with the
+  upstream response headers for both streaming and non-streaming requests. The
+  helper understands `x-ratelimit-*` and `anthropic-ratelimit-*` headers and
+  stores a normalized snapshot on the account.
+- If the provider has a dedicated usage endpoint, implement
+  `async def fetch_usage_quota(self, account, variables)` and return
+  `{"groups": [...], "balance": {...}, "summary": [...]}`. See
+  `BasePlugin.fetch_usage_quota` for the shape.
+- Do not fabricate a quota bar. Providers without `supports_usage_meter` are
+  omitted from the dashboard usage grid.
+
 ## Accounts and credentials
 
 The router selects an account and passes it as `account`:

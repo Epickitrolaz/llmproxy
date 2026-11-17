@@ -1146,7 +1146,7 @@ curl -X POST ${baseUrl}/chat/completions \\
               </h3>
               <div class="provider-id">${escapeHtml(p.id)} • ${escapeHtml(p.filename || p.id + ".py")}</div>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="provider-toggle-wrap">
               <label class="switch" title="Toggle plugin enabled status">
                 <input type="checkbox" class="provider-enable-toggle" data-id="${p.id}" ${p.enabled ? "checked" : ""}>
                 <span class="slider"></span>
@@ -2899,6 +2899,14 @@ curl -X POST ${baseUrl}/chat/completions \\
     return `${Math.max(1, minutes)}m left`;
   }
 
+  const DEDICATED_USAGE_PROVIDERS = new Set(["antigravity", "codex", "openrouter", "opencode_go"]);
+
+  function providerHasUsageMeter(providerId) {
+    if (DEDICATED_USAGE_PROVIDERS.has(providerId)) return true;
+    const plugin = (state.plugins || []).find((item) => item.id === providerId);
+    return Boolean(plugin && plugin.supports_usage_meter);
+  }
+
   async function renderStatusAccountsGrid(fetchFreshQuota = false) {
     if (!el.statusAccountsGrid) return;
     
@@ -3019,7 +3027,31 @@ curl -X POST ${baseUrl}/chat/completions \\
             .catch(() => {})
         : Promise.resolve();
 
-      await Promise.all([antigravityPromise, codexPromise, openrouterPromise, opencodeGoPromise]);
+      const pluginMeteredAccounts = accountsToDisplay.filter((account) => {
+        const plugin = (state.plugins || []).find((item) => item.id === account.provider_id);
+        return Boolean(plugin && plugin.supports_usage_meter);
+      });
+      const providerUsagePromise = pluginMeteredAccounts.length > 0
+        ? api("/api/provider-usage/status")
+            .then((usageStatusRes) => {
+              if (usageStatusRes && usageStatusRes.accounts) {
+                usageStatusRes.accounts.forEach((item) => {
+                  if (item.quota) {
+                    state.cachedQuotaData[item.account_id] = item.quota;
+                  }
+                });
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      await Promise.all([
+        antigravityPromise,
+        codexPromise,
+        openrouterPromise,
+        opencodeGoPromise,
+        providerUsagePromise,
+      ]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
 
@@ -3039,10 +3071,10 @@ curl -X POST ${baseUrl}/chat/completions \\
           ? `<span class="badge badge-active" style="font-size: 11px;">Active</span>`
           : `<span class="badge badge-muted" style="font-size: 11px;">Disabled</span>`;
 
-      // Render limits cleanly without verbose boilerplate
       let limitsHtml = "";
       const quota = quotaDataMap[acc.id];
       const isOpenRouterAccount = acc.provider_id === "openrouter";
+      const hasUsageMeter = providerHasUsageMeter(acc.provider_id);
 
       if (isOpenRouterAccount) {
         // OpenRouter has no per-account quota bars; show the live credit
@@ -3066,7 +3098,7 @@ curl -X POST ${baseUrl}/chat/completions \\
             </div>
           `;
         }
-      } else if (acc.disable_usage_tracking) {
+      } else if (hasUsageMeter && acc.disable_usage_tracking) {
         limitsHtml = `
           <div class="usage-tracking-disabled">
             <span>Usage tracking disabled</span>
@@ -3117,23 +3149,48 @@ curl -X POST ${baseUrl}/chat/completions \\
             `;
           });
         });
-      } else {
-        // Generic account limits indicator
-        const limitKey = "standard_quota";
-        const isHidden = hiddenSet.has(limitKey);
+      }
+
+      if (quota && quota.balance && typeof quota.balance === "object") {
+        const rawBalance = quota.balance.value;
+        const balanceValue = typeof rawBalance === "number"
+          ? `$${rawBalance.toFixed(2)}`
+          : String(rawBalance ?? "—");
         limitsHtml += `
-          <div class="limit-item ${isHidden ? 'hidden-limit' : ''}" data-key="${escapeHtml(limitKey)}">
-            <div class="limit-header">
-              <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">Standard Quota</span>
-              <button class="btn-hide-limit" data-acc="${acc.id}" data-key="${escapeHtml(limitKey)}" title="Hide this limit">✕</button>
-            </div>
-            <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 5px; overflow: hidden;">
-              <div style="background: #34d399; height: 100%; width: 100%;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
-              <span>Requests: ${acc.success_count || 0}</span>
-              <span>Errors: ${acc.error_count || 0}</span>
-            </div>
+          <div class="credits-panel">
+            <span class="credits-value">${escapeHtml(balanceValue)}</span>
+            <span class="credits-label">${escapeHtml(quota.balance.label || "available credit")}</span>
+          </div>
+        `;
+      }
+
+      if (quota && Array.isArray(quota.summary) && quota.summary.length > 0) {
+        limitsHtml += `
+          <div class="usage-summary-panel">
+            ${quota.summary.map((item) => `
+              <div class="usage-summary-row">
+                <span>${escapeHtml(item.label || "")}</span>
+                <strong>${escapeHtml(String(item.value ?? "—"))}</strong>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
+      // Providers without an upstream usage meter get no quota section at all.
+      // The old generic "Standard Quota" bar was fabricated data.
+      if (hasUsageMeter && !quota) {
+        limitsHtml += `
+          <div class="usage-tracking-disabled" title="The provider did not return a usage snapshot">
+            <span>Usage unavailable</span>
+            <span class="usage-tracking-hint">The provider has not reported usage yet</span>
+          </div>
+        `;
+      } else if (hasUsageMeter && quota && quota.error) {
+        limitsHtml += `
+          <div class="usage-tracking-disabled" title="${escapeHtml(quota.error)}">
+            <span>Usage unavailable</span>
+            <span class="usage-tracking-hint">${escapeHtml(quota.error)}</span>
           </div>
         `;
       }
@@ -3430,9 +3487,10 @@ curl -X POST ${baseUrl}/chat/completions \\
     const keyGroup = document.getElementById("account-key-group");
     const usageGroup = document.getElementById("account-usage-tracking-group");
 
-    // Generic OpenAI/Anthropic-compatible endpoints may be unlimited or billed
-    // elsewhere, so let each account opt out of local usage/quota bookkeeping.
-    const tracksUsage = selectedProvider === "openai_compatible" || selectedProvider === "anthropic_proxy";
+    // Only providers that expose a real upstream usage meter can opt out of it.
+    // Providers without a meter have no quota UI at all.
+    const selectedPlugin = (state.plugins || []).find((plugin) => plugin.id === selectedProvider);
+    const tracksUsage = Boolean(selectedPlugin && selectedPlugin.supports_usage_meter);
     if (usageGroup) {
       usageGroup.style.display = tracksUsage ? "flex" : "none";
     }
@@ -3801,7 +3859,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       const name = nameInput.value.trim();
       const provId = provSelect.value;
       const isEditing = Boolean(idInput.value);
-      const tracksUsage = provId === "openai_compatible" || provId === "anthropic_proxy";
+      const selectedPlugin = (state.plugins || []).find((plugin) => plugin.id === provId);
+      const tracksUsage = Boolean(selectedPlugin && selectedPlugin.supports_usage_meter);
       const disableUsageTracking = tracksUsage
         ? !(usageTrackingInput && usageTrackingInput.checked)
         : undefined;
