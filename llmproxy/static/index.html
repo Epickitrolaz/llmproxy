@@ -274,13 +274,14 @@
                 <th>Rule Name</th>
                 <th>Strategy</th>
                 <th>Target Models</th>
+                <th>Reasoning</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody id="rules-table-body">
               <tr>
-                <td colspan="6" style="text-align: center; color: var(--ink-muted); padding: 32px;">
+                <td colspan="7" style="text-align: center; color: var(--ink-muted); padding: 32px;">
                   No custom load balancing rules created yet. Click "+ Create Custom Rule" to expose a virtual model with routing strategies.
                 </td>
               </tr>
@@ -691,6 +692,16 @@
             </select>
           </div>
         </div>
+        <div class="form-group" style="display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding-top: 4px;">
+          <div>
+            <label class="form-label" style="margin-bottom: 2px;">Manual Reasoning per Target</label>
+            <span class="form-hint">On: choose a fixed reasoning level per target and do not advertise reasoning to clients. Off: clients choose the level and see the exposed options below.</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="rule-form-manual-reasoning" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
         <div class="form-group">
           <label class="form-label">Target Models across all Providers <span style="color: var(--accent-red);">*</span></label>
           <input type="text" class="form-input" id="rule-targets-search-input" placeholder="Search target models..." style="margin-bottom: 6px; font-size: 12px;">
@@ -705,6 +716,13 @@
             <!-- Populated dynamically with ordered, reorderable target rows -->
           </div>
           <span class="form-hint" id="rule-priority-hint">The first selected model is tried first. Use the arrows to change priority.</span>
+        </div>
+        <div class="form-group" id="rule-exposed-reasoning-group" style="display: none;">
+          <label class="form-label">Exposed Reasoning Levels</label>
+          <div id="rule-exposed-reasoning-levels" class="rule-exposed-levels">
+            <!-- Populated dynamically with valid level checkboxes -->
+          </div>
+          <span class="form-hint" id="rule-exposed-reasoning-hint">Only levels supported by every selected target (or remapped below) can be advertised.</span>
         </div>
         <div class="form-group">
           <label class="form-label">Description (Optional)</label>
@@ -950,6 +968,11 @@
           <label class="form-label">Parameters (JSON)</label>
           <textarea class="form-input" id="model-form-parameters" rows="3" placeholder='{"temperature": 0.7}' style="font-family: var(--font-mono); font-size: 12px;"></textarea>
           <span class="form-hint">Optional provider parameters merged into requests for this model.</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Reasoning Levels</label>
+          <input type="text" class="form-input" id="model-form-reasoning-levels" placeholder="none, low, medium, high">
+          <span class="form-hint">Comma-separated levels advertised to clients. Leave empty when the upstream does not support reasoning.</span>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
           <div>

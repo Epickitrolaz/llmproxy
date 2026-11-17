@@ -25,13 +25,15 @@ from llmproxy.schemas import (
 
 
 class MockProviderPlugin(BasePlugin):
+    REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+
     @property
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             id="mock_provider",
             name="Offline Mock Provider",
             description="Ultra-fast offline test provider for local verification and playground testing.",
-            version="1.0.0",
+            version="1.1.0",
             author="llmproxy",
             enabled=True,
             variables=[
@@ -43,6 +45,17 @@ class MockProviderPlugin(BasePlugin):
                     value="[Mock AI]",
                     required=False,
                     description="Prefix prepended to every generated response",
+                ),
+                PluginVariable(
+                    name="reasoning_effort",
+                    label="Default Reasoning Effort",
+                    type="select",
+                    default="default",
+                    options=["default", *self.REASONING_LEVELS],
+                    description=(
+                        "Simulated reasoning level. Request-level reasoning_effort "
+                        "takes precedence."
+                    ),
                 ),
                 PluginVariable(
                     name="proxy_enabled",
@@ -82,6 +95,7 @@ class MockProviderPlugin(BasePlugin):
                     context_window=128000,
                     max_tokens=4096,
                     supports_vision=True,
+                    reasoning_levels=list(self.REASONING_LEVELS),
                 ),
                 PluginModelConfig(
                     id="mock/mock-claude-3-5",
@@ -90,6 +104,7 @@ class MockProviderPlugin(BasePlugin):
                     context_window=200000,
                     max_tokens=8192,
                     supports_vision=True,
+                    reasoning_levels=list(self.REASONING_LEVELS),
                 ),
             ],
         )
@@ -120,6 +135,35 @@ class MockProviderPlugin(BasePlugin):
                         return True
         return False
 
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if not raw or raw in ("default", "auto"):
+            return None
+        if raw in ("off", "disabled", "false", "0"):
+            return "none"
+        return raw if raw in cls.REASONING_LEVELS else None
+
+    def _resolve_reasoning_effort(
+        self, request: ChatCompletionRequest, variables: Dict[str, Any]
+    ) -> Optional[str]:
+        raw: Any = request.reasoning_effort
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        if raw is None:
+            raw = extra.get("reasoning_effort")
+        if raw is None:
+            reasoning = extra.get("reasoning")
+            if isinstance(reasoning, dict):
+                raw = reasoning.get("effort")
+            elif reasoning:
+                raw = reasoning
+        effort = self._normalize_reasoning_effort(raw)
+        if effort is None and raw is None:
+            effort = self._normalize_reasoning_effort(variables.get("reasoning_effort"))
+        return effort
+
     async def chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -139,7 +183,15 @@ class MockProviderPlugin(BasePlugin):
         time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
         now_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         prompt_tokens = max(1, len(last_user_msg.split()))
-        completion_tokens = len(base_reply.split())
+        effort = self._resolve_reasoning_effort(request, variables or {})
+        reasoning_text = None
+        if effort and effort != "none":
+            reasoning_text = (
+                f"Simulated reasoning for model '{request.model}' at "
+                f"'{effort}' effort."
+            )
+        reasoning_tokens = len(reasoning_text.split()) if reasoning_text else 0
+        completion_tokens = len(base_reply.split()) + reasoning_tokens
         total_tokens = prompt_tokens + completion_tokens
         cache_requested = self._context_cache_requested(request)
         cached_tokens = max(0, prompt_tokens // 2) if cache_requested else 0
@@ -149,6 +201,9 @@ class MockProviderPlugin(BasePlugin):
             if cache_requested
             else ""
         )
+        reasoning_line = (
+            f"• **Reasoning:** simulated ({effort})\n" if reasoning_text else ""
+        )
         details = (
             f"\n\n---\n"
             f"**Execution Details:**\n"
@@ -157,6 +212,7 @@ class MockProviderPlugin(BasePlugin):
             f"• **Model:** {request.model}\n"
             f"• **Tokens:** {prompt_tokens} prompt, {completion_tokens} completion ({total_tokens} total)\n"
             f"{cache_line}"
+            f"{reasoning_line}"
             f"• **Account status:** No account configured (Simulation Mode)"
         )
         reply = base_reply + details
@@ -164,6 +220,10 @@ class MockProviderPlugin(BasePlugin):
         if cache_requested:
             usage_kwargs["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
             usage_kwargs["cache_read_input_tokens"] = cached_tokens
+        if reasoning_tokens:
+            usage_kwargs["completion_tokens_details"] = {
+                "reasoning_tokens": reasoning_tokens
+            }
         usage = CompletionUsage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -188,6 +248,19 @@ class MockProviderPlugin(BasePlugin):
                         )
                     ],
                 )
+                if reasoning_text:
+                    yield ChatCompletionChunk(
+                        id=chunk_id,
+                        created=created,
+                        model=request.model,
+                        choices=[
+                            ChatChoiceDelta(
+                                index=0,
+                                delta={"reasoning_content": reasoning_text},
+                                finish_reason=None,
+                            )
+                        ],
+                    )
                 for index in range(0, len(reply), 24):
                     yield ChatCompletionChunk(
                         id=chunk_id,
@@ -218,7 +291,15 @@ class MockProviderPlugin(BasePlugin):
             choices=[
                 ChatChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=reply),
+                    message=ChatMessage(
+                        role="assistant",
+                        content=reply,
+                        **(
+                            {"reasoning_content": reasoning_text}
+                            if reasoning_text
+                            else {}
+                        ),
+                    ),
                     finish_reason="stop",
                 )
             ],

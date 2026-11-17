@@ -27,7 +27,10 @@ class OpenAICompatiblePlugin(BasePlugin):
     """
     Generic OpenAI-compatible provider plugin.
     Compatible with Ollama, vLLM, LMStudio, LocalAI, and any OpenAI API clone.
-    Supports multi-account load balancing, custom headers, streaming SSE, and fallback simulation.
+    Supports multi-account load balancing, custom headers, streaming SSE, prompt
+    cache hints, optional reasoning_effort forwarding, and fallback simulation.
+    Upstream reasoning capabilities vary, so model cards stay unadvertised by
+    default; set reasoning_levels on custom models when the target supports it.
     """
 
     def __init__(self):
@@ -91,6 +94,26 @@ class OpenAICompatiblePlugin(BasePlugin):
                     description="JSON dictionary of default custom HTTP headers",
                 ),
                 PluginVariable(
+                    name="reasoning_effort",
+                    label="Default Reasoning Effort",
+                    type="select",
+                    default="default",
+                    options=[
+                        "default",
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                    ],
+                    description=(
+                        "Forwarded to OpenAI-compatible upstreams as reasoning_effort "
+                        "when they support it. A request-level value takes precedence."
+                    ),
+                ),
+                PluginVariable(
                     name="proxy_enabled",
                     label="Enable External Proxy",
                     type="boolean",
@@ -139,12 +162,45 @@ class OpenAICompatiblePlugin(BasePlugin):
     def _apply_cache_fields(body: Dict[str, Any], request: ChatCompletionRequest) -> None:
         """Forward OpenAI prompt-cache routing hints and vendor cache options."""
         extra = request.extra_body if isinstance(request.extra_body, dict) else {}
-        for key in ("prompt_cache_key", "prompt_cache_retention"):
+        for key in (
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "cache_control",
+            "cached_content",
+            "cachedContent",
+        ):
             value = getattr(request, key, None)
             if value is None:
                 value = extra.get(key)
             if value is not None:
                 body[key] = value
+        cache = extra.get("cache")
+        if isinstance(cache, dict):
+            body["cache"] = cache
+
+    @staticmethod
+    def _resolve_reasoning_effort(
+        request: ChatCompletionRequest, variables: Dict[str, Any]
+    ) -> Optional[str]:
+        """Return the reasoning level to forward to the upstream."""
+        raw: Any = request.reasoning_effort
+        extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+        if raw is None:
+            raw = extra.get("reasoning_effort")
+        if raw is None:
+            reasoning = extra.get("reasoning")
+            if isinstance(reasoning, dict):
+                raw = reasoning.get("effort")
+            elif reasoning:
+                raw = reasoning
+        if raw is None:
+            raw = variables.get("reasoning_effort")
+        level = str(raw or "").strip().lower()
+        if not level or level in ("default", "auto"):
+            return None
+        if level in ("off", "disabled", "false", "0"):
+            return "none"
+        return level
 
     def _is_test_mode(self, api_key: str, base_url: str) -> bool:
         key = api_key.lower().strip()
@@ -478,6 +534,14 @@ class OpenAICompatiblePlugin(BasePlugin):
             body["response_format"] = request.response_format
         if request.stop is not None:
             body["stop"] = request.stop
+
+        reasoning_effort = self._resolve_reasoning_effort(request, variables)
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+            if isinstance(request.extra_body, dict) and isinstance(
+                request.extra_body.get("reasoning"), dict
+            ):
+                body.setdefault("reasoning", request.extra_body["reasoning"])
 
         if request.stream:
             # Ask upstream for a terminal usage chunk even when the client did

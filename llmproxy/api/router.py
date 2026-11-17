@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from llmproxy.core.manager import plugin_manager
+from llmproxy.core.manager import RULE_REASONING_OVERRIDE_KEY, plugin_manager
 from llmproxy.core.multimodal import (
     estimate_content_tokens,
     is_image_part,
@@ -78,6 +78,26 @@ def _usage_cache_tokens(usage: Optional[CompletionUsage]) -> tuple[int, int]:
         return max(0, int(cache_read or 0)), max(0, int(cache_created or 0))
     except (TypeError, ValueError):
         return 0, 0
+
+
+def _request_reasoning_effort(request: ChatCompletionRequest) -> Optional[str]:
+    """Return the downstream reasoning level from the standard request fields."""
+    if request.reasoning_effort:
+        level = str(request.reasoning_effort).strip().lower()
+        if level and level not in ("auto", "default"):
+            return level
+    extra = request.extra_body if isinstance(request.extra_body, dict) else {}
+    raw = extra.get("reasoning_effort")
+    if raw is None:
+        reasoning = extra.get("reasoning")
+        if isinstance(reasoning, dict):
+            raw = reasoning.get("effort")
+        elif isinstance(reasoning, str):
+            raw = reasoning
+    level = str(raw or "").strip().lower()
+    if level and level not in ("auto", "default"):
+        return level
+    return None
 
 
 def _safe_float(val: Any, default: float) -> float:
@@ -432,6 +452,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     resolved = plugin_manager.resolve_model(
         request.model,
         require_vision=messages_have_images(request.messages),
+        reasoning_effort=_request_reasoning_effort(request),
     )
     if resolved is None:
         latency_ms = round((time.time() - start_time) * 1000, 2)
@@ -461,6 +482,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         )
 
     model_config, plugin, variables = resolved
+    # A client-reasoning rule may remap the requested level for the selected
+    # target (for example high -> max). Apply it to the request so plugins that
+    # prefer request.reasoning_effort over their configured variable see it too.
+    variables = dict(variables)
+    rule_reasoning = variables.pop(RULE_REASONING_OVERRIDE_KEY, None)
+    if rule_reasoning:
+        request = request.model_copy(update={"reasoning_effort": rule_reasoning})
     # A custom load-balancing rule is only a virtual entry point. Logs and the
     # dashboard should attribute the request to the model that actually served
     # it, together with that model's provider.
@@ -937,6 +965,7 @@ def _rule_model_card(rule: Any, active_models: List[Tuple[Any, Any]]) -> ModelCa
         id=rule.model_id,
         owned_by="load_balancer",
         supports_vision=supports_vision,
+        reasoning_levels=list(plugin_manager.get_rule_reasoning_levels(rule)),
         input_modalities=modalities,
         architecture={
             "input_modalities": modalities,

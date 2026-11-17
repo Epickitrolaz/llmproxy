@@ -387,6 +387,15 @@ class LoadBalancingRule(BaseModel):
     enabled: bool = True
     strategy: Literal["round_robin", "least_used", "random", "fallback", "priority"] = "round_robin"
     targets: List[str] = Field(default_factory=list)  # Target model IDs
+    # When true the rule fixes reasoning per target (the historical behavior)
+    # and does not advertise a reasoning selector to clients. When false the
+    # downstream client controls reasoning and the rule advertises the levels
+    # selected in ``exposed_reasoning_levels``.
+    manual_reasoning: bool = True
+    exposed_reasoning_levels: List[str] = Field(default_factory=list)
+    # Per-target remapping of a client-requested level to the level that target
+    # should receive, e.g. {"cx/gpt-6-luna": {"high": "max"}}.
+    reasoning_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
     created_at: float = Field(default_factory=time.time)
     description: Optional[str] = ""
 
@@ -397,6 +406,9 @@ class LoadBalancingRuleCreate(BaseModel):
     enabled: bool = True
     strategy: str = "round_robin"
     targets: List[str] = Field(default_factory=list)
+    manual_reasoning: bool = True
+    exposed_reasoning_levels: List[str] = Field(default_factory=list)
+    reasoning_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
     description: Optional[str] = ""
 
 
@@ -406,6 +418,9 @@ class LoadBalancingRuleUpdate(BaseModel):
     enabled: Optional[bool] = None
     strategy: Optional[str] = None
     targets: Optional[List[str]] = None
+    manual_reasoning: Optional[bool] = None
+    exposed_reasoning_levels: Optional[List[str]] = None
+    reasoning_overrides: Optional[Dict[str, Dict[str, str]]] = None
     description: Optional[str] = None
 
 

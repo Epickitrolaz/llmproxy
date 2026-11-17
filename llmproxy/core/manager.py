@@ -44,6 +44,11 @@ REASONING_EFFORT_SUFFIXES = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
 
+# Internal marker returned by ``resolve_model`` when a load-balancing rule
+# remaps the client's reasoning level. The router applies it to the request
+# before invoking the plugin and strips it from the plugin variables.
+RULE_REASONING_OVERRIDE_KEY = "__llmproxy_rule_reasoning_effort"
+
 
 def split_reasoning_suffix(model_id: str) -> Tuple[str, Optional[str]]:
     """Split ``<model>:<level>`` into its base model ID and reasoning level."""
@@ -587,6 +592,88 @@ class PluginManager:
         """Get a custom load balancing rule by ID."""
         return self.rules.get(rule_id)
 
+    @staticmethod
+    def _normalize_rule_reasoning(rule: LoadBalancingRule) -> None:
+        """Sanitize exposed levels and per-target reasoning overrides."""
+        levels: List[str] = []
+        for raw_level in rule.exposed_reasoning_levels or []:
+            level = str(raw_level or "").strip().lower()
+            if level in REASONING_EFFORT_SUFFIXES and level not in levels:
+                levels.append(level)
+        rule.exposed_reasoning_levels = levels
+
+        overrides: Dict[str, Dict[str, str]] = {}
+        raw_overrides = rule.reasoning_overrides
+        if isinstance(raw_overrides, dict):
+            for raw_target, mapping in raw_overrides.items():
+                if not isinstance(mapping, dict):
+                    continue
+                target_base, _ = split_reasoning_suffix(str(raw_target))
+                clean: Dict[str, str] = {}
+                for raw_source, raw_destination in mapping.items():
+                    source = str(raw_source or "").strip().lower()
+                    destination = str(raw_destination or "").strip().lower()
+                    if (
+                        source in REASONING_EFFORT_SUFFIXES
+                        and destination in REASONING_EFFORT_SUFFIXES
+                    ):
+                        clean[source] = destination
+                if clean:
+                    overrides.setdefault(target_base, {}).update(clean)
+        rule.reasoning_overrides = overrides
+
+    @staticmethod
+    def _model_reasoning_levels(
+        model_config: PluginModelConfig, plugin: BasePlugin
+    ) -> List[str]:
+        """Return the reasoning levels a target model can actually serve."""
+        levels = [
+            str(level).strip().lower()
+            for level in (getattr(model_config, "reasoning_levels", []) or [])
+            if str(level).strip().lower() in REASONING_EFFORT_SUFFIXES
+        ]
+        if levels:
+            return levels
+        for variable in plugin.metadata.variables:
+            if variable.name != "reasoning_effort" or not variable.options:
+                continue
+            return [
+                str(option).strip().lower()
+                for option in variable.options
+                if str(option).strip().lower() in REASONING_EFFORT_SUFFIXES
+            ]
+        return []
+
+    def get_rule_reasoning_levels(self, rule: LoadBalancingRule) -> List[str]:
+        """Return the levels safe to advertise for an auto-reasoning rule."""
+        if rule.manual_reasoning:
+            return []
+        configured = list(rule.exposed_reasoning_levels or [])
+        if not configured:
+            return []
+
+        known = {
+            model_config.id: (model_config, plugin)
+            for model_config, plugin in self.get_all_active_models()
+        }
+        valid: Optional[Set[str]] = None
+        for raw_target in rule.targets or []:
+            target_id, _ = split_reasoning_suffix(raw_target)
+            pair = known.get(target_id)
+            if pair is None:
+                continue
+            model_config, plugin = pair
+            native = set(self._model_reasoning_levels(model_config, plugin))
+            target_valid = set(native)
+            for source, destination in (rule.reasoning_overrides.get(target_id) or {}).items():
+                if destination in native:
+                    target_valid.add(source)
+            valid = target_valid if valid is None else valid & target_valid
+
+        if valid is None:
+            return configured
+        return [level for level in configured if level in valid]
+
     def add_load_balancing_rule(
         self, rule_data: Union[LoadBalancingRule, LoadBalancingRuleCreate, Dict[str, Any]]
     ) -> LoadBalancingRule:
@@ -600,12 +687,16 @@ class PluginManager:
                 enabled=rule_data.enabled,
                 strategy=rule_data.strategy,
                 targets=rule_data.targets,
+                manual_reasoning=rule_data.manual_reasoning,
+                exposed_reasoning_levels=rule_data.exposed_reasoning_levels,
+                reasoning_overrides=rule_data.reasoning_overrides,
                 description=rule_data.description or "",
             )
         else:
             r_dict = dict(rule_data)
             rule = LoadBalancingRule.model_validate(r_dict)
 
+        self._normalize_rule_reasoning(rule)
         self.rules[rule.id] = rule
         self._save_rules()
         return rule
@@ -623,6 +714,7 @@ class PluginManager:
             if v is not None and hasattr(rule, k):
                 setattr(rule, k, v)
 
+        self._normalize_rule_reasoning(rule)
         self._save_rules()
         return rule
 
@@ -1545,17 +1637,52 @@ class PluginManager:
         return active
 
     def resolve_model(
-        self, model_id: str, require_vision: bool = False
+        self,
+        model_id: str,
+        require_vision: bool = False,
+        reasoning_effort: Optional[str] = None,
     ) -> Optional[Tuple[PluginModelConfig, BasePlugin, Dict[str, Any]]]:
-        """Resolve a model ID to its plugin, model config, and active variables."""
-        # 1. First check if model_id is a custom load balancing rule
+        """Resolve a model ID to its plugin, model config, and active variables.
+
+        ``reasoning_effort`` is the downstream client's requested level. Rules in
+        automatic reasoning mode use it to remap per-target levels; rules in
+        manual mode keep their configured per-target suffix unchanged.
+        """
+        requested_base, requested_level = split_reasoning_suffix(model_id)
+        effective_reasoning = (reasoning_effort or requested_level or "").strip().lower() or None
+
+        # 1. First check if model_id is a custom load balancing rule. A rule also
+        #    accepts the generic `<rule>:<level>` spelling so clients can use the
+        #    same reasoning suffix for virtual and provider models.
         for rule in self.rules.values():
-            if rule.enabled and rule.model_id == model_id:
-                target_model_id = self.select_rule_target(rule, require_vision=require_vision)
-                if target_model_id and target_model_id != model_id:
-                    res = self.resolve_model(target_model_id, require_vision=require_vision)
-                    if res is not None:
-                        return res
+            if not rule.enabled:
+                continue
+            if rule.model_id not in (model_id, requested_base):
+                continue
+            target_model_id = self.select_rule_target(rule, require_vision=require_vision)
+            if not target_model_id or target_model_id == rule.model_id:
+                continue
+
+            if rule.manual_reasoning:
+                res = self.resolve_model(target_model_id, require_vision=require_vision)
+                if res is not None:
+                    return res
+                continue
+
+            target_base, target_level = split_reasoning_suffix(target_model_id)
+            res = self.resolve_model(target_base, require_vision=require_vision)
+            if res is None:
+                continue
+
+            model_config, plugin, vars_dict = res
+            selected_level = effective_reasoning or target_level
+            if selected_level:
+                target_overrides = rule.reasoning_overrides.get(target_base) or {}
+                mapped_level = target_overrides.get(selected_level, selected_level)
+                vars_dict = dict(vars_dict)
+                vars_dict["reasoning_effort"] = mapped_level
+                vars_dict[RULE_REASONING_OVERRIDE_KEY] = mapped_level
+            return (model_config, plugin, vars_dict)
 
         # 2. Check directly across active plugin models
         for model_config, plugin in self.get_all_active_models():
@@ -1567,12 +1694,11 @@ class PluginManager:
         #    `gpt-6-luna:high`), even when the provider does not publish a
         #    dedicated variant model. Plugins read `reasoning_effort` from
         #    their variables, so a per-request copy keeps other requests intact.
-        base_id, reasoning_effort = split_reasoning_suffix(model_id)
-        if reasoning_effort:
+        if requested_level:
             for model_config, plugin in self.get_all_active_models():
-                if model_config.id == base_id:
+                if model_config.id == requested_base:
                     vars_dict = self.get_plugin_variables(plugin.metadata.id)
-                    vars_dict["reasoning_effort"] = reasoning_effort
+                    vars_dict["reasoning_effort"] = requested_level
                     return (model_config, plugin, vars_dict)
         return None
 

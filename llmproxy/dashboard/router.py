@@ -80,6 +80,7 @@ class PluginModelUpdate(BaseModel):
     context_window: Optional[int] = None
     max_tokens: Optional[int] = None
     supports_vision: Optional[bool] = None
+    reasoning_levels: Optional[List[str]] = None
     parameters: Optional[Dict[str, Any]] = None
 
 
@@ -605,6 +606,8 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
         target_model.max_tokens = body.max_tokens
     if body.supports_vision is not None:
         target_model.supports_vision = body.supports_vision
+    if body.reasoning_levels is not None:
+        target_model.reasoning_levels = body.reasoning_levels
     if body.parameters is not None:
         target_model.parameters = body.parameters
 
