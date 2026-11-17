@@ -69,7 +69,8 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Multi-provider tabbed view designed to scale cleanly across 50+ providers.
   - Two-row layout of rounded square account cards sorted by provider name (pinned providers first).
   - Clean limit progress bars with an option to hide specific limits that do not apply to a given account.
-  - OpenAI-compatible and Anthropic-compatible accounts can disable **Track usage &amp; quota** individually, which stops local request counters and rate-limit cooldowns for unlimited or externally billed endpoints.
+  - Providers that expose a live usage meter set `supports_usage_meter`; the dashboard then shows real limits instead of a fabricated quota bar. Rate-limit headers (`x-ratelimit-*` and `anthropic-ratelimit-*`) are normalized automatically, and providers with a dedicated usage endpoint implement `fetch_usage_quota` (for example Ollama Cloud balance and 30-day usage).
+  - Metered accounts can disable **Track usage &amp; quota** individually, which stops local request counters and rate-limit cooldowns for unlimited or externally billed endpoints. Providers without a usage meter show no quota section at all.
   - OpenRouter accounts display their live available credit balance as prominent text instead of a usage bar.
   - OpenCode Go accounts display live rolling, weekly, and monthly usage from the Go usage API.
   - **CLIProxyAPI-compatible usage hub**: T3 Code and OpenCode can read pooled account limits through `/v0/management/auth-files` and `/v0/management/api-call`. The hub URL and management key are shown on the **Overview** tab. OpenCode Go accounts are included with the `opencode` provider kind.

@@ -312,6 +312,9 @@ class PluginMetadata(BaseModel):
     enabled: bool = True
     pinned: bool = False
     filename: Optional[str] = None
+    # Plugins that expose a live upstream usage/quota meter set this to True and
+    # either capture rate-limit headers or implement ``fetch_usage_quota``.
+    supports_usage_meter: bool = False
     variables: List[PluginVariable] = Field(default_factory=list)
     models: List[PluginModelConfig] = Field(default_factory=list)
 

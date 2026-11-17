@@ -52,3 +52,28 @@ class BasePlugin(ABC):
             if var.required and not variables.get(var.name):
                 errors.append(f"Variable '{var.name}' ({var.label}) is required.")
         return errors
+
+    async def fetch_usage_quota(
+        self,
+        account: Optional[Account],
+        variables: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Return a live usage/quota snapshot for an account.
+
+        Plugins that expose a usage meter implement this method and return::
+
+            {
+                "groups": [
+                    {"displayName": "Rate limits", "buckets": [
+                        {"bucketId": "requests", "displayName": "Requests",
+                         "usedPercent": 12.5, "resetTime": "2026-01-01T00:00:00Z"},
+                    ]},
+                ],
+                "balance": {"value": 12.5, "label": "Available credits"},
+                "summary": [{"label": "Requests (30d)", "value": "42"}],
+            }
+
+        ``balance`` and ``summary`` are optional. Returning ``None`` means the
+        provider has no usage meter for this account.
+        """
+        return None

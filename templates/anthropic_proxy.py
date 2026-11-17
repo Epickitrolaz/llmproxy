@@ -21,6 +21,7 @@ from llmproxy.core.multimodal import (
     is_image_part,
     to_anthropic_image_block,
 )
+from llmproxy.core.usage import capture_rate_limit_headers
 from llmproxy.schemas import (
     Account,
     ChatChoice,
@@ -144,6 +145,7 @@ class AnthropicProxyPlugin(BasePlugin):
             author="Anthropic",
             enabled=True,
             filename="anthropic_proxy.py",
+            supports_usage_meter=True,
             variables=[
                 PluginVariable(
                     name="base_url",
@@ -1362,6 +1364,8 @@ class AnthropicProxyPlugin(BasePlugin):
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             async with client.stream("POST", url, headers=headers, json=body) as response:
+                if account is not None:
+                    capture_rate_limit_headers(account, response.headers)
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -1627,6 +1631,8 @@ class AnthropicProxyPlugin(BasePlugin):
 
         async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             response = await client.post(url, headers=headers, json=payload)
+            if account is not None:
+                capture_rate_limit_headers(account, response.headers)
             response.raise_for_status()
             data = response.json()
 

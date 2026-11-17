@@ -220,6 +220,13 @@ also add a terminal usage-only chunk for `stream_options.include_usage`.
 The router estimates tokens if the plugin omits usage. Do not fabricate precise
 usage when the upstream does not report it.
 
+Account quota meters are opt-in. Set `supports_usage_meter=True` only when the
+upstream exposes live quota, balance, or rate-limit windows. Call
+`capture_rate_limit_headers(account, response.headers)` after each upstream call
+when the provider returns `x-ratelimit-*` or `anthropic-ratelimit-*` headers, or
+implement `fetch_usage_quota(account, variables)` for a dedicated usage API.
+Providers without a meter show no quota section in the dashboard.
+
 ## Router request flow
 
 `POST /v1/chat/completions`:
