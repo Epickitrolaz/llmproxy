@@ -1915,7 +1915,7 @@ curl -X POST ${baseUrl}/chat/completions \\
 
       tr.querySelector(".fs-model-toggle").addEventListener("change", async (e) => {
         try {
-          await api(`/api/plugins/${plugin.id}/models/${m.id}`, {
+          await api(`/api/plugins/${plugin.id}/models/${encodeURIComponent(m.id)}`, {
             method: "PUT",
             body: JSON.stringify({ enabled: e.target.checked }),
           });
@@ -1940,7 +1940,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         });
         if (ok) {
           try {
-            await api(`/api/plugins/${plugin.id}/models/${m.id}`, { method: "DELETE" });
+            await api(`/api/plugins/${plugin.id}/models/${encodeURIComponent(m.id)}`, { method: "DELETE" });
             showToast(`Model '${m.id}' removed`);
             await fetchPlugins();
             const updatedP = state.plugins.find((p) => p.id === plugin.id);

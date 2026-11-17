@@ -570,7 +570,7 @@ async def add_custom_model(plugin_id: str, model_config: PluginModelConfig):
     }
 
 
-@router.put("/plugins/{plugin_id}/models/{model_id}")
+@router.put("/plugins/{plugin_id}/models/{model_id:path}")
 async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUpdate):
     """Edit model properties (name, upstream_model, enabled, parameters, context window, max tokens)."""
     _ensure_plugins_loaded()
@@ -623,7 +623,7 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
     }
 
 
-@router.delete("/plugins/{plugin_id}/models/{model_id}")
+@router.delete("/plugins/{plugin_id}/models/{model_id:path}")
 async def delete_custom_model(plugin_id: str, model_id: str):
     """Remove/delete a model from a plugin."""
     _ensure_plugins_loaded()

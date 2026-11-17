@@ -279,6 +279,45 @@ def test_models_management(client):
     assert del_404.status_code == 404
 
 
+def test_models_management_with_slash_in_model_id(client):
+    """Model IDs containing '/' (for example 'ocg/glm-5.3') must be editable and deletable."""
+    client.post(
+        "/api/plugins",
+        json={"filename": "test_plugin.py", "code": SAMPLE_PLUGIN_CODE},
+    )
+
+    model_id = "ocg/glm-5.3"
+    add_res = client.post(
+        "/api/plugins/test_plugin/models",
+        json={"id": model_id, "name": "Slash Model", "upstream_model": "glm-5.3"},
+    )
+    assert add_res.status_code == 200
+
+    # Toggle enabled (raw slash in the URL path, as the dashboard sends it)
+    put_res = client.put(
+        f"/api/plugins/test_plugin/models/{model_id}",
+        json={"enabled": False},
+    )
+    assert put_res.status_code == 200
+    assert put_res.json()["model"]["id"] == model_id
+    assert put_res.json()["model"]["enabled"] is False
+
+    # Percent-encoded form must resolve to the same model
+    encoded_res = client.put(
+        "/api/plugins/test_plugin/models/ocg%2Fglm-5.3",
+        json={"enabled": True},
+    )
+    assert encoded_res.status_code == 200
+    assert encoded_res.json()["model"]["enabled"] is True
+
+    delete_res = client.delete(f"/api/plugins/test_plugin/models/{model_id}")
+    assert delete_res.status_code == 200
+    assert delete_res.json()["status"] == "ok"
+
+    missing_res = client.delete(f"/api/plugins/test_plugin/models/{model_id}")
+    assert missing_res.status_code == 404
+
+
 def test_playground_chat_and_telemetry(client):
     """Test interactive chat testing, logs collection, and stats metrics."""
     client.post(
