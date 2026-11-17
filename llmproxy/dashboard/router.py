@@ -1898,6 +1898,37 @@ async def test_chat(req: TestChatRequest):
             strategy=strategy,
             exclude_account_ids=excluded_accounts,
         )
+        if not current_account:
+            cooling_down = [
+                account
+                for account in accounts
+                if account.rate_limited_until
+                and account.rate_limited_until > time.time()
+            ]
+            if cooling_down:
+                min_wait = max(
+                    1,
+                    int(
+                        min(
+                            account.rate_limited_until - time.time()
+                            for account in cooling_down
+                        )
+                    ),
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"All accounts for provider '{matched_plugin.metadata.id}' "
+                        f"are in cooldown. Retry in {min_wait}s."
+                    ),
+                )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"No active accounts available for provider "
+                    f"'{matched_plugin.metadata.id}'"
+                ),
+            )
     if not current_account:
         current_account = Account(
             id=f"default-{matched_plugin.metadata.id}",

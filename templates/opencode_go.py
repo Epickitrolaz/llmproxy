@@ -684,10 +684,14 @@ class OpenCodeGoPlugin(BasePlugin):
         return proxy or None
 
     @staticmethod
-    def _is_test_mode(api_key: str) -> bool:
-        if not api_key:
+    def _is_test_mode(api_key: str, account: Optional[Account] = None) -> bool:
+        key = (api_key or "").lower().strip()
+        if not key:
+            if account is not None and not str(account.id).startswith("default-"):
+                raise ValueError(
+                    f"Account '{account.name}' has no API key configured."
+                )
             return True
-        key = api_key.lower().strip()
         return key.startswith(TEST_KEY_PREFIXES) or key in TEST_KEYS
 
     # ==========================================================================
@@ -951,7 +955,7 @@ class OpenCodeGoPlugin(BasePlugin):
         timeout = _number(variables.get("timeout"), DEFAULT_TIMEOUT)
         proxy = self._resolve_proxy(variables, account)
 
-        if self._is_test_mode(api_key):
+        if self._is_test_mode(api_key, account):
             if request.stream:
                 return self._mock_stream(request, model_config, account=account)
             return self._mock_response(request, model_config, account=account)

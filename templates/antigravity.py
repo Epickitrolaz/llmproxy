@@ -554,10 +554,14 @@ class AntigravityPlugin(BasePlugin):
             usage.cache_read_input_tokens = int(cached_tokens)
         return usage
 
-    def _is_test_mode(self, api_key: str) -> bool:
-        if not api_key:
+    def _is_test_mode(self, api_key: str, account: Optional[Account] = None) -> bool:
+        key = (api_key or "").lower().strip()
+        if not key:
+            if account is not None and not str(account.id).startswith("default-"):
+                raise ValueError(
+                    f"Account '{account.name}' has no API key configured."
+                )
             return True
-        key = api_key.lower().strip()
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
         return any(key.startswith(p) for p in prefixes) or key in ("test-key", "test_key", "secret123")
 
@@ -1212,7 +1216,7 @@ class AntigravityPlugin(BasePlugin):
             request, model_config, variables
         )
 
-        if self._is_test_mode(api_key):
+        if self._is_test_mode(api_key, account):
             time_taken_ms = max(0.5, round((time.perf_counter() - start_t) * 1000.0, 2))
             if request.stream:
                 return self._mock_stream(

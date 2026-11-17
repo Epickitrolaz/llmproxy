@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from llmproxy.dashboard.loader import load_plugin_from_file
 from llmproxy.schemas import (
     ChatCompletionChunk,
@@ -16,6 +18,20 @@ from llmproxy.schemas import (
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = ROOT / "skills" / "llmproxy-plugin"
 SKELETON = SKILL_DIR / "assets" / "plugin_skeleton.py"
+
+
+def test_plugin_skeleton_rejects_real_account_without_key():
+    from llmproxy.schemas import Account
+
+    plugin = load_plugin_from_file(SKELETON.resolve())
+    real_account = Account(
+        id="acc_real",
+        provider_id="my_provider",
+        name="Real Account",
+        api_key="",
+    )
+    with pytest.raises(ValueError, match="no API key configured"):
+        plugin._is_test_mode("", real_account)
 
 
 def test_agents_guide_covers_core_workflows():

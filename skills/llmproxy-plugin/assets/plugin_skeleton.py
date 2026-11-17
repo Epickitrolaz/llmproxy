@@ -141,10 +141,18 @@ class MyProviderPlugin(BasePlugin):
     # Simulation mode: keeps dashboard tests and offline development usable
     # ------------------------------------------------------------------
 
-    def _is_test_mode(self, api_key: str) -> bool:
+    def _is_test_mode(
+        self, api_key: str, account: Optional[Account] = None
+    ) -> bool:
         key = (api_key or "").lower().strip()
+        if not key:
+            if account is not None and not str(account.id).startswith("default-"):
+                raise ValueError(
+                    f"Account '{account.name}' has no API key configured."
+                )
+            return True
         prefixes = ("test", "mock", "sk-test", "dummy", "fake", "offline", "sample")
-        return not key or any(key.startswith(prefix) for prefix in prefixes) or key in (
+        return any(key.startswith(prefix) for prefix in prefixes) or key in (
             "test-key",
             "test_key",
             "secret123",
@@ -436,7 +444,7 @@ class MyProviderPlugin(BasePlugin):
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
         api_key, url, proxy = self._resolve_connection(variables, account)
 
-        if self._is_test_mode(api_key):
+        if self._is_test_mode(api_key, account):
             if request.stream:
                 return self._mock_stream(request, model_config, account=account)
             return self._mock_response(request, model_config, account=account)

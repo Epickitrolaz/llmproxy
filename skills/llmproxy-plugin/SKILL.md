@@ -347,14 +347,24 @@ the router owns that logic.
 
 ## Simulation mode
 
-Every provider should work without credentials for dashboard tests and offline
-development. Detect an empty/test key and return a deterministic response:
+Simulation is only for offline tests, explicit test/mock keys, and the synthetic
+default account used when no provider account is configured. It must never hide
+a real account failure.
 
 ```python
-def _is_test_mode(self, api_key: str) -> bool:
+def _is_test_mode(self, api_key: str, account=None) -> bool:
     key = (api_key or "").lower().strip()
-    return not key or key.startswith(("test", "mock", "dummy", "fake", "offline"))
+    if not key:
+        if account is not None and not str(account.id).startswith("default-"):
+            raise ValueError(f"Account '{account.name}' has no API key configured.")
+        return True  # no account configured: offline playground/testing
+    return key.startswith(("test", "mock", "dummy", "fake", "offline"))
 ```
+
+Never simulate when a real account is cooling down, disabled, missing a required
+credential, rate limited, or when the upstream returned an error. The dashboard
+test/playground endpoints must surface those errors instead of falling back to a
+no-key synthetic account.
 
 Simulation responses should:
 
@@ -419,6 +429,8 @@ Before handing back a plugin:
 - [ ] Cache hints are forwarded and cache counters reach the dashboard when the
       upstream supports caching.
 - [ ] Simulation mode works without credentials.
+- [ ] Real-account cooldown/auth/missing-credential failures never return a
+      simulated success.
 - [ ] 429/401/5xx errors propagate.
 - [ ] Proxy is passed to `httpx` when configured.
 - [ ] No secrets are logged or committed.
@@ -435,6 +447,7 @@ Before handing back a plugin:
 - Ignoring `request.messages` content lists (multimodal input).
 - Dropping `tools`, `tool_choice`, or `parallel_tool_calls`.
 - Dropping reasoning controls or cache hints that the upstream supports.
+- Treating a real account failure or cooldown as simulation mode.
 - Swallowing 429s and returning a fake response.
 - Logging tokens or full request bodies.
 - Editing `plugins/` for a repository change.
