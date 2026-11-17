@@ -846,6 +846,12 @@ class GeminiPlugin(BasePlugin):
         if not refresh_token:
             return
 
+        # Never replace a static API key with an OAuth access token. Refresh is
+        # only valid for accounts that are actually using bearer/OAuth auth.
+        auth_style = self._resolve_auth_style(account.api_key or "", variables, account)
+        if account.api_key and auth_style != "bearer":
+            return
+
         expires_at = float(extra.get("expires_at") or 0)
         now = time.time()
         if account.api_key and (expires_at <= 0 or now < expires_at - 120):

@@ -2085,6 +2085,8 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (!el.rulesTableBody) return;
     el.rulesTableBody.innerHTML = "";
 
+    const activeTargetIds = new Set(buildRuleTargetCatalog().map((model) => model.id));
+
     let rulesToDisplay = state.rules;
     if (state.rulesSearchQuery) {
       const q = state.rulesSearchQuery.toLowerCase().trim();
@@ -2119,10 +2121,15 @@ curl -X POST ${baseUrl}/chat/completions \\
       const targetsBadges = (r.targets || [])
         .map((target) => {
           const parsed = splitReasoningSuffix(target);
-          const label = parsed ? `${parsed.baseId} · ${parsed.level}` : target;
+          const baseId = parsed ? parsed.baseId : target;
+          if (!activeTargetIds.has(baseId)) return "";
+          const label = parsed ? `${baseId} · ${parsed.level}` : target;
           return `<span class="badge">${escapeHtml(label)}</span>`;
         })
+        .filter(Boolean)
         .join(" ");
+      const targetCell = targetsBadges ||
+        `<span class="badge badge-muted">No active targets</span>`;
 
       const manualReasoning = r.manual_reasoning !== false;
       const exposedLevels = Array.isArray(r.exposed_reasoning_levels)
@@ -2139,7 +2146,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
         <td>${escapeHtml(r.name || r.model_id)}</td>
         <td><code style="font-family: var(--font-mono); text-transform: uppercase; font-size: 11.5px;">${escapeHtml(r.strategy)}</code></td>
-        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetsBadges}</div></td>
+        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetCell}</div></td>
         <td>${reasoningCell}</td>
         <td>
           <label class="switch">
@@ -2201,6 +2208,7 @@ curl -X POST ${baseUrl}/chat/completions \\
   }
 
   const RULE_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const RULE_DEFAULT_REASONING = "__default__";
 
   /** Split a `<model>:<level>` ID into its base model and reasoning level. */
   function splitReasoningSuffix(modelId) {
@@ -2246,12 +2254,14 @@ curl -X POST ${baseUrl}/chat/completions \\
     }
 
     state.plugins.forEach((p) => {
+      if (p.enabled === false) return;
       const reasoningVar = (p.variables || []).find((v) => v.name === "reasoning_effort");
       const providerLevels = reasoningVar && Array.isArray(reasoningVar.options)
         ? reasoningVar.options
         : [];
 
       (p.models || []).forEach((m) => {
+        if (m.enabled === false) return;
         const parsed = splitReasoningSuffix(m.id);
         const entry = ensureEntry(parsed ? parsed.baseId : m.id, p);
         if (!parsed) {
@@ -2307,7 +2317,10 @@ curl -X POST ${baseUrl}/chat/completions \\
       Object.entries(mapping).forEach(([source, destination]) => {
         const from = String(source || "").toLowerCase();
         const to = String(destination || "").toLowerCase();
-        if (RULE_REASONING_LEVELS.includes(from) && RULE_REASONING_LEVELS.includes(to)) {
+        if (
+          RULE_REASONING_LEVELS.includes(from) &&
+          (RULE_REASONING_LEVELS.includes(to) || to === RULE_DEFAULT_REASONING)
+        ) {
           clean[from] = to;
         }
       });
@@ -2322,8 +2335,13 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     (rule && rule.targets ? rule.targets : []).forEach((target) => {
       const parsed = splitReasoningSuffix(target);
+      const targetId = parsed ? parsed.baseId : target;
+      // Ignore targets from removed providers or disabled models. They remain
+      // in the stored rule until it is saved again, but the editor should not
+      // present them as selectable.
+      if (!catalogById.has(targetId)) return;
       selectedTargets.push(
-        parsed ? { id: parsed.baseId, level: parsed.level } : { id: target, level: "" }
+        parsed ? { id: targetId, level: parsed.level } : { id: target, level: "" }
       );
     });
 
@@ -2361,7 +2379,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       const native = nativeLevelsForTarget(targetId);
       const valid = new Set(native);
       Object.entries(reasoningOverrides[targetId] || {}).forEach(([source, destination]) => {
-        if (valid.has(destination)) valid.add(source);
+        if (destination === RULE_DEFAULT_REASONING || valid.has(destination)) {
+          valid.add(source);
+        }
       });
       return valid;
     }
@@ -2425,7 +2445,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       if (exposedReasoningHint) {
         exposedReasoningHint.textContent = valid.size
           ? "Only levels supported by every selected target (or remapped below) can be advertised."
-          : "No level is supported by every selected target yet. Add a per-target reasoning mapping to make one available.";
+          : "No level is supported by every selected target yet. Add a per-target mapping, or map it to Default / unspecified for models without reasoning support.";
       }
     }
 
@@ -2549,11 +2569,17 @@ curl -X POST ${baseUrl}/chat/completions \\
                     `<option value="${escapeHtml(level)}"${level === source ? " selected" : ""}>${escapeHtml(level)}</option>`
                 )
                 .join("");
-              const destinationOptions = nativeLevels
-                .map(
-                  (level) =>
-                    `<option value="${escapeHtml(level)}"${level === destination ? " selected" : ""}>${escapeHtml(level)}</option>`
-                )
+              const destinationLevels = nativeLevels.slice();
+              if (!destinationLevels.includes(RULE_DEFAULT_REASONING)) {
+                destinationLevels.push(RULE_DEFAULT_REASONING);
+              }
+              const destinationOptions = destinationLevels
+                .map((level) => {
+                  const label = level === RULE_DEFAULT_REASONING
+                    ? "Default / unspecified"
+                    : level;
+                  return `<option value="${escapeHtml(level)}"${level === destination ? " selected" : ""}>${escapeHtml(label)}</option>`;
+                })
                 .join("");
               return `<div class="rule-reasoning-map-row">
                 <span class="rule-reasoning-map-label">client asks</span>
@@ -2568,7 +2594,7 @@ curl -X POST ${baseUrl}/chat/completions \\
           reasoningHtml = `<div class="rule-reasoning-overrides">
             <div class="rule-selected-controls">
               <span class="rule-reasoning-label">Reasoning mapping</span>
-              <button type="button" class="btn btn-secondary btn-sm rule-add-reasoning-map" ${nativeLevels.length ? "" : "disabled"}>+ Add mapping</button>
+              <button type="button" class="btn btn-secondary btn-sm rule-add-reasoning-map">+ Add mapping</button>
             </div>
             ${mappingRows || `<span class="rule-reasoning-empty">Uses the client's requested level.</span>`}
           </div>`;
@@ -2629,8 +2655,8 @@ curl -X POST ${baseUrl}/chat/completions \\
           addMappingBtn.addEventListener("click", () => {
             const mapping = reasoningOverrides[target.id] || {};
             const source = RULE_REASONING_LEVELS.find((level) => !mapping[level]);
-            const destination = nativeLevels[0];
-            if (!source || !destination) return;
+            const destination = nativeLevels[0] || RULE_DEFAULT_REASONING;
+            if (!source) return;
             reasoningOverrides[target.id] = { ...mapping, [source]: destination };
             renderSelectedTargets();
           });
@@ -4073,7 +4099,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       idInput.value = account.id;
       nameInput.value = account.name;
       keyInput.value = "";
-      keyInput.placeholder = "Leave blank to keep the current credential";
+      keyInput.placeholder = account.api_key
+        ? `Saved credential: ${account.api_key} — leave blank to keep`
+        : "Leave blank to keep the current credential";
       keyInput.type = "password";
       baseInput.value = account.base_url || "";
       priorityInput.value = account.priority || 1;

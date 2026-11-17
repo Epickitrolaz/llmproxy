@@ -157,6 +157,8 @@ For the full contract, field tables, and examples, see
   reasoning levels. In client-reasoning mode, advertise only
   `exposed_reasoning_levels` that every selected target can serve directly or
   through `reasoning_overrides`, and remap the request per selected target.
+  Targets without reasoning support can map a level to `__default__`, which
+  accepts the request without forwarding a reasoning control.
 
 ## Provider reasoning and caching
 

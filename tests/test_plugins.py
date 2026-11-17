@@ -6,6 +6,8 @@ import pytest
 from llmproxy.core.interface import BasePlugin
 from llmproxy.core.manager import PluginManager, plugin_manager
 from llmproxy.schemas import (
+    AccountCreate,
+    AccountUpdate,
     ChatMessage,
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -219,6 +221,20 @@ def test_custom_model_crud():
     plugin_manager.configs["codex"]["edited_models"] = {}
     plugin_manager.configs["codex"]["deleted_models"] = []
     plugin_manager._save_configs()
+
+
+def test_update_account_ignores_masked_api_key(tmp_path: Path):
+    mgr = PluginManager(plugins_dir=tmp_path / "plugins", data_dir=tmp_path / "data")
+    account = mgr.add_account(
+        AccountCreate(
+            provider_id="gemini",
+            name="Gemini",
+            api_key="AQ.real-api-key",
+        )
+    )
+
+    mgr.update_account(account.id, AccountUpdate(api_key="********-key"))
+    assert mgr.get_account(account.id).api_key == "AQ.real-api-key"
 
 
 def test_generic_reasoning_suffix_resolution(tmp_path: Path):
