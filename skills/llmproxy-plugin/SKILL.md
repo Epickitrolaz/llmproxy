@@ -14,6 +14,8 @@ requests, handles accounts, reports usage when possible, and fails cleanly.
 
 ## Read these first
 
+0. `docs/PLUGIN_GUIDELINES.md` — mandatory pre-flight, usage-tracking, and
+   definition-of-done rules for every provider plugin.
 1. `llmproxy/core/interface.py` — the `BasePlugin` contract.
 2. `llmproxy/schemas.py` — `PluginMetadata`, `PluginVariable`, `PluginModelConfig`,
    `Account`, `ChatCompletionRequest`, `ChatCompletionResponse`, `ChatCompletionChunk`.
@@ -247,6 +249,11 @@ Do not send a new tool call when the last messages already contain tool output.
 
 ## Usage reporting
 
+Before writing the request code, check the upstream API for token usage fields.
+If the provider reports usage, the plugin must map it — see
+`docs/PLUGIN_GUIDELINES.md`. Do not ship a provider with working text output but
+missing usage.
+
 - Prefer upstream usage when present: `prompt_tokens`, `completion_tokens`,
   `total_tokens`.
 - For non-streaming responses, include `usage=CompletionUsage(...)`.
@@ -254,6 +261,32 @@ Do not send a new tool call when the last messages already contain tool output.
 - If the upstream does not report usage, the router estimates completion tokens
   from streamed content and prompt tokens from the request. Do not invent precise
   numbers.
+
+## Reasoning and caching
+
+Check the upstream API for reasoning controls and prompt/context caching. If the
+upstream exposes them, the plugin must support them fully — see
+`docs/PLUGIN_GUIDELINES.md`. Do not ship a provider that silently drops them.
+
+Reasoning:
+
+- Map `reasoning_effort` to the provider's native control for both streaming and
+  non-streaming requests.
+- Advertise only accepted levels through `reasoning_levels`.
+- Return reasoning output as `reasoning_content` and map reasoning token
+  counters to `completion_tokens_details.reasoning_tokens`.
+- If the upstream has no reasoning controls, leave `reasoning_levels` empty and
+  document it instead of inventing levels.
+
+Caching:
+
+- Forward every native cache hint from message content and `extra_body`
+  (`cache_control`, `cachedContent`, `prompt_cache_key`, affinity/session IDs).
+- For streaming, request upstream usage so cache counters are logged even when
+  the client did not ask.
+- Report cache reads/writes through `CompletionUsage`.
+- If the upstream has only implicit caching, still forward explicit references
+  and report cache counters from usage.
 
 ## Provider usage meters
 
@@ -381,6 +414,10 @@ Before handing back a plugin:
 - [ ] Image parts are forwarded or translated with `llmproxy.core.multimodal`,
       and `supports_vision` is set on vision-capable models.
 - [ ] Usage is forwarded when available.
+- [ ] Reasoning controls are mapped when the upstream supports them, and
+      `reasoning_levels` advertises only accepted levels.
+- [ ] Cache hints are forwarded and cache counters reach the dashboard when the
+      upstream supports caching.
 - [ ] Simulation mode works without credentials.
 - [ ] 429/401/5xx errors propagate.
 - [ ] Proxy is passed to `httpx` when configured.
@@ -397,6 +434,7 @@ Before handing back a plugin:
 - Using the public model ID instead of `model_config.upstream_model`.
 - Ignoring `request.messages` content lists (multimodal input).
 - Dropping `tools`, `tool_choice`, or `parallel_tool_calls`.
+- Dropping reasoning controls or cache hints that the upstream supports.
 - Swallowing 429s and returning a fake response.
 - Logging tokens or full request bodies.
 - Editing `plugins/` for a repository change.

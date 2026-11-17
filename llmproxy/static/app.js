@@ -2080,6 +2080,7 @@ curl -X POST ${baseUrl}/chat/completions \\
           (r.name && r.name.toLowerCase().includes(q)) ||
           (r.strategy && r.strategy.toLowerCase().includes(q)) ||
           (r.targets && r.targets.some((t) => t.toLowerCase().includes(q))) ||
+          (r.exposed_reasoning_levels && r.exposed_reasoning_levels.some((l) => String(l).toLowerCase().includes(q))) ||
           (r.description && r.description.toLowerCase().includes(q))
         );
       });
@@ -2091,7 +2092,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         : `No custom load balancing rules created yet. Click "+ Create Custom Rule" to expose a virtual model routing across multiple providers.`;
       el.rulesTableBody.innerHTML = `
         <tr>
-          <td colspan="6" style="text-align: center; color: var(--ink-muted); padding: 32px;">
+          <td colspan="7" style="text-align: center; color: var(--ink-muted); padding: 32px;">
             ${msg}
           </td>
         </tr>
@@ -2109,11 +2110,23 @@ curl -X POST ${baseUrl}/chat/completions \\
         })
         .join(" ");
 
+      const manualReasoning = r.manual_reasoning !== false;
+      const exposedLevels = Array.isArray(r.exposed_reasoning_levels)
+        ? r.exposed_reasoning_levels
+        : [];
+      const reasoningCell = manualReasoning
+        ? `<span class="badge badge-muted">Manual</span>`
+        : `<div style="display: flex; flex-wrap: wrap; gap: 4px;">
+             <span class="badge badge-muted">Client</span>
+             ${exposedLevels.map((level) => `<span class="badge">${escapeHtml(level)}</span>`).join(" ")}
+           </div>`;
+
       tr.innerHTML = `
         <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
         <td>${escapeHtml(r.name || r.model_id)}</td>
         <td><code style="font-family: var(--font-mono); text-transform: uppercase; font-size: 11.5px;">${escapeHtml(r.strategy)}</code></td>
         <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetsBadges}</div></td>
+        <td>${reasoningCell}</td>
         <td>
           <label class="switch">
             <input type="checkbox" class="rule-enable-toggle" data-id="${r.id}" ${r.enabled ? "checked" : ""}>
@@ -2213,7 +2226,8 @@ curl -X POST ${baseUrl}/chat/completions \\
 
     function addLevel(entry, level) {
       const normalized = String(level || "").toLowerCase();
-      if (!normalized || normalized === "default") return;
+      if (!normalized || normalized === "default" || normalized === "auto") return;
+      if (!RULE_REASONING_LEVELS.includes(normalized)) return;
       if (!entry.levels.includes(normalized)) entry.levels.push(normalized);
     }
 
@@ -2231,7 +2245,15 @@ curl -X POST ${baseUrl}/chat/completions \\
         } else {
           addLevel(entry, parsed.level);
         }
-        providerLevels.forEach((level) => addLevel(entry, level));
+        // Model-level capability metadata is authoritative. Fall back to the
+        // provider's reasoning_effort options only when the model does not
+        // advertise its own levels.
+        const modelLevels = Array.isArray(m.reasoning_levels) ? m.reasoning_levels : [];
+        if (modelLevels.length) {
+          modelLevels.forEach((level) => addLevel(entry, level));
+        } else {
+          providerLevels.forEach((level) => addLevel(entry, level));
+        }
       });
     });
 
@@ -2250,6 +2272,35 @@ curl -X POST ${baseUrl}/chat/completions \\
     const selectedContainer = document.getElementById("rule-selected-targets");
     const priorityHint = document.getElementById("rule-priority-hint");
     const title = document.getElementById("modal-rule-title");
+    const manualReasoningInput = document.getElementById("rule-form-manual-reasoning");
+    const exposedLevelsContainer = document.getElementById("rule-exposed-reasoning-levels");
+    const exposedReasoningGroup = document.getElementById("rule-exposed-reasoning-group");
+    const exposedReasoningHint = document.getElementById("rule-exposed-reasoning-hint");
+
+    let manualReasoning = rule ? rule.manual_reasoning !== false : true;
+    let exposedLevels = Array.isArray(rule && rule.exposed_reasoning_levels)
+      ? rule.exposed_reasoning_levels
+          .map((level) => String(level || "").toLowerCase())
+          .filter((level) => RULE_REASONING_LEVELS.includes(level))
+      : [];
+    exposedLevels = exposedLevels.filter((level, index, all) => all.indexOf(level) === index);
+    const reasoningOverrides = {};
+    Object.entries((rule && rule.reasoning_overrides) || {}).forEach(([targetId, mapping]) => {
+      if (!mapping || typeof mapping !== "object") return;
+      const parsed = splitReasoningSuffix(targetId);
+      const baseId = parsed ? parsed.baseId : targetId;
+      const clean = {};
+      Object.entries(mapping).forEach(([source, destination]) => {
+        const from = String(source || "").toLowerCase();
+        const to = String(destination || "").toLowerCase();
+        if (RULE_REASONING_LEVELS.includes(from) && RULE_REASONING_LEVELS.includes(to)) {
+          clean[from] = to;
+        }
+      });
+      if (Object.keys(clean).length) {
+        reasoningOverrides[baseId] = { ...(reasoningOverrides[baseId] || {}), ...clean };
+      }
+    });
 
     const catalog = buildRuleTargetCatalog();
     const catalogById = new Map(catalog.map((m) => [m.id, m]));
@@ -2285,6 +2336,96 @@ curl -X POST ${baseUrl}/chat/completions \\
       const levels = entry ? entry.levels.slice() : [];
       if (target.level && !levels.includes(target.level)) levels.push(target.level);
       return levels;
+    }
+
+    function nativeLevelsForTarget(targetId) {
+      const entry = catalogById.get(targetId);
+      return entry ? entry.levels.slice() : [];
+    }
+
+    function effectiveTargetLevels(targetId) {
+      const native = nativeLevelsForTarget(targetId);
+      const valid = new Set(native);
+      Object.entries(reasoningOverrides[targetId] || {}).forEach(([source, destination]) => {
+        if (valid.has(destination)) valid.add(source);
+      });
+      return valid;
+    }
+
+    function validExposedLevels() {
+      const targetIds = selectedTargets.map((target) => target.id);
+      if (!targetIds.length) return [];
+      let intersection = null;
+      targetIds.forEach((targetId) => {
+        const valid = effectiveTargetLevels(targetId);
+        intersection = intersection === null
+          ? new Set(valid)
+          : new Set([...intersection].filter((level) => valid.has(level)));
+      });
+      return RULE_REASONING_LEVELS.filter((level) => intersection && intersection.has(level));
+    }
+
+    function pruneExposedLevels() {
+      const valid = new Set(validExposedLevels());
+      exposedLevels = exposedLevels.filter((level) => valid.has(level));
+    }
+
+    function renderExposedReasoning() {
+      if (manualReasoningInput) manualReasoningInput.checked = manualReasoning;
+      if (exposedReasoningGroup) {
+        exposedReasoningGroup.style.display = manualReasoning ? "none" : "";
+      }
+      if (!exposedLevelsContainer || manualReasoning) return;
+
+      pruneExposedLevels();
+      const valid = new Set(validExposedLevels());
+      exposedLevelsContainer.innerHTML = "";
+
+      if (!selectedTargets.length) {
+        exposedLevelsContainer.innerHTML =
+          `<span class="rule-reasoning-empty">Select at least one target model to choose exposed reasoning levels.</span>`;
+        return;
+      }
+
+      RULE_REASONING_LEVELS.forEach((level) => {
+        const supported = valid.has(level);
+        const label = document.createElement("label");
+        label.className = "rule-exposed-level" + (supported ? "" : " is-disabled");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = level;
+        checkbox.checked = supported && exposedLevels.includes(level);
+        checkbox.disabled = !supported;
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            if (!exposedLevels.includes(level)) exposedLevels.push(level);
+          } else {
+            exposedLevels = exposedLevels.filter((value) => value !== level);
+          }
+        });
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(level));
+        exposedLevelsContainer.appendChild(label);
+      });
+
+      if (exposedReasoningHint) {
+        exposedReasoningHint.textContent = valid.size
+          ? "Only levels supported by every selected target (or remapped below) can be advertised."
+          : "No level is supported by every selected target yet. Add a per-target reasoning mapping to make one available.";
+      }
+    }
+
+    function mergeAutoTargetDuplicates() {
+      if (manualReasoning) return;
+      const seenIds = new Set();
+      for (let i = 0; i < selectedTargets.length; i++) {
+        if (seenIds.has(selectedTargets[i].id)) {
+          selectedTargets.splice(i, 1);
+          i--;
+        } else {
+          seenIds.add(selectedTargets[i].id);
+        }
+      }
     }
 
     function updatePriorityHint() {
@@ -2353,31 +2494,71 @@ curl -X POST ${baseUrl}/chat/completions \\
       if (selectedTargets.length === 0) {
         selectedContainer.innerHTML = `<div class="rule-selected-empty">No targets selected yet. Pick models above.</div>`;
         updatePriorityHint();
+        renderExposedReasoning();
         return;
       }
+
+      mergeAutoTargetDuplicates();
 
       selectedTargets.forEach((target, index) => {
         const entry = catalogById.get(target.id);
         const providerName = entry ? entry.providerName : "";
         const levels = levelsForTarget(target);
+        const nativeLevels = nativeLevelsForTarget(target.id);
         const row = document.createElement("div");
         row.className = "rule-selected-row";
         row.dataset.targetId = target.id;
 
-        const reasoningHtml = levels.length
-          ? `<div class="rule-selected-controls">
-               <label for="rule-target-level-${index}">Reasoning</label>
-               <select class="select-input rule-reasoning-select" id="rule-target-level-${index}">
-                 <option value="">Default</option>
-                 ${levels
-                   .map(
-                     (level) =>
-                       `<option value="${escapeHtml(level)}"${level === target.level ? " selected" : ""}>${escapeHtml(level)}</option>`
-                   )
-                   .join("")}
-               </select>
-             </div>`
-          : "";
+        let reasoningHtml = "";
+        if (manualReasoning) {
+          reasoningHtml = levels.length
+            ? `<div class="rule-selected-controls">
+                 <label for="rule-target-level-${index}">Reasoning</label>
+                 <select class="select-input rule-reasoning-select" id="rule-target-level-${index}">
+                   <option value="">Default</option>
+                   ${levels
+                     .map(
+                       (level) =>
+                         `<option value="${escapeHtml(level)}"${level === target.level ? " selected" : ""}>${escapeHtml(level)}</option>`
+                     )
+                     .join("")}
+                 </select>
+               </div>`
+            : "";
+        } else {
+          const mapping = reasoningOverrides[target.id] || {};
+          const mappingRows = Object.entries(mapping)
+            .map(([source, destination]) => {
+              const sourceOptions = RULE_REASONING_LEVELS
+                .map(
+                  (level) =>
+                    `<option value="${escapeHtml(level)}"${level === source ? " selected" : ""}>${escapeHtml(level)}</option>`
+                )
+                .join("");
+              const destinationOptions = nativeLevels
+                .map(
+                  (level) =>
+                    `<option value="${escapeHtml(level)}"${level === destination ? " selected" : ""}>${escapeHtml(level)}</option>`
+                )
+                .join("");
+              return `<div class="rule-reasoning-map-row">
+                <span class="rule-reasoning-map-label">client asks</span>
+                <select class="select-input rule-reasoning-map-source">${sourceOptions}</select>
+                <span class="rule-reasoning-map-arrow">→</span>
+                <select class="select-input rule-reasoning-map-target">${destinationOptions}</select>
+                <button type="button" class="rule-order-btn rule-remove-reasoning-map" title="Remove mapping" aria-label="Remove mapping">✕</button>
+              </div>`;
+            })
+            .join("");
+
+          reasoningHtml = `<div class="rule-reasoning-overrides">
+            <div class="rule-selected-controls">
+              <span class="rule-reasoning-label">Reasoning mapping</span>
+              <button type="button" class="btn btn-secondary btn-sm rule-add-reasoning-map" ${nativeLevels.length ? "" : "disabled"}>+ Add mapping</button>
+            </div>
+            ${mappingRows || `<span class="rule-reasoning-empty">Uses the client's requested level.</span>`}
+          </div>`;
+        }
 
         row.innerHTML = `
           <span class="rule-selected-index">${index + 1}</span>
@@ -2402,7 +2583,46 @@ curl -X POST ${baseUrl}/chat/completions \\
           });
         }
 
-        row.querySelectorAll(".rule-order-btn").forEach((btn) => {
+        const syncReasoningOverrides = () => {
+          const next = {};
+          row.querySelectorAll(".rule-reasoning-map-row").forEach((mappingRow) => {
+            const source = mappingRow.querySelector(".rule-reasoning-map-source").value;
+            const destination = mappingRow.querySelector(".rule-reasoning-map-target").value;
+            if (source && destination) next[source] = destination;
+          });
+          reasoningOverrides[target.id] = next;
+        };
+
+        row.querySelectorAll(".rule-reasoning-map-row").forEach((mappingRow) => {
+          mappingRow.querySelectorAll("select").forEach((select) => {
+            select.addEventListener("change", () => {
+              syncReasoningOverrides();
+              renderSelectedTargets();
+            });
+          });
+          const removeMappingBtn = mappingRow.querySelector(".rule-remove-reasoning-map");
+          if (removeMappingBtn) {
+            removeMappingBtn.addEventListener("click", () => {
+              mappingRow.remove();
+              syncReasoningOverrides();
+              renderSelectedTargets();
+            });
+          }
+        });
+
+        const addMappingBtn = row.querySelector(".rule-add-reasoning-map");
+        if (addMappingBtn) {
+          addMappingBtn.addEventListener("click", () => {
+            const mapping = reasoningOverrides[target.id] || {};
+            const source = RULE_REASONING_LEVELS.find((level) => !mapping[level]);
+            const destination = nativeLevels[0];
+            if (!source || !destination) return;
+            reasoningOverrides[target.id] = { ...mapping, [source]: destination };
+            renderSelectedTargets();
+          });
+        }
+
+        row.querySelectorAll(".rule-order-btn[data-action]").forEach((btn) => {
           btn.addEventListener("click", () => {
             const action = btn.dataset.action;
             if (action === "remove") {
@@ -2425,6 +2645,7 @@ curl -X POST ${baseUrl}/chat/completions \\
       });
 
       updatePriorityHint();
+      renderExposedReasoning();
     }
 
     if (targetsSearchInput) {
@@ -2432,6 +2653,17 @@ curl -X POST ${baseUrl}/chat/completions \\
       targetsSearchInput.oninput = () => renderAvailableTargets();
     }
     stratSelect.onchange = updatePriorityHint;
+    if (manualReasoningInput) {
+      manualReasoningInput.checked = manualReasoning;
+      manualReasoningInput.onchange = () => {
+        manualReasoning = manualReasoningInput.checked;
+        if (!manualReasoning) {
+          mergeAutoTargetDuplicates();
+          if (!exposedLevels.length) exposedLevels = validExposedLevels();
+        }
+        renderSelectedTargets();
+      };
+    }
 
     if (rule) {
       title.textContent = "Edit Custom Load Balancing Rule";
@@ -2472,13 +2704,34 @@ curl -X POST ${baseUrl}/chat/completions \\
       const stratSelect = document.getElementById("rule-form-strategy");
       const descInput = document.getElementById("rule-form-desc");
       const enabledInput = document.getElementById("rule-form-enabled");
+      const manualReasoningInput = document.getElementById("rule-form-manual-reasoning");
 
+      const manualReasoning = manualReasoningInput ? manualReasoningInput.checked : true;
       const draftTargets = (el.modalRule && el.modalRule._ruleTargets) || [];
       const selectedTargets = draftTargets
-        .map((target) => (target.level ? `${target.id}:${target.level}` : target.id))
+        .map((target) => (manualReasoning && target.level ? `${target.id}:${target.level}` : target.id))
         .filter((target, index, all) => target && all.indexOf(target) === index);
       const modelId = mIdInput.value.trim();
       const name = nameInput.value.trim() || modelId;
+
+      let exposedLevels = [];
+      const reasoningOverrides = {};
+      if (!manualReasoning) {
+        exposedLevels = Array.from(
+          document.querySelectorAll("#rule-exposed-reasoning-levels input:checked")
+        ).map((input) => input.value);
+        document.querySelectorAll("#rule-selected-targets .rule-selected-row").forEach((row) => {
+          const targetId = row.dataset.targetId;
+          if (!targetId) return;
+          const mapping = {};
+          row.querySelectorAll(".rule-reasoning-map-row").forEach((mappingRow) => {
+            const source = mappingRow.querySelector(".rule-reasoning-map-source").value;
+            const destination = mappingRow.querySelector(".rule-reasoning-map-target").value;
+            if (source && destination) mapping[source] = destination;
+          });
+          if (Object.keys(mapping).length) reasoningOverrides[targetId] = mapping;
+        });
+      }
 
       if (!modelId) {
         showToast("Exposed model ID is required", "error");
@@ -2498,6 +2751,9 @@ curl -X POST ${baseUrl}/chat/completions \\
               name,
               strategy: stratSelect.value,
               targets: selectedTargets,
+              manual_reasoning: manualReasoning,
+              exposed_reasoning_levels: exposedLevels,
+              reasoning_overrides: reasoningOverrides,
               description: descInput.value,
               enabled: enabledInput.checked,
             }),
@@ -2512,6 +2768,9 @@ curl -X POST ${baseUrl}/chat/completions \\
               name,
               strategy: stratSelect.value,
               targets: selectedTargets,
+              manual_reasoning: manualReasoning,
+              exposed_reasoning_levels: exposedLevels,
+              reasoning_overrides: reasoningOverrides,
               description: descInput.value,
               enabled: enabledInput.checked,
             }),
@@ -3998,13 +4257,19 @@ curl -X POST ${baseUrl}/chat/completions \\
         if (cancelBtn) cancelBtn.click();
         return;
       }
-      if (el.modalProviderFullscreen && el.modalProviderFullscreen.classList.contains("active")) {
-        requestCloseFullscreen();
-        return;
-      }
+      // Close the topmost open modal first. Nested dialogs (add/edit account and
+      // model) are rendered after the provider fullscreen modal in the DOM, so
+      // taking the last active overlay keeps ESC from closing the provider
+      // configuration behind an open account/model dialog.
       const activeModals = Array.from(document.querySelectorAll(".modal-overlay.active"));
       if (activeModals.length > 0) {
-        closeModal(activeModals[activeModals.length - 1]);
+        const topmost = activeModals[activeModals.length - 1];
+        if (topmost === el.modalProviderFullscreen) {
+          requestCloseFullscreen();
+        } else {
+          closeModal(topmost);
+        }
+        return;
       }
     }
   });

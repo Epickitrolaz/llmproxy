@@ -19,6 +19,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Hot-reload without downtime when files are added or modified.
   - Built-in providers:
     - `plugins/antigravity.py`: Antigravity provider (Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking).
+    - `plugins/gemini.py`: Google Gemini API provider (Gemini 4 Argon, 3.8/3.7/3.6 Flash, 3.1 Pro, 2.5 Pro/Flash, Gemma 4; tools, thinking controls, caching, usage).
     - `plugins/codex.py`: OpenAI Codex provider (GPT-6 Luna, GPT-4o, GPT-4o Mini, reasoning effort control).
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
@@ -59,6 +60,11 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Create custom virtual models exposed on the `/v1` endpoint (e.g. `smart-router`, `hybrid-coder`).
   - Select target models from any installed provider. Reasoning variants are folded
     into one target with a level picker instead of appearing as `:none`/`:high` models.
+  - Choose the reasoning mode. **Manual** (default) fixes a level per target and
+    does not advertise reasoning to clients. **Client** lets the downstream client
+    choose `reasoning_effort`, advertises only the exposed levels that every
+    selected target can serve, and supports per-target remapping such as
+    `high -> max` for one model while other targets keep `high`.
   - Select a routing strategy: Round Robin, Least Used, Random, or Fallback.
   - Ordered target list: in Fallback mode the first entry is the primary and lower
     entries are the next fallbacks; Round Robin follows the same order.
@@ -139,6 +145,7 @@ provider's native ID in `upstream_model`:
 | `anthropic_proxy` | `ap` | `ap/claude-opus-5-5` |
 | `antigravity` | `ag` | `ag/gemini-3.8-flash` |
 | `codex` | `cx` | `cx/gpt-6-luna` |
+| `gemini` | `gm` | `gm/gemini-3.8-flash` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
 | `openai_compatible` | `compat` | `compat/default-model` |
 | `opencode_free` | `oc` | `oc/deepseek-v4.1-flash-free` |
@@ -169,8 +176,31 @@ no separate model IDs are required.
 
 The `:<level>` suffix is also accepted generically for any provider model and is
 stripped before routing. For example `cx/gpt-6-luna:high` resolves to
-`cx/gpt-6-luna` with the per-request `reasoning_effort` set to `high`. Custom
-load balancing rules use this to attach a reasoning level to each target.
+`cx/gpt-6-luna` with the per-request `reasoning_effort` set to `high`.
+
+Custom load balancing rules support two reasoning modes:
+
+- **Manual** (default): each target stores its own `:level`, the rule does not
+  advertise reasoning in `/v1/models`, and the configured level is used for that
+  target.
+- **Client**: the client sends `reasoning_effort` (or `model:level`), the rule
+  advertises only its configured exposed levels, and each target can remap a
+  requested level independently. For example a rule with three targets can let
+  the first two use `high` and map `high -> max` for the third:
+
+```json
+{
+  "model_id": "smart-router",
+  "manual_reasoning": false,
+  "exposed_reasoning_levels": ["low", "high"],
+  "targets": ["gm/gemini-3.8-flash", "cx/gpt-6-luna", "ocg/kimi-k3"],
+  "reasoning_overrides": {"ocg/kimi-k3": {"high": "max"}}
+}
+```
+
+A client request with `"reasoning_effort": "high"` then reaches the first two
+targets as `high` and the third as `max`. Levels that cannot be served by every
+target (directly or through a remap) are never advertised.
 
 ---
 

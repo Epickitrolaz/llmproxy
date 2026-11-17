@@ -28,6 +28,7 @@ Before making changes, read these in order:
    streaming, usage, and logging.
 5. The closest provider template in `templates/`.
 6. `skills/llmproxy-plugin/SKILL.md` when the task involves a provider plugin.
+7. `docs/PLUGIN_GUIDELINES.md` before creating or reviewing any provider plugin.
 
 ## Quick commands
 
@@ -143,7 +144,7 @@ For the full contract, field tables, and examples, see
   exposed ID. Do not publish synthetic `<model>:<level>` entries as separate models.
 - Built-in templates expose model IDs as `<short-prefix>/<model-name>` and keep
   the provider's native ID in `upstream_model`. The current prefixes are `ap`,
-  `ag`, `cx`, `mock`, `compat`, `oc`, `ocg`, and `or`.
+  `ag`, `cx`, `gm`, `mock`, `compat`, `oc`, `ocg`, and `or`.
 - Advertise supported reasoning through `reasoning_levels` on
   `PluginModelConfig` and `ModelCard`. Clients select a level with
   `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
@@ -152,15 +153,35 @@ For the full contract, field tables, and examples, see
   never need the internal ID.
 - When a client needs a reasoning selector (for example OpenCode variants), build
   it from `reasoning_levels` instead of adding duplicate model IDs.
+- Custom load-balancing rules in manual reasoning mode must not advertise
+  reasoning levels. In client-reasoning mode, advertise only
+  `exposed_reasoning_levels` that every selected target can serve directly or
+  through `reasoning_overrides`, and remap the request per selected target.
 
-## Provider caching
+## Provider reasoning and caching
 
-Every provider plugin must support prompt/context caching whenever the upstream
-offers it, and the cache signal must reach the dashboard.
+Every provider plugin must fully support reasoning controls and prompt/context
+caching whenever the upstream API exposes them. "Optional" only means the
+upstream has no such feature; a new provider is not complete if it drops them.
+
+Reasoning requirements:
+
+- Map the proxy's `reasoning_effort` into the provider's native controls for
+  streaming and non-streaming requests.
+- Advertise only levels the upstream accepts through `reasoning_levels`, and
+  return reasoning output as `reasoning_content`.
+- Map reasoning token counters to
+  `completion_tokens_details.reasoning_tokens` when reported.
+- If the upstream has no reasoning controls, leave `reasoning_levels` empty and
+  document that in the plugin docstring instead of faking a selector.
+
+Caching requirements:
 
 - Forward the provider's native cache hints (`cache_control` breakpoints,
   `cachedContent`, `prompt_cache_key` / `prompt_cache_retention`, or
   session/affinity IDs) from message content and `extra_body`. Never drop them.
+- If the upstream has only implicit caching, still forward explicit references
+  when supplied and report cache counters from usage.
 - For streaming, always request upstream usage (for example
   `stream_options.include_usage`) so cache counters are logged even when the
   client does not ask for usage. The router forwards usage to the client only
@@ -170,9 +191,10 @@ offers it, and the cache signal must reach the dashboard.
   `cache_read_input_tokens` / `cache_creation_input_tokens`. The schema
   normalizes both shapes, and `prompt_tokens` must be the full prompt count
   including cached tokens (OpenAI semantics).
-- Add a focused test proving the provider's usage reaches `RequestLogEntry` and
-  the dashboard cache statistics. A new provider is not complete until cache
-  hits appear in the dashboard log table and cache hit rate.
+
+Add focused tests for reasoning translation and cache telemetry. A new provider
+is not complete until its cache hits appear in the dashboard log table and cache
+hit rate, and its reasoning controls reach the upstream.
 
 ## Where to make changes
 
@@ -247,18 +269,27 @@ Both require a real local Codex session/network. They fail on a clean checkout.
 
 ## Adding a provider plugin
 
-Use the `llmproxy-plugin` skill. The short version:
+Use the `llmproxy-plugin` skill and read `docs/PLUGIN_GUIDELINES.md`. The short
+version:
 
 1. Copy `skills/llmproxy-plugin/assets/plugin_skeleton.py` to
    `templates/<provider_id>.py` (built-in) or `plugins/<provider_id>.py` (local).
 2. Set a unique `metadata.id`, name, description, version, variables, and models.
 3. Implement `chat_completion` with non-streaming and streaming paths.
-4. Handle accounts, base URL, credentials, proxy, tools, usage, and errors.
-5. Keep a deterministic simulation mode for tests and offline use.
-6. Forward cache hints, request streaming usage, and report cache counters.
-7. Add a focused test, including cache telemetry through to the dashboard.
-8. Run the validator and the stable test suite.
-9. Smoke test via the dashboard Playground or `curl`.
+4. Handle accounts, base URL, credentials, proxy, tools, usage, reasoning, and
+   errors.
+5. Check the upstream API for token usage metadata. If it reports usage, map it
+   into `CompletionUsage` for both streaming and non-streaming responses; do not
+   ship a provider before that works.
+6. Check the upstream API for reasoning controls and prompt/context caching. If
+   they exist, implement them fully (including streaming and dashboard cache
+   counters); do not ship a provider that silently drops them.
+7. Keep a deterministic simulation mode for tests and offline use.
+8. Forward reasoning controls, request streaming usage, and cache hints; report
+   reasoning and cache counters.
+9. Add focused tests for reasoning translation and cache telemetry.
+10. Run the validator and the stable test suite.
+11. Smoke test via the dashboard Playground or `curl`.
 
 ## Definition of done
 
@@ -267,8 +298,9 @@ Use the `llmproxy-plugin` skill. The short version:
 - Focused tests pass; stable suite passes.
 - New behavior is documented in README or the relevant skill/reference when
   user-facing.
-- New or changed providers forward cache hints and surface cache counters in the
-  dashboard log table and cache hit rate.
+- New or changed providers implement reasoning controls and cache support
+  whenever the upstream exposes them, and surface reasoning/cache counters in
+  the dashboard log table and cache hit rate.
 - No secrets, tokens, runtime data, or `plugins/` files are committed.
 - Existing API shapes and error codes remain compatible unless intentionally changed.
 - The dashboard still renders and the affected flows still work.
