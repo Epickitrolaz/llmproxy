@@ -185,6 +185,11 @@ docker run -d --name llmproxy -p 8000:8000 -v $(pwd)/plugins:/app/plugins -v $(p
 - **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
 - **OpenAI API Base**: `http://localhost:8000/v1`
 
+The dashboard is responsive: on phones and narrow windows the header collapses
+into a compact two-row layout, navigation tabs scroll horizontally, tables keep
+their first column visible while the rest scrolls, and dialogs open as
+bottom sheets.
+
 ### Dashboard Security
 
 Every `/api/*` dashboard route requires an admin token. The dashboard asks for

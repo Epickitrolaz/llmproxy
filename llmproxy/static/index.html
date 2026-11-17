@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>LLMProxy • AI Router & Management Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
@@ -29,7 +29,7 @@
 
     <!-- Header Quick Actions -->
     <div class="header-meta">
-      <div class="endpoint-chip">
+      <div class="endpoint-chip" title="API base URL">
         <span>Endpoint:</span>
         <strong id="header-endpoint-display">http://localhost:8000/v1</strong>
         <script>
@@ -184,7 +184,7 @@
           <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
             <h3>Quickstart Integration</h3>
             <span style="font-size: 12px; color: var(--ink-muted);">Select model:</span>
-            <div style="min-width: 200px;">
+            <div class="snippet-model-select">
               <select class="select-input" id="snippet-model-select"></select>
             </div>
             <span class="badge" style="background: rgba(245, 158, 11, 0.12); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); font-size: 11px;" title="Cuts off access after 30min or 10 requests. For testing only.">Test Key (Cutoff: 30m / 10 reqs)</span>
@@ -260,7 +260,7 @@
           <p>Create custom models exposed to the local API that route dynamically across models from all providers.</p>
         </div>
         <div class="section-actions">
-          <input type="text" class="form-input" id="rules-search-input" placeholder="Search rules & models..." style="width: 220px; font-size: 12.5px;">
+          <input type="text" class="form-input rules-search-input" id="rules-search-input" placeholder="Search rules & models...">
           <button class="btn btn-primary" id="btn-create-rule">+ Create Custom Rule</button>
         </div>
       </div>
@@ -482,7 +482,7 @@
             </div>
           </div>
           <div id="fs-editor-feedback" class="feedback-banner"></div>
-          <div class="editor-wrapper" style="flex: 1; min-height: 400px;">
+          <div class="editor-wrapper" style="flex: 1;">
             <div class="line-numbers" id="fs-editor-line-numbers">1</div>
             <div class="editor-code-container">
               <pre class="highlight-layer" id="fs-editor-highlight" aria-hidden="true"><code id="fs-editor-highlight-code"></code></pre>
@@ -525,7 +525,7 @@
 
         <!-- FS Panel: Unified Configuration (Load Balancing on Left, Variables on Right) -->
         <div class="modal-fullscreen-panel" id="fs-panel-config">
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start;">
+          <div class="fs-config-grid">
             <!-- Left: Load Balancing & Strategy -->
             <div class="card">
               <div class="card-header">
@@ -874,7 +874,7 @@
           <label class="form-label">Base URL Override (Optional)</label>
           <input type="text" class="form-input" id="account-base-url" placeholder="Leave empty to use provider default">
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div class="form-grid-2">
           <div class="form-group">
             <label class="form-label">Priority (1 = Highest)</label>
             <input type="number" class="form-input" id="account-priority" value="1" min="1" max="100">
@@ -886,7 +886,7 @@
             <span class="form-hint">Traffic distribution weight</span>
           </div>
         </div>
-        <div class="form-group" id="account-usage-tracking-group" style="display: none; align-items: center; justify-content: space-between; padding-top: 8px;">
+        <div class="form-group toggle-row" id="account-usage-tracking-group" style="display: none; padding-top: 8px;">
           <div>
             <label class="form-label" style="margin-bottom: 2px;">Track usage &amp; quota</label>
             <span class="form-hint">Disable for unlimited endpoints. Stops request counters and rate-limit cooldowns for this account.</span>
@@ -896,7 +896,7 @@
             <span class="slider"></span>
           </label>
         </div>
-        <div class="form-group" style="display: flex; align-items: center; justify-content: space-between; padding-top: 8px;">
+        <div class="form-group toggle-row" style="padding-top: 8px;">
           <div>
             <label class="form-label" style="margin-bottom: 2px;">Enabled</label>
             <span class="form-hint">Disabled accounts are skipped during routing</span>
@@ -936,7 +936,7 @@
           <label class="form-label">Upstream Model ID</label>
           <input type="text" class="form-input" id="model-form-upstream" placeholder="e.g. gpt-4o-2024-08-06 (or blank for same)">
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="form-grid-2">
           <div class="form-group">
             <label class="form-label">Context Window</label>
             <input type="number" class="form-input" id="model-form-context" value="128000">
