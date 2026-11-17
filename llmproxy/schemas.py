@@ -185,6 +185,9 @@ class Account(BaseModel):
     weight: int = 1
     enabled: bool = True
     pinned: bool = False
+    # Per-account opt-out for local usage/quota bookkeeping. Used by generic
+    # OpenAI/Anthropic-compatible endpoints that have no meaningful quota.
+    disable_usage_tracking: bool = False
     rate_limited_until: Optional[float] = None
     error_count: int = 0
     success_count: int = 0
@@ -211,6 +214,7 @@ class AccountCreate(BaseModel):
     weight: int = 1
     enabled: bool = True
     pinned: bool = False
+    disable_usage_tracking: bool = False
     proxy_id: Optional[str] = None
     proxy_url: Optional[str] = None
     extra_config: Dict[str, Any] = Field(default_factory=dict)
@@ -224,6 +228,7 @@ class AccountUpdate(BaseModel):
     weight: Optional[int] = None
     enabled: Optional[bool] = None
     pinned: Optional[bool] = None
+    disable_usage_tracking: Optional[bool] = None
     proxy_id: Optional[str] = None
     proxy_url: Optional[str] = None
     extra_config: Optional[Dict[str, Any]] = None
