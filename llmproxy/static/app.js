@@ -2899,14 +2899,6 @@ curl -X POST ${baseUrl}/chat/completions \\
     return `${Math.max(1, minutes)}m left`;
   }
 
-  const DEDICATED_USAGE_PROVIDERS = new Set(["antigravity", "codex", "openrouter", "opencode_go"]);
-
-  function providerHasUsageMeter(providerId) {
-    if (DEDICATED_USAGE_PROVIDERS.has(providerId)) return true;
-    const plugin = (state.plugins || []).find((item) => item.id === providerId);
-    return Boolean(plugin && plugin.supports_usage_meter);
-  }
-
   async function renderStatusAccountsGrid(fetchFreshQuota = false) {
     if (!el.statusAccountsGrid) return;
     
@@ -3054,10 +3046,24 @@ curl -X POST ${baseUrl}/chat/completions \\
       ]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
+    const usageAccounts = accountsToDisplay.filter((acc) => {
+      if (acc.disable_usage_tracking) return false;
+      const quota = quotaDataMap[acc.id];
+      return Boolean(quota && !quota.error);
+    });
+
+    if (usageAccounts.length === 0) {
+      el.statusAccountsGrid.innerHTML = `
+        <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
+          No providers are reporting usage yet. Usage appears here after a metered provider returns a quota snapshot.
+        </div>
+      `;
+      return;
+    }
 
     el.statusAccountsGrid.innerHTML = "";
 
-    accountsToDisplay.forEach((acc) => {
+    usageAccounts.forEach((acc) => {
       const provider = providerMap[acc.provider_id] || { id: acc.provider_id, name: acc.provider_id, pinned: false };
       const card = document.createElement("div");
       card.className = "account-square-card";
@@ -3074,7 +3080,6 @@ curl -X POST ${baseUrl}/chat/completions \\
       let limitsHtml = "";
       const quota = quotaDataMap[acc.id];
       const isOpenRouterAccount = acc.provider_id === "openrouter";
-      const hasUsageMeter = providerHasUsageMeter(acc.provider_id);
 
       if (isOpenRouterAccount) {
         // OpenRouter has no per-account quota bars; show the live credit
@@ -3098,13 +3103,6 @@ curl -X POST ${baseUrl}/chat/completions \\
             </div>
           `;
         }
-      } else if (hasUsageMeter && acc.disable_usage_tracking) {
-        limitsHtml = `
-          <div class="usage-tracking-disabled">
-            <span>Usage tracking disabled</span>
-            <span class="usage-tracking-hint">No quota, counters, or cooldowns for this account</span>
-          </div>
-        `;
       } else if (quota && quota.groups && quota.groups.length > 0) {
         quota.groups.forEach((grp) => {
           (grp.buckets || []).forEach((b) => {
@@ -3173,24 +3171,6 @@ curl -X POST ${baseUrl}/chat/completions \\
                 <strong>${escapeHtml(String(item.value ?? "—"))}</strong>
               </div>
             `).join("")}
-          </div>
-        `;
-      }
-
-      // Providers without an upstream usage meter get no quota section at all.
-      // The old generic "Standard Quota" bar was fabricated data.
-      if (hasUsageMeter && !quota) {
-        limitsHtml += `
-          <div class="usage-tracking-disabled" title="The provider did not return a usage snapshot">
-            <span>Usage unavailable</span>
-            <span class="usage-tracking-hint">The provider has not reported usage yet</span>
-          </div>
-        `;
-      } else if (hasUsageMeter && quota && quota.error) {
-        limitsHtml += `
-          <div class="usage-tracking-disabled" title="${escapeHtml(quota.error)}">
-            <span>Usage unavailable</span>
-            <span class="usage-tracking-hint">${escapeHtml(quota.error)}</span>
           </div>
         `;
       }

@@ -598,7 +598,6 @@ button {
   justify-content: space-between;
   gap: 16px;
   min-width: 0;
-  overflow: hidden;
   transition: border-color 0.15s ease;
 }
 
