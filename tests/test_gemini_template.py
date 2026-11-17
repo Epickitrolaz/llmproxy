@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -389,6 +390,31 @@ def gemini_state():
     plugin_manager.accounts = original_accounts
     plugin_manager.configs = original_configs
     plugin_manager._save_accounts()
+
+
+def test_test_chat_returns_cooldown_instead_of_simulating(gemini_state):
+    plugin_manager.discover_and_load_all()
+    for existing in list(plugin_manager.get_accounts("gemini")):
+        plugin_manager.delete_account(existing.id)
+    plugin_manager.update_plugin_config("gemini", enabled=True, variables={})
+    account = plugin_manager.add_account(
+        AccountCreate(
+            provider_id="gemini", name="Gemini Cooldown", api_key="AQ.test-key"
+        )
+    )
+    account.rate_limited_until = time.time() + 60
+    plugin_manager._save_accounts()
+
+    client = TestClient(app, headers=ADMIN_HEADERS)
+    response = client.post(
+        "/api/test-chat",
+        json={
+            "model": "gm/gemma-4-31b-it",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert response.status_code == 429
+    assert "cooldown" in response.json()["detail"].lower()
 
 
 def test_gemini_usage_reaches_dashboard_cache_stats(monkeypatch, gemini_state):
