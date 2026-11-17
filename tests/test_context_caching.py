@@ -176,11 +176,63 @@ def test_openai_compatible_forwards_cache_hints():
     request = ChatCompletionRequest(
         model="default-model",
         messages=[ChatMessage(role="user", content="hi")],
-        extra_body={"prompt_cache_key": "openai-cache-key", "prompt_cache_retention": "24h"},
+        extra_body={
+            "prompt_cache_key": "openai-cache-key",
+            "prompt_cache_retention": "24h",
+            "cache_control": {"type": "ephemeral"},
+            "cached_content": "cachedContents/abc",
+        },
     )
     plugin._apply_cache_fields(body, request)
     assert body["prompt_cache_key"] == "openai-cache-key"
     assert body["prompt_cache_retention"] == "24h"
+    assert body["cache_control"] == {"type": "ephemeral"}
+    assert body["cached_content"] == "cachedContents/abc"
+
+
+def test_openai_compatible_forwards_reasoning_effort(monkeypatch):
+    captured = {}
+
+    def fake_stream(
+        url, headers, body, model_config, request, account=None, proxy=None
+    ):
+        captured["body"] = body
+
+        async def empty():
+            if False:  # pragma: no cover - keeps this an async generator
+                yield None
+
+        return empty()
+
+    plugin = OpenAICompatiblePlugin()
+    monkeypatch.setattr(plugin, "_stream_request", fake_stream)
+    model = PluginModelConfig(
+        id="default-model", name="Default", upstream_model="default-model"
+    )
+    request = ChatCompletionRequest(
+        model="default-model",
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+        reasoning_effort="high",
+    )
+    asyncio.run(
+        plugin.chat_completion(request, model, {"api_key": "sk-live-123"})
+    )
+    assert captured["body"]["reasoning_effort"] == "high"
+
+
+def test_mock_provider_reports_simulated_reasoning():
+    plugin = MockProviderPlugin()
+    model = plugin.metadata.models[0]
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[ChatMessage(role="user", content="think about this")],
+        reasoning_effort="high",
+    )
+    response = asyncio.run(plugin.chat_completion(request, model, {}))
+    assert response.choices[0].message.reasoning_content
+    assert response.usage.completion_tokens_details["reasoning_tokens"] > 0
+    assert "Reasoning" in response.choices[0].message.content
 
 
 def test_openai_compatible_stream_requests_usage(monkeypatch):

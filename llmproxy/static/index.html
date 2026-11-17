@@ -969,6 +969,11 @@
           <textarea class="form-input" id="model-form-parameters" rows="3" placeholder='{"temperature": 0.7}' style="font-family: var(--font-mono); font-size: 12px;"></textarea>
           <span class="form-hint">Optional provider parameters merged into requests for this model.</span>
         </div>
+        <div class="form-group">
+          <label class="form-label">Reasoning Levels</label>
+          <input type="text" class="form-input" id="model-form-reasoning-levels" placeholder="none, low, medium, high">
+          <span class="form-hint">Comma-separated levels advertised to clients. Leave empty when the upstream does not support reasoning.</span>
+        </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
           <div>
             <label class="form-label" style="margin-bottom: 2px;">Vision</label>

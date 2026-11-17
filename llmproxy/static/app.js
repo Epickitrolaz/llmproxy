@@ -1970,6 +1970,10 @@ curl -X POST ${baseUrl}/chat/completions \\
       isEdit && model.parameters && Object.keys(model.parameters).length > 0
         ? JSON.stringify(model.parameters, null, 2)
         : "";
+    document.getElementById("model-form-reasoning-levels").value =
+      isEdit && Array.isArray(model.reasoning_levels)
+        ? model.reasoning_levels.join(", ")
+        : "";
     document.getElementById("model-form-vision").checked = isEdit ? Boolean(model.supports_vision) : false;
     document.getElementById("model-form-enabled").checked = isEdit ? model.enabled !== false : true;
     document.getElementById("modal-model-title").textContent = isEdit ? "Edit Model" : "Add Custom Model";
@@ -1998,6 +2002,15 @@ curl -X POST ${baseUrl}/chat/completions \\
       const mVision = document.getElementById("model-form-vision").checked;
       const mEnabled = document.getElementById("model-form-enabled").checked;
       const paramsText = document.getElementById("model-form-parameters").value.trim();
+      const mReasoningLevels = document
+        .getElementById("model-form-reasoning-levels")
+        .value.split(",")
+        .map((level) => level.trim().toLowerCase())
+        .filter(
+          (level, index, all) =>
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(level) &&
+            all.indexOf(level) === index
+        );
 
       if (!mId) {
         showToast("Model ID is required", "error");
@@ -2024,6 +2037,7 @@ curl -X POST ${baseUrl}/chat/completions \\
         context_window: mContext,
         max_tokens: mMaxTokens,
         supports_vision: mVision,
+        reasoning_levels: mReasoningLevels,
         enabled: mEnabled,
         parameters: mParameters,
       };
