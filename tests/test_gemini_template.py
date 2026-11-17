@@ -35,6 +35,34 @@ def _model(model_id: str = "gm/gemini-3.8-flash") -> PluginModelConfig:
     )
 
 
+def test_gemini_static_api_key_is_not_replaced_by_oauth_refresh(monkeypatch):
+    called = {"client": False}
+
+    class FailingClient:
+        def __init__(self, *args, **kwargs):
+            called["client"] = True
+            raise AssertionError("OAuth refresh must not run for a static API key")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FailingClient)
+    plugin = GeminiPlugin()
+    account = Account(
+        id="acc_gm",
+        provider_id="gemini",
+        name="Gemini",
+        api_key="AQ.static-api-key",
+        extra_config={
+            "refresh_token": "refresh",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "expires_at": 0,
+        },
+    )
+
+    asyncio.run(plugin._ensure_token_freshness(account, {}))
+    assert account.api_key == "AQ.static-api-key"
+    assert called["client"] is False
+
+
 def test_gemini_template_metadata_and_prefixes():
     plugin = load_plugin_from_file(ROOT / "templates" / "gemini.py")
     assert plugin.metadata.id == "gemini"

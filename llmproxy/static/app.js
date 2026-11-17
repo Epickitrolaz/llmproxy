@@ -4099,7 +4099,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       idInput.value = account.id;
       nameInput.value = account.name;
       keyInput.value = "";
-      keyInput.placeholder = "Leave blank to keep the current credential";
+      keyInput.placeholder = account.api_key
+        ? `Saved credential: ${account.api_key} — leave blank to keep`
+        : "Leave blank to keep the current credential";
       keyInput.type = "password";
       baseInput.value = account.base_url || "";
       priorityInput.value = account.priority || 1;

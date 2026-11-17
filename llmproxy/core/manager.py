@@ -790,6 +790,10 @@ class PluginManager:
 
         upd = updates.model_dump(exclude_unset=True) if isinstance(updates, AccountUpdate) else updates
         for k, v in upd.items():
+            # The dashboard list response masks credentials. Never let a masked
+            # placeholder overwrite the real account secret.
+            if k == "api_key" and isinstance(v, str) and v.startswith("********"):
+                continue
             if v is not None and hasattr(account, k):
                 setattr(account, k, v)
 
