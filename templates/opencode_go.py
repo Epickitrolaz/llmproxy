@@ -52,6 +52,7 @@ name="OpenCode Go"
 description="OpenCode Go subscription gateway with OpenAI-compatible Chat Completions, API-key accounts, stable session routing, and reasoning controls"
 
 DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+DEFAULT_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 DEFAULT_USER_AGENT = "llmproxy/1.0"
 DEFAULT_TIMEOUT = 120.0
 
@@ -364,6 +365,16 @@ class OpenCodeGoPlugin(BasePlugin):
                     description=(
                         "User agent sent to OpenCode Go. Go asks clients to identify "
                         "themselves instead of using a generic SDK name."
+                    ),
+                ),
+                PluginVariable(
+                    name="usage_url",
+                    label="Usage API URL",
+                    type="string",
+                    default=DEFAULT_USAGE_URL,
+                    description=(
+                        "OpenCode Go usage endpoint used by the dashboard quota "
+                        "tracker (rolling, weekly, and monthly limits)."
                     ),
                 ),
                 PluginVariable(

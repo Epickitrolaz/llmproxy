@@ -1420,6 +1420,170 @@ async def get_openrouter_all_status():
 
 
 # =========================================================================
+# OpenCode Go Usage
+# =========================================================================
+
+OPENCODE_GO_DEFAULT_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+OPENCODE_GO_USAGE_WINDOWS = (
+    ("rolling", "Rolling Limit"),
+    ("weekly", "Weekly Limit"),
+    ("monthly", "Monthly Limit"),
+)
+
+
+def _opencode_go_settings(account: Account) -> tuple[str, str, str, Dict[str, Any]]:
+    """Resolve the API key, usage URL, user agent, and plugin variables."""
+    cfg = plugin_manager.configs.get("opencode_go", {}) or {}
+    variables = cfg.get("variables") if isinstance(cfg.get("variables"), dict) else {}
+    extra_config = account.extra_config if isinstance(account.extra_config, dict) else {}
+    api_key = str(account.api_key or variables.get("api_key") or "").strip()
+    usage_url = str(
+        extra_config.get("usage_url")
+        or variables.get("usage_url")
+        or OPENCODE_GO_DEFAULT_USAGE_URL
+    ).strip()
+    user_agent = str(
+        extra_config.get("user_agent")
+        or variables.get("user_agent")
+        or "llmproxy/1.0"
+    ).strip()
+    return api_key, usage_url, user_agent, variables
+
+
+async def fetch_opencode_go_quota(account: Account) -> Dict[str, Any]:
+    """Fetch live rolling, weekly, and monthly usage for an OpenCode Go account."""
+    import httpx
+
+    api_key, usage_url, user_agent, variables = _opencode_go_settings(account)
+    if not api_key:
+        return {"error": "OpenCode Go API key is missing"}
+    if not usage_url:
+        return {"error": "OpenCode Go usage URL is missing"}
+
+    proxy_url, _ = plugin_manager.resolve_request_proxy(
+        variables=variables,
+        account=account,
+        provider_id=account.provider_id,
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": user_agent or "llmproxy/1.0",
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            proxy=proxy_url,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(usage_url, headers=headers)
+    except Exception as exc:
+        return {"error": f"OpenCode Go usage request failed: {exc}"}
+
+    if response.status_code != 200:
+        detail = response.text[:200].strip()
+        return {
+            "error": (
+                f"OpenCode Go usage returned HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
+        }
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        return {"error": f"OpenCode Go usage returned invalid JSON: {exc}"}
+
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return {"error": "OpenCode Go usage response did not include usage windows"}
+
+    buckets: List[Dict[str, Any]] = []
+    for key, label in OPENCODE_GO_USAGE_WINDOWS:
+        window = usage.get(key)
+        if not isinstance(window, dict):
+            continue
+        raw_percent = window.get("percent")
+        if raw_percent is None:
+            continue
+        try:
+            used_percent = max(0.0, min(100.0, float(raw_percent)))
+        except (TypeError, ValueError):
+            continue
+        buckets.append(
+            {
+                "bucketId": f"opencode_go_{key}",
+                "displayName": label,
+                "usedPercent": used_percent,
+                "remainingFraction": round((100.0 - used_percent) / 100.0, 4),
+                "resetTime": window.get("resetsAt"),
+            }
+        )
+
+    if not buckets:
+        return {"error": "OpenCode Go usage response had no usable windows"}
+
+    return {
+        "account_id": account.id,
+        "account_name": account.name,
+        "email": (account.extra_config or {}).get("email", ""),
+        "groups": [
+            {
+                "displayName": "OpenCode Go Usage",
+                "buckets": buckets,
+            }
+        ],
+        "raw": data,
+    }
+
+
+@router.get("/opencode-go/usage/{account_id}")
+async def get_opencode_go_account_usage(account_id: str):
+    """Fetch live usage for a specific OpenCode Go account."""
+    account = plugin_manager.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    if account.provider_id != "opencode_go":
+        raise HTTPException(status_code=400, detail="Account is not an OpenCode Go account")
+    return await fetch_opencode_go_quota(account)
+
+
+@router.get("/opencode-go/status")
+async def get_opencode_go_all_status():
+    """Fetch live usage for all connected OpenCode Go accounts."""
+    accounts = [a for a in plugin_manager.get_accounts() if a.provider_id == "opencode_go"]
+    if not accounts:
+        return {"accounts": [], "message": "No OpenCode Go accounts configured"}
+
+    async def build(acc: Account) -> Dict[str, Any]:
+        quota = await fetch_opencode_go_quota(acc)
+        return {
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "enabled": acc.enabled,
+            "rate_limited": not acc.is_available(),
+            "quota": quota,
+        }
+
+    results = await asyncio.gather(*(build(acc) for acc in accounts), return_exceptions=True)
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            acc = accounts[index]
+            items.append({
+                "account_id": acc.id,
+                "account_name": acc.name,
+                "enabled": acc.enabled,
+                "rate_limited": not acc.is_available(),
+                "quota": {"error": str(item)},
+            })
+        else:
+            items.append(item)
+    return {"accounts": items}
+
+
+# =========================================================================
 # Telemetry, Stats, and Logs
 # =========================================================================
 

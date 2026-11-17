@@ -61,6 +61,7 @@ _PROVIDER_KINDS = {
     "antigravity": "antigravity",
     "claude_code": "claude",
     "opencode_free": "opencode",
+    "opencode_go": "opencode",
 }
 
 _BLOCKED_HEADERS = {
@@ -163,6 +164,9 @@ def _build_headers(account: Account, provider: str, supplied: Optional[Dict[str,
     elif provider == "claude":
         if not any(name.lower() == "user-agent" for name in headers):
             headers["User-Agent"] = "claude-code/2.1.273"
+    elif provider == "opencode":
+        if not any(name.lower() == "user-agent" for name in headers):
+            headers["User-Agent"] = "llmproxy/1.0"
 
     return headers
 
