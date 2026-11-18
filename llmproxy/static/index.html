@@ -800,77 +800,40 @@
           </div>
         </div>
 
-        <!-- Google Antigravity OAuth Connection Section -->
-        <div id="antigravity-oauth-section" style="margin-bottom: 20px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); display: none;">
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+        <!-- Plugin OAuth Connection Section (generic, provider-owned flow) -->
+        <div id="plugin-oauth-section" style="margin-bottom: 20px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); display: none;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;">
             <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--ink-primary); display: flex; align-items: center; gap: 6px;">
-                <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
-                Google Antigravity Connection
-              </div>
-              <div style="font-size: 11.5px; color: var(--ink-muted); margin-top: 2px;">OAuth loopback redirect with auto-refreshing tokens</div>
+              <div id="plugin-oauth-title" style="font-weight: 600; font-size: 13px; color: var(--ink-primary);">OAuth Connection</div>
+              <div id="plugin-oauth-hint" style="font-size: 11.5px; color: var(--ink-muted); margin-top: 2px;">OAuth sign-in with auto-refreshing tokens</div>
             </div>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-local-google" title="Auto-detect local Antigravity session">⟳ Auto-Import</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-local-plugin-oauth" style="display: none;" title="Import a session already present on this host">⟳ Auto-Import</button>
           </div>
 
           <div style="display: flex; gap: 8px;">
-            <button type="button" class="btn btn-primary btn-sm" id="btn-start-google-oauth" style="display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
-              <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
-              <span>Sign in with Google (OAuth)</span>
-            </button>
-          </div>
-
-          <div id="google-oauth-flow-box" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle);">
-            <div id="google-oauth-status-text" style="font-size: 12px; color: var(--ink-secondary); margin-bottom: 8px;">
-              Waiting for Google authorization...
-            </div>
-            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-              <a href="#" target="_blank" class="btn btn-secondary btn-sm" id="btn-open-google-auth" style="text-decoration: none; flex: 1; text-align: center;">Open Sign-In Tab ↗</a>
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-google-url">Copy Link</button>
-            </div>
-            <div style="margin-top: 8px;">
-              <span class="form-hint" style="margin-bottom: 4px; display: block;">Paste browser redirect URL here if running headless or in Docker:</span>
-              <div style="display: flex; gap: 8px;">
-                <input type="text" class="form-input" id="google-callback-url-paste" placeholder="http://127.0.0.1:.../?code=..." style="flex: 1; min-width: 0; font-size: 11.5px; font-family: var(--font-mono);">
-                <button type="button" class="btn btn-primary btn-sm" id="btn-submit-callback-paste">Connect</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- OpenAI Codex OAuth Connection Section -->
-        <div id="codex-oauth-section" style="margin-bottom: 20px; padding: 16px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: var(--radius-card); display: none;">
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--ink-primary); display: flex; align-items: center; gap: 6px;">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l5.58-5.58c.94-.94.94-2.48 0-3.42L12 2Z"/><path d="M7 7h.01"/></svg>
-                OpenAI Codex Connection
-              </div>
-              <div style="font-size: 11.5px; color: var(--ink-muted); margin-top: 2px;">ChatGPT OAuth 2.0 PKCE loopback redirect with auto-refreshing tokens</div>
-            </div>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-local-codex" title="Auto-detect local Codex session (~/.codex/auth.json)">⟳ Auto-Import</button>
-          </div>
-
-          <div style="display: flex; gap: 8px;">
-            <button type="button" class="btn btn-primary btn-sm" id="btn-start-codex-oauth" style="display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-start-plugin-oauth" style="display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-              <span>Sign in with ChatGPT (OAuth)</span>
+              <span id="plugin-oauth-btn-label">Sign in</span>
             </button>
           </div>
 
-          <div id="codex-oauth-flow-box" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle);">
-            <div id="codex-oauth-status-text" style="font-size: 12px; color: var(--ink-secondary); margin-bottom: 8px;">
-              Waiting for OpenAI / ChatGPT authorization...
+          <div id="plugin-oauth-flow-box" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-subtle);">
+            <div id="plugin-oauth-status-text" style="font-size: 12px; color: var(--ink-secondary); margin-bottom: 8px;">
+              Waiting for authorization...
             </div>
             <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-              <a href="#" target="_blank" class="btn btn-secondary btn-sm" id="btn-open-codex-auth" style="text-decoration: none; flex: 1; text-align: center;">Open Sign-In Tab ↗</a>
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-codex-url">Copy Link</button>
+              <a href="#" target="_blank" rel="noopener" class="btn btn-secondary btn-sm" id="btn-open-plugin-oauth" style="text-decoration: none; flex: 1; text-align: center;">Open Sign-In Page ↗</a>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-plugin-oauth-url">Copy Link</button>
             </div>
-            <div style="margin-top: 8px;">
-              <span class="form-hint" style="margin-bottom: 4px; display: block;">Paste browser redirect URL here if running headless or in Docker:</span>
+            <div id="plugin-oauth-code-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 8px;">
+              <span class="form-hint" style="display: block;">Code:</span>
+              <code id="plugin-oauth-user-code" style="font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.08em; color: var(--ink-primary);"></code>
+            </div>
+            <div id="plugin-oauth-paste-row" style="display: none; margin-top: 8px;">
+              <span class="form-hint" style="margin-bottom: 4px; display: block;">Paste the browser redirect URL here if running headless or in Docker:</span>
               <div style="display: flex; gap: 8px;">
-                <input type="text" class="form-input" id="codex-callback-url-paste" placeholder="http://127.0.0.1:.../auth/callback?code=..." style="flex: 1; min-width: 0; font-size: 11.5px; font-family: var(--font-mono);">
-                <button type="button" class="btn btn-primary btn-sm" id="btn-submit-codex-callback-paste">Connect</button>
+                <input type="text" class="form-input" id="plugin-oauth-callback-url" placeholder="http://127.0.0.1:.../?code=..." style="flex: 1; min-width: 0; font-size: 11.5px; font-family: var(--font-mono);">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-submit-plugin-oauth-callback">Connect</button>
               </div>
             </div>
           </div>

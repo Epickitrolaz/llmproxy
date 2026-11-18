@@ -144,7 +144,7 @@ For the full contract, field tables, and examples, see
   exposed ID. Do not publish synthetic `<model>:<level>` entries as separate models.
 - Built-in templates expose model IDs as `<short-prefix>/<model-name>` and keep
   the provider's native ID in `upstream_model`. The current prefixes are `ap`,
-  `ag`, `cx`, `gm`, `mock`, `compat`, `oc`, `ocg`, and `or`.
+  `ag`, `cx`, `gm`, `mock`, `nous`, `np`, `compat`, `oc`, `ocg`, and `or`.
 - Advertise supported reasoning through `reasoning_levels` on
   `PluginModelConfig` and `ModelCard`. Clients select a level with
   `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
@@ -159,6 +159,39 @@ For the full contract, field tables, and examples, see
   through `reasoning_overrides`, and remap the request per selected target.
   Targets without reasoning support can map a level to `__default__`, which
   accepts the request without forwarding a reasoning control.
+
+## Plugin-owned OAuth login
+
+OAuth login is part of the plugin, not the proxy. The dashboard exposes one
+generic route set and calls optional `BasePlugin` methods:
+
+- `POST /api/plugins/{plugin_id}/oauth/start`
+- `GET /api/plugins/{plugin_id}/oauth/status/{flow_id}`
+- `POST /api/plugins/{plugin_id}/oauth/callback`
+- `POST /api/plugins/{plugin_id}/oauth/import-local`
+
+Set the metadata flags and implement the methods in the provider template:
+
+```python
+PluginMetadata(oauth_login=True, oauth_local_import=True, oauth_hint="...")
+
+async def oauth_start(self) -> Dict[str, Any]: ...
+async def oauth_status(self, flow_id: str) -> Dict[str, Any]: ...
+async def oauth_callback(self, flow_id: str, callback_url: str) -> Dict[str, Any]: ...
+async def oauth_import_local(self) -> Optional[Account]: ...
+async def refresh_account(self, account: Account) -> bool: ...
+```
+
+`oauth_start` returns a flow descriptor with `flow_id` and `mode`
+(`device`, `loopback`, or `callback`), plus `verification_uri_complete` /
+`user_code` for device flows or `auth_url` / `redirect_uri` / `state` for
+loopback flows. `oauth_status` returns `{"status": "pending"|"complete"|"error"}`;
+on success it includes an `Account`. The dashboard saves the account by ID or by
+same provider/name, so singleton providers can return a fresh ID.
+
+Keep the provider's PKCE/device flow, callback parsing, local import, token
+exchange, and refresh logic inside the plugin template. Do not add
+provider-specific OAuth routes or core OAuth modules to the proxy.
 
 ## Provider reasoning and caching
 

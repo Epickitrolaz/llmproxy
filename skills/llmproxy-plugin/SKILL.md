@@ -307,6 +307,50 @@ dashboard are separate and must come from the upstream.
 - Do not fabricate a quota bar. Providers without `supports_usage_meter` are
   omitted from the dashboard usage grid.
 
+## OAuth login (plugin-owned)
+
+OAuth login is implemented inside the plugin. Set the metadata flags and
+implement the optional `BasePlugin` methods; the dashboard calls one generic
+route set (`/api/plugins/{id}/oauth/start|status|callback|import-local`) and
+saves the returned `Account`.
+
+```python
+PluginMetadata(oauth_login=True, oauth_local_import=True, oauth_hint="...")
+
+async def oauth_start(self) -> Dict[str, Any]:
+    # {"flow_id", "mode": "device"|"loopback"|"callback",
+    #  "auth_url"/"redirect_uri"/"state" or
+    #  "verification_uri_complete"/"user_code"}
+    ...
+
+async def oauth_status(self, flow_id: str) -> Dict[str, Any]:
+    # {"status": "pending"|"complete"|"error", "account": Account?}
+    ...
+
+async def oauth_callback(self, flow_id: str, callback_url: str) -> Dict[str, Any]:
+    ...
+
+async def oauth_import_local(self) -> Optional[Account]:
+    ...
+
+async def refresh_account(self, account: Account) -> bool:
+    ...
+```
+
+Rules:
+
+- Keep PKCE/device flow, callback parsing, token exchange, local import, and
+  refresh logic in the provider template. Do not add provider-specific OAuth
+  routes to `llmproxy/dashboard/router.py` or provider OAuth modules under
+  `llmproxy/core/`.
+- Return `Account` objects with the provider's real `provider_id`; the
+  dashboard updates an existing account with the same provider and name, or
+  inserts a new one.
+- Persist rotated refresh tokens immediately. Single-use tokens must never be
+  refreshed by two clients.
+- If the provider supports importing a local CLI/desktop session, set
+  `oauth_local_import=True` and implement `oauth_import_local`.
+
 ## Accounts and credentials
 
 The router selects an account and passes it as `account`:

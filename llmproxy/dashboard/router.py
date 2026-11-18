@@ -11,22 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from llmproxy.core.antigravity_oauth import (
-    ANTIGRAVITY_CLIENT_ID,
-    ANTIGRAVITY_SCOPES,
-    CLOUDCODE_PA_ENDPOINTS,
-    antigravity_oauth,
-)
-from llmproxy.core.codex_oauth import (
-    CODEX_BACKEND_API,
-    CODEX_CLIENT_ID,
-    CODEX_SCOPES,
-    codex_oauth,
-)
 from llmproxy.core.interface import BasePlugin
 from llmproxy.core.manager import plugin_manager
 from llmproxy.core.multimodal import normalize_message_content
-from llmproxy.core.security import redact_account, redact_api_key, require_admin
+from llmproxy.core.security import redact_account, redact_api_key, require_admin, sanitize_ssl_env
 from llmproxy.core.usage import stored_usage_limits
 from llmproxy.dashboard.loader import (
     apply_persisted_config_to_plugin,
@@ -66,6 +54,131 @@ router = APIRouter(
     tags=["dashboard"],
     dependencies=[Depends(require_admin)],
 )
+
+# Cloud Code PA fallback hosts for the Antigravity quota probe. OAuth login
+# itself lives in the plugin; this is only the usage-meter endpoint list.
+CLOUDCODE_PA_ENDPOINTS = [
+    "https://daily-cloudcode-pa.googleapis.com",
+    "https://cloudcode-pa.googleapis.com",
+]
+
+
+# =========================================================================
+# Generic plugin OAuth login
+# =========================================================================
+
+class PluginOAuthCallbackRequest(BaseModel):
+    flow_id: str
+    callback_url: str = ""
+
+
+def _oauth_plugin(plugin_id: str) -> BasePlugin:
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+    if not getattr(plugin.metadata, "oauth_login", False):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plugin '{plugin_id}' does not support OAuth login",
+        )
+    return plugin
+
+
+def _save_oauth_account(account: Account) -> Account:
+    """Insert an OAuth account, or update the provider's same-name account."""
+    existing = plugin_manager.get_account(account.id) if account.id else None
+    if existing is None:
+        matches = [
+            a for a in plugin_manager.get_accounts(provider_id=account.provider_id)
+            if a.name == account.name
+        ]
+        existing = matches[0] if matches else None
+    if existing is not None:
+        updated = plugin_manager.update_account(
+            existing.id,
+            {
+                "name": account.name,
+                "api_key": account.api_key,
+                "base_url": account.base_url,
+                "extra_config": account.extra_config,
+                "enabled": True,
+            },
+        )
+        if updated is not None:
+            return updated
+    return plugin_manager.add_account(account)
+
+
+def _oauth_result(res: Dict[str, Any]) -> Dict[str, Any]:
+    if res.get("status") == "waiting":
+        res["status"] = "pending"
+    if res.get("status") == "complete" and res.get("account"):
+        res["account"] = redact_account(_save_oauth_account(res["account"]))
+    return res
+
+
+async def _refresh_account_via_plugin(plugin_id: str, account: Account) -> bool:
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if plugin is None:
+        return False
+    try:
+        return bool(await plugin.refresh_account(account))
+    except Exception:
+        return False
+
+
+@router.post("/plugins/{plugin_id}/oauth/start")
+async def start_plugin_oauth(plugin_id: str):
+    """Start a plugin-owned OAuth login flow."""
+    plugin = _oauth_plugin(plugin_id)
+    try:
+        return await plugin.oauth_start()
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/plugins/{plugin_id}/oauth/status/{flow_id}")
+async def check_plugin_oauth_status(plugin_id: str, flow_id: str):
+    """Poll a plugin-owned OAuth flow and persist the account on success."""
+    plugin = _oauth_plugin(plugin_id)
+    try:
+        res = await plugin.oauth_status(flow_id)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _oauth_result(res)
+
+
+@router.post("/plugins/{plugin_id}/oauth/callback")
+async def complete_plugin_oauth_callback(plugin_id: str, payload: PluginOAuthCallbackRequest):
+    """Complete a loopback flow from a pasted redirect URL."""
+    plugin = _oauth_plugin(plugin_id)
+    try:
+        res = await plugin.oauth_callback(payload.flow_id, payload.callback_url)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"OAuth completion failed: {exc}") from exc
+    return _oauth_result(res)
+
+
+@router.post("/plugins/{plugin_id}/oauth/import-local")
+async def import_plugin_oauth_account(plugin_id: str):
+    """Import an existing local credential through the plugin."""
+    plugin = _oauth_plugin(plugin_id)
+    if not getattr(plugin.metadata, "oauth_local_import", False):
+        raise HTTPException(
+            status_code=400, detail=f"Plugin '{plugin_id}' has no local import"
+        )
+    try:
+        account = await plugin.oauth_import_local()
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not account:
+        raise HTTPException(status_code=404, detail="No local OAuth session found on this machine")
+    saved = redact_account(_save_oauth_account(account))
+    return {"status": "ok", "message": f"Imported {saved.name}", "account": saved}
 
 
 class PluginCreateRequest(BaseModel):
@@ -824,91 +937,16 @@ async def test_proxy_connectivity(req: ProxyTestRequest):
         }
 
 
-class AntigravityCallbackRequest(BaseModel):
-    callback_url: Optional[str] = None
-    code: Optional[str] = None
-    redirect_uri: Optional[str] = None
-    flow_id: Optional[str] = None
-
-
-@router.post("/antigravity/oauth/start")
-async def start_antigravity_oauth():
-    """Start Google OAuth consent flow with loopback redirect listener."""
-    flow = antigravity_oauth.start_flow()
-    return flow
-
-
-@router.get("/antigravity/oauth/status/{flow_id}")
-async def check_antigravity_oauth_status(flow_id: str):
-    """Check loopback callback status for a pending Google OAuth flow."""
-    res = await antigravity_oauth.check_flow_status(flow_id)
-    if res.get("status") == "complete" and res.get("account"):
-        # Ensure account is persisted in manager
-        saved = plugin_manager.add_account(res["account"])
-        res["account"] = saved
-    return res
-
-
-@router.post("/antigravity/oauth/callback")
-async def complete_antigravity_oauth_callback(payload: AntigravityCallbackRequest):
-    """
-    Complete Google OAuth via manual callback URL or authorization code paste
-    (useful for remote/docker/headless instances where loopback isn't reachable).
-    """
-    code = payload.code
-    redirect_uri = payload.redirect_uri or "http://127.0.0.1:45123/"
-
-    if payload.callback_url:
-        import urllib.parse
-        parsed = urllib.parse.urlparse(payload.callback_url)
-        params = urllib.parse.parse_qs(parsed.query)
-        code = params.get("code", [None])[0]
-        # Reconstruct redirect_uri from the pasted URL
-        redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-    if not code:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract Google authorization code from input",
-        )
-
-    try:
-        account = await antigravity_oauth.exchange_code_and_create_account(
-            code=code, redirect_uri=redirect_uri
-        )
-        saved = plugin_manager.add_account(account)
-        return {"status": "complete", "account": saved}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Google OAuth completion failed: {e}")
-
-
-@router.post("/antigravity/oauth/import-local")
-async def import_local_antigravity_session():
-    """Auto-detect and import local Antigravity acp_token.json credentials from the environment."""
-    account = await antigravity_oauth.import_local_session()
-    if not account:
-        raise HTTPException(
-            status_code=404,
-            detail="No local Antigravity session (acp_token.json) found on this machine",
-        )
-    saved = plugin_manager.add_account(account)
-    return {
-        "status": "ok",
-        "message": f"Successfully imported Google account '{saved.name}'",
-        "account": saved,
-    }
-
-
 async def fetch_antigravity_quota(account: Account) -> Dict[str, Any]:
     """Fetch live quota and usage summary for an Antigravity account using configured endpoints and token refresh."""
     import httpx
-    antigravity_oauth.sanitize_ssl_env()
+    sanitize_ssl_env()
 
     # Pre-emptively refresh token if expiring within 2 minutes or missing
     if account.extra_config.get("refresh_token"):
         expires_at = account.extra_config.get("expires_at", 0)
         if expires_at - time.time() < 120:
-            refreshed = await antigravity_oauth.refresh_account_token(account)
+            refreshed = await _refresh_account_via_plugin("antigravity", account)
             if refreshed:
                 plugin_manager._save_accounts()
 
@@ -941,7 +979,7 @@ async def fetch_antigravity_quota(account: Account) -> Dict[str, Any]:
                     resp = await client.post(url, headers=headers, json=body)
                     # If 401 Unauthorized, refresh token once and retry
                     if resp.status_code == 401 and account.extra_config.get("refresh_token"):
-                        refreshed = await antigravity_oauth.refresh_account_token(account)
+                        refreshed = await _refresh_account_via_plugin("antigravity", account)
                         if refreshed:
                             plugin_manager._save_accounts()
                             headers["Authorization"] = f"Bearer {account.api_key}"
@@ -1021,91 +1059,6 @@ async def get_antigravity_all_status():
 # Codex OAuth & Account Management
 # =========================================================================
 
-class CodexCallbackRequest(BaseModel):
-    callback_url: Optional[str] = None
-    code: Optional[str] = None
-    redirect_uri: Optional[str] = None
-    flow_id: Optional[str] = None
-
-
-@router.post("/codex/oauth/start")
-async def start_codex_oauth():
-    """Start OpenAI Codex OAuth consent flow with PKCE and loopback redirect listener."""
-    flow = codex_oauth.start_flow()
-    return flow
-
-
-@router.get("/codex/oauth/status/{flow_id}")
-async def check_codex_oauth_status(flow_id: str):
-    """Check loopback callback status for a pending Codex OAuth flow."""
-    res = await codex_oauth.check_flow_status(flow_id)
-    if res.get("status") == "complete" and res.get("account"):
-        saved = plugin_manager.add_account(res["account"])
-        res["account"] = saved
-    return res
-
-
-@router.post("/codex/oauth/callback")
-async def complete_codex_oauth_callback(payload: CodexCallbackRequest):
-    """
-    Complete Codex OAuth via manual callback URL or authorization code paste
-    (useful for remote/docker/headless instances where loopback isn't reachable).
-    """
-    code = payload.code
-    redirect_uri = payload.redirect_uri or "http://127.0.0.1:45124/auth/callback"
-    code_verifier = None
-
-    if payload.flow_id and payload.flow_id in codex_oauth.active_flows:
-        flow = codex_oauth.active_flows[payload.flow_id]
-        code_verifier = flow.get("code_verifier")
-        redirect_uri = flow.get("redirect_uri", redirect_uri)
-
-    if payload.callback_url:
-        import urllib.parse
-        parsed = urllib.parse.urlparse(payload.callback_url)
-        params = urllib.parse.parse_qs(parsed.query)
-        code = params.get("code", [None])[0]
-        redirect_uri = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        state = params.get("state", [None])[0]
-        if state:
-            for fid, f in codex_oauth.active_flows.items():
-                if f.get("state") == state:
-                    code_verifier = f.get("code_verifier")
-                    break
-
-    if not code:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract Codex authorization code from input",
-        )
-
-    try:
-        account = await codex_oauth.exchange_code_and_create_account(
-            code=code, redirect_uri=redirect_uri, code_verifier=code_verifier
-        )
-        saved = plugin_manager.add_account(account)
-        return {"status": "complete", "account": saved}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Codex OAuth completion failed: {e}")
-
-
-@router.post("/codex/oauth/import-local")
-async def import_local_codex_session():
-    """Auto-detect and import local Codex session (~/.codex/auth.json) credentials from the environment."""
-    account = await codex_oauth.import_local_session()
-    if not account:
-        raise HTTPException(
-            status_code=404,
-            detail="No local Codex session (~/.codex/auth.json) found on this machine",
-        )
-    saved = plugin_manager.add_account(account)
-    return {
-        "status": "ok",
-        "message": f"Successfully imported Codex account '{saved.name}'",
-        "account": saved,
-    }
-
-
 async def fetch_codex_quota(account: Account) -> Dict[str, Any]:
     """Fetch live usage and rate limits for a Codex account from /backend-api/wham/usage."""
     import httpx
@@ -1114,7 +1067,7 @@ async def fetch_codex_quota(account: Account) -> Dict[str, Any]:
     if account.extra_config.get("refresh_token"):
         expires_at = account.extra_config.get("expires_at", 0)
         if expires_at - time.time() < 120:
-            refreshed = await codex_oauth.refresh_account_token(account)
+            refreshed = await _refresh_account_via_plugin("codex", account)
             if refreshed:
                 plugin_manager._save_accounts()
 
@@ -1136,7 +1089,7 @@ async def fetch_codex_quota(account: Account) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 401 and account.extra_config.get("refresh_token"):
-                refreshed = await codex_oauth.refresh_account_token(account)
+                refreshed = await _refresh_account_via_plugin("codex", account)
                 if refreshed:
                     plugin_manager._save_accounts()
                     headers["Authorization"] = f"Bearer {account.api_key}"
@@ -1214,7 +1167,7 @@ async def fetch_codex_status(account: Account) -> Dict[str, Any]:
     if account.extra_config.get("refresh_token"):
         expires_at = account.extra_config.get("expires_at", 0)
         if expires_at - time.time() < 120:
-            refreshed = await codex_oauth.refresh_account_token(account)
+            refreshed = await _refresh_account_via_plugin("codex", account)
             if refreshed:
                 plugin_manager._save_accounts()
 

@@ -21,6 +21,8 @@ EXPECTED_PREFIXES = {
     "codex": "cx",
     "gemini": "gm",
     "mock_provider": "mock",
+    "nous": "nous",
+    "nous_oauth": "np",
     "openai_compatible": "compat",
     "opencode_free": "oc",
     "opencode_go": "ocg",
@@ -32,6 +34,8 @@ REASONING_TEMPLATES = {
     "antigravity",
     "codex",
     "gemini",
+    "nous",
+    "nous_oauth",
     "opencode_free",
     "opencode_go",
     "openrouter",
@@ -47,7 +51,10 @@ def test_builtin_templates_use_provider_prefixed_model_ids():
         for model in plugin.metadata.models:
             assert model.id.startswith(f"{prefix}/"), (plugin_id, model.id)
             assert model.upstream_model, (plugin_id, model.id)
-            assert not model.upstream_model.startswith(f"{prefix}/"), (plugin_id, model.id)
+            # The Nous free tier's native model ID is itself namespaced
+            # (``nous/welcome``), so it intentionally matches the exposed ID.
+            if plugin_id != "nous":
+                assert not model.upstream_model.startswith(f"{prefix}/"), (plugin_id, model.id)
 
 
 def test_reasoning_templates_expose_levels_on_model_cards():
