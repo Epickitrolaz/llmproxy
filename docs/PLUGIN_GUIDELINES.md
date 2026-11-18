@@ -27,6 +27,32 @@ Answer these questions first:
 If the upstream exposes reasoning controls or prompt/context caching, implementing
 them is mandatory, not optional. See section 3.
 
+## 1a. Use only the plugin building blocks
+
+A plugin is one standalone Python file. Keep the provider protocol, OAuth flow,
+and token refresh inside it. Allowed imports:
+
+- `llmproxy.core.interface.BasePlugin`
+- `llmproxy.schemas` request/response, account, usage, and metadata models
+- `llmproxy.core.multimodal` helpers for text/image translation
+  (`infer_vision_support`, `content_text`, `is_image_part`,
+  `to_openai_image_part`, `to_anthropic_image_block`, `to_gemini_part`,
+  `parse_data_url`, `materialize_message_images`, `messages_have_images`)
+- `llmproxy.core.usage.capture_rate_limit_headers`
+- `llmproxy.core.manager.plugin_manager` only inside a request handler, to
+  persist rotated account tokens
+- Python stdlib and `httpx`
+
+Do not import another template, a provider-specific `llmproxy.core.*_oauth`
+module, FastAPI, or a new dependency. No network I/O at import time, no hardcoded
+secrets, no provider-specific dashboard routes.
+
+Declare capabilities through `PluginMetadata` (`supports_usage_meter`,
+`oauth_login`, `oauth_local_import`, `oauth_hint`) and models through
+`PluginModelConfig` (exposed `id`, native `upstream_model`, context window, max
+tokens, accepted `reasoning_levels`, `supports_vision`). Credentials belong on
+the account, never in variables or source.
+
 ## 2. Usage tracking is mandatory when upstream reports it
 
 If the upstream exposes token counts, the plugin must report them. This is not

@@ -137,11 +137,11 @@ def test_non_oauth_plugin_is_rejected(fake_plugin):
 def test_save_oauth_account_updates_same_name(monkeypatch):
     from llmproxy.dashboard.router import _save_oauth_account
 
-    existing = Account(id="acc_existing", provider_id="nous_oauth", name="Nous Portal (OAuth)")
+    existing = Account(id="acc_existing", provider_id="nous_oauth", name="Nous Free Tier")
     new = Account(
         id="acc_new",
         provider_id="nous_oauth",
-        name="Nous Portal (OAuth)",
+        name="Nous Free Tier",
         api_key="",
         extra_config={"refresh_token": "rt_new"},
     )

@@ -1,4 +1,4 @@
-"""Nous Portal OAuth provider plugin for LLMProxy.
+"""Nous Free Tier provider plugin for LLMProxy.
 
 This provider uses the same OAuth session flow as Hermes Agent instead of a
 Portal API key, so a Free-plan account can call the zero-priced ``:free``
@@ -132,14 +132,14 @@ class NousOAuthLoginRequired(RuntimeError):
 
 
 class NousOAuthPlugin(BasePlugin):
-    """Nous Portal OAuth (Hermes Agent session) provider."""
+    """Nous Free Tier (Hermes Agent session) provider."""
 
     def __init__(self) -> None:
         self._metadata = PluginMetadata(
             id="nous_oauth",
-            name="Nous Portal (OAuth)",
+            name="Nous Free Tier",
             description=(
-                "Nous Portal plan access through the Hermes Agent OAuth session, "
+                "Nous Research free tier through the Hermes Agent OAuth session, "
                 "serving the five zero-priced :free models without an API key"
             ),
             version="1.0.0",
@@ -632,7 +632,7 @@ class NousOAuthPlugin(BasePlugin):
             )
 
         content = (
-            f"Simulated response from Nous Portal OAuth ({model_name}){label}. "
+            f"Simulated response from Nous Free Tier ({model_name}){label}. "
             "Connect a Nous OAuth account to reach the free models."
         )
         if any(m.role == "tool" for m in request.messages):
@@ -851,7 +851,7 @@ class NousOAuthPlugin(BasePlugin):
                     raise self._upstream_error(response.status_code, response.text)
                 capture_rate_limit_headers(account, response.headers)
                 return ChatCompletionResponse.model_validate(response.json())
-        raise RuntimeError("Nous Portal OAuth: inference request failed after token refresh")
+        raise RuntimeError("Nous Free Tier: inference request failed after token refresh")
     # ---------------------------------------------------------------- OAuth
     async def oauth_start(self) -> Dict[str, Any]:
         return await nous_device_login.start_flow()
@@ -887,7 +887,7 @@ class NousOAuthPlugin(BasePlugin):
             return Account(
                 id=f"acc_nous_{uuid.uuid4().hex[:8]}",
                 provider_id="nous_oauth",
-                name="Nous Portal (OAuth)",
+                name="Nous Free Tier",
                 api_key="",
                 priority=1,
                 weight=1,
@@ -1049,7 +1049,7 @@ class NousDeviceLoginManager:
         return Account(
             id=f"acc_nous_{uuid.uuid4().hex[:8]}",
             provider_id="nous_oauth",
-            name="Nous Portal (OAuth)",
+            name="Nous Free Tier",
             api_key="",
             base_url=None,
             priority=1,

@@ -43,7 +43,6 @@ CODEX_AUTH_URI = "https://auth.openai.com/oauth/authorize"
 CODEX_TOKEN_URI = "https://auth.openai.com/oauth/token"
 CODEX_BACKEND_API = "https://chatgpt.com/backend-api"
 CODEX_USER_AGENT = "codex/cli/0.167.0 (linux; x86_64)"
-from llmproxy.core.interface import BasePlugin
 from llmproxy.core.multimodal import (
     content_text,
     is_image_part,

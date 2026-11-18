@@ -1,4 +1,4 @@
-"""Tests for the Nous Portal OAuth provider template."""
+"""Tests for the Nous Free Tier OAuth provider template."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _account(**extra) -> Account:
     return Account(
         id="acc_nous_oauth_test",
         provider_id="nous_oauth",
-        name="Nous Portal (OAuth)",
+        name="Nous Free Tier",
         extra_config=config,
     )
 
@@ -199,7 +199,7 @@ def test_no_account_uses_simulation():
     plugin = NousOAuthPlugin()
     response = asyncio.run(plugin.chat_completion(_request(), _model(), {}))
     assert isinstance(response, ChatCompletionResponse)
-    assert "Nous Portal OAuth" in response.choices[0].message.content
+    assert "Nous Free Tier" in response.choices[0].message.content
 
 
 def test_refresh_rotates_refresh_token_and_calls_inference(monkeypatch):

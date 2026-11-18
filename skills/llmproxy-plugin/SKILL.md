@@ -55,6 +55,51 @@ def create_plugin() -> BasePlugin:
 
 or a `BasePlugin` subclass with a no-argument constructor.
 
+## Plugin anatomy and allowed building blocks
+
+A plugin is one standalone Python file. Keep the whole provider surface in that
+file; do not add provider-specific code to the proxy.
+
+Allowed imports:
+
+- `llmproxy.core.interface.BasePlugin`
+- `llmproxy.schemas`: `Account`, `ChatCompletionRequest`,
+  `ChatCompletionResponse`, `ChatCompletionChunk`, `ChatMessage`,
+  `ChatChoice`, `ChatChoiceDelta`, `CompletionUsage`, `PluginMetadata`,
+  `PluginVariable`, `PluginModelConfig`
+- `llmproxy.core.multimodal` for vision/content translation:
+  `infer_vision_support`, `content_text`, `is_image_part`,
+  `to_openai_image_part`, `to_anthropic_image_block`, `to_gemini_part`,
+  `parse_data_url`, `materialize_message_images`, `messages_have_images`
+- `llmproxy.core.usage.capture_rate_limit_headers`
+- `llmproxy.core.manager.plugin_manager` only inside a request handler, to
+  persist rotated account tokens (`_save_accounts()`)
+- Python stdlib and `httpx`
+
+Do not import another template, a provider-specific `llmproxy.core.*_oauth`
+module, FastAPI, or a new dependency. No network I/O at import time. No secrets
+in source or logs.
+
+Metadata is the dashboard integration surface:
+
+- `supports_usage_meter` when the provider has a real quota/rate-limit window.
+- `oauth_login` / `oauth_local_import` / `oauth_hint` for plugin-owned OAuth.
+- `variables` for settings (never credentials).
+- `models` with exposed `id`, native `upstream_model`, `context_window`,
+  `max_tokens`, `reasoning_levels`, and `supports_vision`.
+
+Request rules: forward system/user/assistant/tool messages, tools and tool
+results, image parts, reasoning controls, cache hints, and streaming usage;
+return the right response/chunk objects; raise upstream errors; never simulate a
+real account failure.
+
+Account rules: read credentials from `account.api_key` and
+`account.extra_config`; use `account.base_url` / `account.proxy_url` overrides;
+persist rotated OAuth tokens immediately; never assume `account` exists.
+
+For the authoritative repository rules, see `AGENTS.md` ("How provider plugins
+are built").
+
 ## Copy the working skeleton
 
 Start from `skills/llmproxy-plugin/assets/plugin_skeleton.py`. It already has:
