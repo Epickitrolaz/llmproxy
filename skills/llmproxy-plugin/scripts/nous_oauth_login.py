@@ -211,7 +211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="LLMProxy admin token (default: LLMPROXY_ADMIN_TOKEN)",
     )
     parser.add_argument("--provider-id", default="nous_oauth")
-    parser.add_argument("--account-name", default="Nous Portal (OAuth)")
+    parser.add_argument("--account-name", default="Nous Free Tier")
     parser.add_argument("--open", action="store_true", help="Open the verification URL in a browser")
     args = parser.parse_args(argv)
 

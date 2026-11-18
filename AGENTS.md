@@ -66,10 +66,9 @@ llmproxy/
   main.py                 FastAPI app, router registration, static mount
   schemas.py              Pydantic schemas for API, plugins, accounts, logs
   api/router.py           OpenAI-compatible /v1 endpoints
-  core/interface.py       BasePlugin contract
+  core/interface.py       BasePlugin contract, including optional usage/OAuth hooks
   core/manager.py         PluginManager: discovery, configs, accounts, rules,
                           proxies, logs, stats, persistence
-  core/*_oauth.py         Provider OAuth helpers (Codex, Antigravity)
   dashboard/router.py     /api dashboard endpoints
   dashboard/loader.py     Plugin file load/validate helpers
   dashboard/templates.py  Template gallery loader
@@ -138,13 +137,109 @@ Rules:
 For the full contract, field tables, and examples, see
 `skills/llmproxy-plugin/SKILL.md` and its `references/` folder.
 
+## How provider plugins are built
+
+A provider plugin is one standalone Python file. The contract, request shape,
+and account model are deliberately small; everything provider-specific lives in
+the plugin. Use these building blocks:
+
+### Allowed imports
+
+- `llmproxy.core.interface.BasePlugin`
+- `llmproxy.schemas`: `Account`, `ChatCompletionRequest`,
+  `ChatCompletionResponse`, `ChatCompletionChunk`, `ChatMessage`,
+  `ChatChoice`, `ChatChoiceDelta`, `CompletionUsage`, `PluginMetadata`,
+  `PluginVariable`, `PluginModelConfig`
+- `llmproxy.core.multimodal` for message/image translation:
+  `infer_vision_support`, `content_text`, `is_image_part`,
+  `to_openai_image_part`, `to_anthropic_image_block`, `to_gemini_part`,
+  `parse_data_url`, `materialize_message_images`, `messages_have_images`
+- `llmproxy.core.usage.capture_rate_limit_headers` for upstream rate-limit
+  headers (required when the provider reports them)
+- `llmproxy.core.manager.plugin_manager` only inside a request handler, to
+  persist rotated OAuth tokens with `_save_accounts()`; never at import time
+- Python stdlib and `httpx`
+
+Do not import another template, a provider-specific `llmproxy.core.*_oauth`
+module, FastAPI, or a new dependency. Do not perform network I/O at import time.
+Do not hardcode secrets. All provider protocol, OAuth, and token refresh code
+belongs in the plugin file.
+
+### Metadata, variables, and models
+
+- `metadata.id` is stable and lowercase; `metadata.filename` matches the file.
+- Declare every configurable setting as a `PluginVariable` of type `string`,
+  `number`, `boolean`, `secret`, or `select`. `select` needs `options`; defaults
+  must work without editing.
+- Declare provider capabilities through metadata:
+  `supports_usage_meter`, `oauth_login`, `oauth_local_import`, `oauth_hint`.
+  These fields drive the dashboard; do not add provider-specific dashboard code.
+- Credentials belong on the account (`account.api_key`,
+  `account.extra_config`), never in variables or source.
+- Every model needs an exposed `id` and a native `upstream_model`. Follow the
+  prefix convention; set `context_window`, `max_tokens`, `reasoning_levels`
+  (only levels the upstream accepts), and `supports_vision` truthfully.
+- Never publish synthetic `<model>:<level>` model IDs.
+- Use `model_config.upstream_model or model_config.id` for upstream calls.
+
+### Request handling
+
+- Normalize image parts with `llmproxy.core.multimodal`; forward tools,
+  `tool_choice`, and `parallel_tool_calls` when supported.
+- Non-streaming returns `ChatCompletionResponse`; streaming returns an async
+  iterator of `ChatCompletionChunk`. The first chunk sets the assistant role;
+  the final chunk sets `finish_reason` and usage when available.
+- Ask upstream for streaming usage (for example
+  `stream_options.include_usage`) even when the client did not, then report
+  `prompt_tokens`, `completion_tokens`, cached tokens, and reasoning tokens.
+- Map `reasoning_effort` to the provider's native control for streaming and
+  non-streaming requests. Forward native cache hints from message content and
+  `extra_body`; never drop them.
+- Use `variables["proxy"]` or `account.proxy_url` in `httpx.AsyncClient(proxy=...)`.
+  Do not resolve the proxy pool yourself.
+- Raise on upstream errors with the status code and a short body excerpt. Do not
+  return fake success for 401/429/5xx.
+- Simulation is only for the synthetic default account or explicit
+  `test`/`mock`/`dummy`/`fake`/`offline`/`sample` keys. A real account failure
+  must never become a simulated response.
+
+### Accounts and persistence
+
+- Read `account.api_key`, `account.base_url`, `account.extra_config`,
+  `account.proxy_url`, and `account.proxy_id`. Assume `account` may be `None`.
+- For OAuth, persist every rotated refresh/access token immediately with
+  `plugin_manager._save_accounts()`. Refresh tokens are often single-use.
+- Never log API keys, OAuth tokens, cookies, or full request/response bodies.
+- Do not invent quota bars. Set `supports_usage_meter` only when the provider
+  exposes a real quota/rate-limit window, and either call
+  `capture_rate_limit_headers` or implement `fetch_usage_quota`.
+
+### OAuth login
+
+OAuth is plugin-owned. Set `oauth_login=True` (and `oauth_local_import=True`
+when import is supported), then implement `oauth_start`, `oauth_status`,
+`oauth_callback`, `oauth_import_local`, and `refresh_account` as needed. Return
+an `Account` on success; the dashboard saves it by ID or same provider/name.
+Do not add provider-specific routes or core OAuth modules to the proxy.
+
+### Validation before handoff
+
+- `python -m py_compile` the plugin.
+- `python skills/llmproxy-plugin/scripts/validate_plugin.py <plugin> --smoke`.
+- Add focused tests for request translation, streaming, tools, usage, reasoning,
+  cache telemetry, errors, OAuth refresh, and simulation guards.
+- Run `pytest -q --ignore=tests/test_codex_and_example_response.py`.
+- If the plugin has an OAuth flow, exercise `oauth_start`/`oauth_status` and
+  assert the account is returned with the durable credential.
+
+
 ## Model listings and reasoning levels
 
 - `GET /v1/models` and the dashboard model list expose each model once under its
   exposed ID. Do not publish synthetic `<model>:<level>` entries as separate models.
 - Built-in templates expose model IDs as `<short-prefix>/<model-name>` and keep
   the provider's native ID in `upstream_model`. The current prefixes are `ap`,
-  `ag`, `cx`, `gm`, `mock`, `nous`, `np`, `compat`, `oc`, `ocg`, and `or`.
+  `ag`, `cx`, `gm`, `mock`, `np`, `compat`, `oc`, `ocg`, and `or`.
 - Advertise supported reasoning through `reasoning_levels` on
   `PluginModelConfig` and `ModelCard`. Clients select a level with
   `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
@@ -286,8 +381,9 @@ Writes use atomic temp-file replacement. Logs and API key usage are debounced.
 - Python: `from __future__ import annotations`, type hints, `async def`, module
   loggers (`logger = logging.getLogger(__name__)`).
 - Pydantic v2: use `model_validate`, `model_dump`, `model_copy`.
-- Keep plugins self-contained. Import only the contract, schemas, OAuth helpers,
-  multimodal helpers (`llmproxy.core.multimodal`), stdlib, and `httpx`.
+- Keep plugins self-contained. Import only the contract, schemas, multimodal
+  helpers (`llmproxy.core.multimodal`), usage helpers (`llmproxy.core.usage`),
+  stdlib, and `httpx`. Use `plugin_manager` only to persist account tokens.
 - Do not add dependencies unless the feature genuinely requires one; update
   `requirements.txt` if you do.
 - Prefer small helper functions over large `chat_completion` bodies.
@@ -324,22 +420,26 @@ version:
 
 1. Copy `skills/llmproxy-plugin/assets/plugin_skeleton.py` to
    `templates/<provider_id>.py` (built-in) or `plugins/<provider_id>.py` (local).
-2. Set a unique `metadata.id`, name, description, version, variables, and models.
+2. Set a unique `metadata.id`, name, description, version, variables, models,
+   and capability flags (`supports_usage_meter`, `oauth_login`, ...).
 3. Implement `chat_completion` with non-streaming and streaming paths.
 4. Handle accounts, base URL, credentials, proxy, tools, usage, reasoning, and
-   errors.
-5. Check the upstream API for token usage metadata. If it reports usage, map it
+   errors. Use the allowed building blocks above; keep provider logic in the file.
+5. For OAuth, set the metadata flags and implement the `oauth_*` and
+   `refresh_account` methods; do not add provider-specific dashboard routes.
+6. Check the upstream API for token usage metadata. If it reports usage, map it
    into `CompletionUsage` for both streaming and non-streaming responses; do not
    ship a provider before that works.
-6. Check the upstream API for reasoning controls and prompt/context caching. If
+7. Check the upstream API for reasoning controls and prompt/context caching. If
    they exist, implement them fully (including streaming and dashboard cache
    counters); do not ship a provider that silently drops them.
-7. Keep a deterministic simulation mode for tests and offline use.
-8. Forward reasoning controls, request streaming usage, and cache hints; report
+8. Keep a deterministic simulation mode for tests and offline use.
+9. Forward reasoning controls, request streaming usage, and cache hints; report
    reasoning and cache counters.
-9. Add focused tests for reasoning translation and cache telemetry.
-10. Run the validator and the stable test suite.
-11. Smoke test via the dashboard Playground or `curl`.
+10. Add focused tests for reasoning translation, cache telemetry, and OAuth
+    refresh when applicable.
+11. Run the validator and the stable test suite.
+12. Smoke test via the dashboard Playground or `curl`.
 
 ## Definition of done
 
