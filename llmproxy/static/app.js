@@ -161,9 +161,8 @@
 
   function closeModal(modalEl) {
     if (!modalEl || !modalEl.classList.contains("active")) return;
-    if (modalEl === el.modalAccount && typeof stopOAuthPolling === "function") {
-      stopOAuthPolling();
-      resetGoogleOAuthUI();
+    if (modalEl === el.modalAccount && typeof resetPluginOAuthUI === "function") {
+      resetPluginOAuthUI();
     }
     modalEl.classList.add("closing");
     setTimeout(() => {
@@ -1602,29 +1601,20 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (!tbody) return;
     tbody.innerHTML = "";
 
-    const isAg = pluginId === "antigravity";
+    const plugin = (state.plugins || []).find((item) => item.id === pluginId);
+    const oauthSupported = Boolean(plugin && plugin.oauth_login);
     const toolbar = document.getElementById("fs-accounts-toolbar");
     if (toolbar) {
-      if (isAg) {
-        toolbar.innerHTML = `
-          <button class="btn btn-primary btn-sm btn-fs-google-oauth" style="display: inline-flex; align-items: center; gap: 6px;">
-            ${GOOGLE_SVG}
-            <span>Sign in with Google</span>
-          </button>
-        `;
-        const gOauthBtn = toolbar.querySelector(".btn-fs-google-oauth");
-        if (gOauthBtn) gOauthBtn.addEventListener("click", () => openAccountModal(null, "antigravity"));
-      } else {
-        toolbar.innerHTML = `<button class="btn btn-primary btn-sm" id="fs-btn-add-account">+ Connect Account</button>`;
-        const btn = toolbar.querySelector("#fs-btn-add-account");
-        if (btn) btn.addEventListener("click", () => openAccountModal(null, pluginId));
-      }
+      const label = oauthSupported ? "Sign in / Connect Account" : "+ Connect Account";
+      toolbar.innerHTML = `<button class="btn btn-primary btn-sm" id="fs-btn-add-account">${label}</button>`;
+      const btn = toolbar.querySelector("#fs-btn-add-account");
+      if (btn) btn.addEventListener("click", () => openAccountModal(null, pluginId));
     }
 
     const accounts = (state.accounts || []).filter((a) => a.provider_id === pluginId);
     if (accounts.length === 0) {
-      const emptyMsg = isAg
-        ? 'No Google accounts connected yet. Click "Sign in with Google" above to connect an account.'
+      const emptyMsg = oauthSupported
+        ? 'No accounts connected yet. Click "Sign in / Connect Account" above to connect one.'
         : 'No accounts connected for this provider. Add keys or tokens to enable load balancing.';
       tbody.innerHTML = `
         <tr>
@@ -3736,141 +3726,163 @@ curl -X POST ${baseUrl}/chat/completions \\
   // Google Antigravity OAuth & Account Helpers
   // =========================================================================
 
-  const GOOGLE_SVG = `<svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>`;
 
-  let currentOAuthPollInterval = null;
+  let currentPluginOAuthPollInterval = null;
+  let currentPluginOAuth = null;
 
-  function stopOAuthPolling() {
-    if (currentOAuthPollInterval) {
-      clearInterval(currentOAuthPollInterval);
-      currentOAuthPollInterval = null;
+  function stopPluginOAuthPolling() {
+    if (currentPluginOAuthPollInterval) {
+      clearInterval(currentPluginOAuthPollInterval);
+      currentPluginOAuthPollInterval = null;
     }
   }
 
-  function resetGoogleOAuthUI() {
-    stopOAuthPolling();
-    const btnStart = document.getElementById("btn-start-google-oauth");
-    const flowBox = document.getElementById("google-oauth-flow-box");
-    const pasteInput = document.getElementById("google-callback-url-paste");
-    const statusText = document.getElementById("google-oauth-status-text");
-    if (btnStart) {
-      btnStart.disabled = false;
-      btnStart.innerHTML = `${GOOGLE_SVG} <span>Sign in with Google (OAuth)</span>`;
-    }
+  function resetPluginOAuthUI() {
+    stopPluginOAuthPolling();
+    currentPluginOAuth = null;
+    const startBtn = document.getElementById("btn-start-plugin-oauth");
+    const label = document.getElementById("plugin-oauth-btn-label");
+    const flowBox = document.getElementById("plugin-oauth-flow-box");
+    const statusText = document.getElementById("plugin-oauth-status-text");
+    const authLink = document.getElementById("btn-open-plugin-oauth");
+    const codeRow = document.getElementById("plugin-oauth-code-row");
+    const codeEl = document.getElementById("plugin-oauth-user-code");
+    const pasteRow = document.getElementById("plugin-oauth-paste-row");
+    const pasteInput = document.getElementById("plugin-oauth-callback-url");
+    if (startBtn) startBtn.disabled = false;
+    if (label) label.textContent = "Sign in";
     if (flowBox) flowBox.style.display = "none";
+    if (statusText) statusText.textContent = "Waiting for authorization...";
+    if (authLink) authLink.href = "#";
+    if (codeRow) codeRow.style.display = "none";
+    if (codeEl) codeEl.textContent = "";
+    if (pasteRow) pasteRow.style.display = "none";
     if (pasteInput) pasteInput.value = "";
-    if (statusText) statusText.textContent = "Waiting for Google authorization...";
   }
 
   function updateAccountModalVisibility() {
     const provSelect = document.getElementById("account-provider-select");
-    const idInput = document.getElementById("account-form-id");
-    const isEditing = Boolean(idInput && idInput.value);
     const selectedProvider = provSelect ? provSelect.value : "";
-    const isAg = selectedProvider === "antigravity";
-    const isCodex = selectedProvider === "codex";
+    const selectedPlugin = (state.plugins || []).find((plugin) => plugin.id === selectedProvider);
+    const isOAuth = Boolean(selectedPlugin && selectedPlugin.oauth_login);
 
-    const agSection = document.getElementById("antigravity-oauth-section");
-    const codexSection = document.getElementById("codex-oauth-section");
+    const oauthSection = document.getElementById("plugin-oauth-section");
+    const oauthTitle = document.getElementById("plugin-oauth-title");
+    const oauthHint = document.getElementById("plugin-oauth-hint");
+    const importBtn = document.getElementById("btn-import-local-plugin-oauth");
     const keyGroup = document.getElementById("account-key-group");
     const usageGroup = document.getElementById("account-usage-tracking-group");
 
-    // Only providers that expose a real upstream usage meter can opt out of it.
-    // Providers without a meter have no quota UI at all.
-    const selectedPlugin = (state.plugins || []).find((plugin) => plugin.id === selectedProvider);
+    if (oauthSection) oauthSection.style.display = isOAuth ? "block" : "none";
+    if (oauthTitle) oauthTitle.textContent = selectedPlugin ? `${selectedPlugin.name} Connection` : "OAuth Connection";
+    if (oauthHint) oauthHint.textContent = (selectedPlugin && selectedPlugin.oauth_hint) || "OAuth sign-in with auto-refreshing tokens";
+    if (importBtn) {
+      importBtn.style.display = isOAuth && selectedPlugin && selectedPlugin.oauth_local_import ? "inline-flex" : "none";
+    }
+    if (keyGroup) keyGroup.style.display = isOAuth ? "none" : "block";
+
     const tracksUsage = Boolean(selectedPlugin && selectedPlugin.supports_usage_meter);
-    if (usageGroup) {
-      usageGroup.style.display = tracksUsage ? "flex" : "none";
-    }
-
-    if (agSection) {
-      agSection.style.display = (isAg && !isEditing) ? "block" : "none";
-    }
-
-    if (codexSection) {
-      codexSection.style.display = (isCodex && !isEditing) ? "block" : "none";
-    }
-
-    if (keyGroup) {
-      // Hide API Key / Token selection entirely when adding or managing a Google Antigravity or Codex account
-      if (isCodex && !isEditing) {
-        keyGroup.style.display = "none";
-      } else {
-        keyGroup.style.display = isAg ? "none" : "block";
-      }
-    }
+    if (usageGroup) usageGroup.style.display = tracksUsage ? "flex" : "none";
   }
 
   const accountProvSelect = document.getElementById("account-provider-select");
   if (accountProvSelect) {
-    accountProvSelect.addEventListener("change", updateAccountModalVisibility);
+    accountProvSelect.addEventListener("change", () => {
+      resetPluginOAuthUI();
+      updateAccountModalVisibility();
+    });
   }
 
-  const btnStartGoogleOAuth = document.getElementById("btn-start-google-oauth");
-  if (btnStartGoogleOAuth) {
-    btnStartGoogleOAuth.addEventListener("click", async () => {
-      const flowBox = document.getElementById("google-oauth-flow-box");
-      const authLink = document.getElementById("btn-open-google-auth");
-      const statusText = document.getElementById("google-oauth-status-text");
+  const btnStartPluginOAuth = document.getElementById("btn-start-plugin-oauth");
+  if (btnStartPluginOAuth) {
+    btnStartPluginOAuth.addEventListener("click", async () => {
+      const provSelect = document.getElementById("account-provider-select");
+      const pluginId = provSelect ? provSelect.value : "";
+      const plugin = (state.plugins || []).find((item) => item.id === pluginId);
+      const flowBox = document.getElementById("plugin-oauth-flow-box");
+      const statusText = document.getElementById("plugin-oauth-status-text");
+      const authLink = document.getElementById("btn-open-plugin-oauth");
+      const codeRow = document.getElementById("plugin-oauth-code-row");
+      const codeEl = document.getElementById("plugin-oauth-user-code");
+      const pasteRow = document.getElementById("plugin-oauth-paste-row");
+      const label = document.getElementById("plugin-oauth-btn-label");
+      if (!pluginId) return;
 
+      stopPluginOAuthPolling();
+      resetPluginOAuthUI();
+      btnStartPluginOAuth.disabled = true;
+      if (label) label.textContent = "Starting...";
+      if (statusText) statusText.textContent = "Requesting a sign-in flow...";
       try {
-        btnStartGoogleOAuth.disabled = true;
-        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Starting OAuth Flow...</span>`;
-        const flow = await api("/api/antigravity/oauth/start", { method: "POST" });
-        btnStartGoogleOAuth.disabled = false;
-        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Restart Google Sign-In</span>`;
-
+        const flow = await api(`/api/plugins/${pluginId}/oauth/start`, { method: "POST" });
+        currentPluginOAuth = { pluginId, flowId: flow.flow_id, mode: flow.mode || "loopback" };
+        const url = flow.auth_url || flow.verification_uri_complete || "#";
+        if (authLink) authLink.href = url;
         if (flowBox) flowBox.style.display = "block";
-        if (authLink) {
-          authLink.href = flow.auth_url;
+        if (statusText) statusText.textContent = flow.instructions || `Waiting for ${plugin ? plugin.name : "provider"} authorization...`;
+        if (flow.user_code) {
+          if (codeRow) codeRow.style.display = "flex";
+          if (codeEl) codeEl.textContent = flow.user_code;
         }
-        if (statusText) {
-          statusText.innerHTML = `
-            <span class="status-dot"></span>
-            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
-          `;
+        if (flow.supports_callback_paste || flow.mode === "loopback") {
+          if (pasteRow) pasteRow.style.display = "block";
+        }
+        if (url && url !== "#") {
+          window.open(url, "_blank", "noopener");
         }
 
-        // Attempt to open Google OAuth sign-in tab
-        try {
-          window.open(flow.auth_url, "_blank");
-        } catch (_) {}
-
-        stopOAuthPolling();
-        currentOAuthPollInterval = setInterval(async () => {
+        currentPluginOAuthPollInterval = setInterval(async () => {
           try {
-            const check = await api(`/api/antigravity/oauth/status/${flow.flow_id}`);
+            const check = await api(`/api/plugins/${pluginId}/oauth/status/${flow.flow_id}`);
+            if (check.status === "pending") {
+              if (statusText) statusText.textContent = flow.user_code
+                ? `Waiting for approval — code ${flow.user_code}`
+                : `Waiting for ${plugin ? plugin.name : "provider"} authorization...`;
+              return;
+            }
             if (check.status === "complete") {
-              stopOAuthPolling();
-              showToast(`Google account '${check.account.name}' connected!`);
+              stopPluginOAuthPolling();
+              if (statusText) statusText.textContent = "Connected.";
+              showToast(`Connected ${plugin ? plugin.name : "provider"} account '${(check.account && check.account.name) || ""}'!`);
               closeModal(el.modalAccount);
               await fetchAccounts();
               if (state.currentFullscreenPluginId) {
                 renderFullscreenAccounts(state.currentFullscreenPluginId);
               }
-            } else if (check.status === "error") {
-              stopOAuthPolling();
-              showToast(`OAuth error: ${check.error}`, "error");
-              if (statusText) statusText.textContent = `Error: ${check.error}`;
+              return;
             }
-          } catch (_) {}
-        }, 2000);
+            stopPluginOAuthPolling();
+            const message = check.error || "OAuth sign-in failed.";
+            if (statusText) statusText.textContent = message;
+            showToast(message, "error");
+            btnStartPluginOAuth.disabled = false;
+            if (label) label.textContent = "Sign in";
+          } catch (err) {
+            stopPluginOAuthPolling();
+            if (statusText) statusText.textContent = `Sign-in status check failed: ${err.message}`;
+            btnStartPluginOAuth.disabled = false;
+            if (label) label.textContent = "Sign in";
+          }
+        }, 5000);
       } catch (err) {
-        btnStartGoogleOAuth.disabled = false;
-        btnStartGoogleOAuth.innerHTML = `${GOOGLE_SVG} <span>Sign in with Google (OAuth)</span>`;
-        showToast(`Failed to start OAuth: ${err.message}`, "error");
+        if (statusText) statusText.textContent = `Could not start sign-in: ${err.message}`;
+        btnStartPluginOAuth.disabled = false;
+        if (label) label.textContent = "Sign in";
       }
     });
   }
 
-  const btnImportLocalGoogle = document.getElementById("btn-import-local-google");
-  if (btnImportLocalGoogle) {
-    btnImportLocalGoogle.addEventListener("click", async () => {
+  const btnImportLocalPluginOAuth = document.getElementById("btn-import-local-plugin-oauth");
+  if (btnImportLocalPluginOAuth) {
+    btnImportLocalPluginOAuth.addEventListener("click", async () => {
+      const provSelect = document.getElementById("account-provider-select");
+      const pluginId = provSelect ? provSelect.value : "";
+      const plugin = (state.plugins || []).find((item) => item.id === pluginId);
+      if (!pluginId) return;
+      btnImportLocalPluginOAuth.disabled = true;
       try {
-        btnImportLocalGoogle.disabled = true;
-        btnImportLocalGoogle.textContent = "Importing...";
-        const res = await api("/api/antigravity/oauth/import-local", { method: "POST" });
-        showToast(res.message || "Google Antigravity account imported!");
+        const res = await api(`/api/plugins/${pluginId}/oauth/import-local`, { method: "POST" });
+        showToast(`Imported ${plugin ? plugin.name : "provider"} account '${(res.account && res.account.name) || ""}'!`);
         closeModal(el.modalAccount);
         await fetchAccounts();
         if (state.currentFullscreenPluginId) {
@@ -3879,177 +3891,62 @@ curl -X POST ${baseUrl}/chat/completions \\
       } catch (err) {
         showToast(`Import failed: ${err.message}`, "error");
       } finally {
-        btnImportLocalGoogle.disabled = false;
-        btnImportLocalGoogle.textContent = "⟳ Auto-Import";
+        btnImportLocalPluginOAuth.disabled = false;
       }
     });
   }
 
-  const btnSubmitCallbackPaste = document.getElementById("btn-submit-callback-paste");
-  if (btnSubmitCallbackPaste) {
-    btnSubmitCallbackPaste.addEventListener("click", async () => {
-      const pasteInput = document.getElementById("google-callback-url-paste");
-      const val = pasteInput ? pasteInput.value.trim() : "";
-      if (!val) {
-        showToast("Please paste the callback URL or code first", "error");
+  const btnCopyPluginOAuthUrl = document.getElementById("btn-copy-plugin-oauth-url");
+  if (btnCopyPluginOAuthUrl) {
+    btnCopyPluginOAuthUrl.addEventListener("click", async () => {
+      const authLink = document.getElementById("btn-open-plugin-oauth");
+      if (!authLink || !authLink.href || authLink.href === "#") return;
+      try {
+        await navigator.clipboard.writeText(authLink.href);
+        showToast("Sign-in link copied");
+      } catch (_) {
+        showToast("Could not copy the link", "error");
+      }
+    });
+  }
+
+  const btnSubmitPluginOAuthCallback = document.getElementById("btn-submit-plugin-oauth-callback");
+  if (btnSubmitPluginOAuthCallback) {
+    btnSubmitPluginOAuthCallback.addEventListener("click", async () => {
+      const pasteInput = document.getElementById("plugin-oauth-callback-url");
+      const value = pasteInput ? pasteInput.value.trim() : "";
+      const flow = currentPluginOAuth;
+      if (!flow) {
+        showToast("Start the sign-in first", "error");
         return;
       }
+      if (!value) {
+        showToast("Paste the callback URL or code first", "error");
+        return;
+      }
+      btnSubmitPluginOAuthCallback.disabled = true;
+      btnSubmitPluginOAuthCallback.textContent = "Connecting...";
       try {
-        btnSubmitCallbackPaste.disabled = true;
-        btnSubmitCallbackPaste.textContent = "Connecting...";
-        const res = await api("/api/antigravity/oauth/callback", {
+        const res = await api(`/api/plugins/${flow.pluginId}/oauth/callback`, {
           method: "POST",
-          body: JSON.stringify({ callback_url: val }),
+          body: JSON.stringify({ flow_id: flow.flowId, callback_url: value }),
         });
-        showToast(`Connected Google account '${res.account.name}'!`);
-        stopOAuthPolling();
-        closeModal(el.modalAccount);
-        await fetchAccounts();
-        if (state.currentFullscreenPluginId) {
-          renderFullscreenAccounts(state.currentFullscreenPluginId);
+        if (res.status === "complete" && res.account) {
+          stopPluginOAuthPolling();
+          showToast(`Connected account '${res.account.name}'!`);
+          closeModal(el.modalAccount);
+          await fetchAccounts();
+          if (state.currentFullscreenPluginId) {
+            renderFullscreenAccounts(state.currentFullscreenPluginId);
+          }
+        } else {
+          showToast(res.error || "OAuth completion failed", "error");
         }
       } catch (err) {
         showToast(`Connection failed: ${err.message}`, "error");
       } finally {
-        btnSubmitCallbackPaste.disabled = false;
-        btnSubmitCallbackPaste.textContent = "Connect";
-      }
-    });
-  }
-
-  function resetCodexOAuthUI() {
-    const flowBox = document.getElementById("codex-oauth-flow-box");
-    const statusText = document.getElementById("codex-oauth-status-text");
-    const pasteInput = document.getElementById("codex-callback-url-paste");
-    const startBtn = document.getElementById("btn-start-codex-oauth");
-
-    if (flowBox) flowBox.style.display = "none";
-    if (statusText) statusText.textContent = "Waiting for OpenAI / ChatGPT authorization...";
-    if (pasteInput) pasteInput.value = "";
-    if (startBtn) {
-      startBtn.disabled = false;
-      startBtn.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-        <span>Sign in with ChatGPT (OAuth)</span>
-      `;
-    }
-  }
-
-  const btnStartCodexOAuth = document.getElementById("btn-start-codex-oauth");
-  if (btnStartCodexOAuth) {
-    btnStartCodexOAuth.addEventListener("click", async () => {
-      const flowBox = document.getElementById("codex-oauth-flow-box");
-      const authLink = document.getElementById("btn-open-codex-auth");
-      const statusText = document.getElementById("codex-oauth-status-text");
-
-      try {
-        btnStartCodexOAuth.disabled = true;
-        btnStartCodexOAuth.innerHTML = `<span>Starting OAuth Flow...</span>`;
-        const flow = await api("/api/codex/oauth/start", { method: "POST" });
-        btnStartCodexOAuth.disabled = false;
-        btnStartCodexOAuth.innerHTML = `<span>Restart ChatGPT Sign-In</span>`;
-
-        if (flowBox) flowBox.style.display = "block";
-        if (authLink) authLink.href = flow.auth_url;
-        if (statusText) {
-          statusText.innerHTML = `
-            <span class="status-dot"></span>
-            Loopback listening on <code>${escapeHtml(flow.redirect_uri)}</code>. Sign in with your browser:
-          `;
-        }
-
-        try {
-          window.open(flow.auth_url, "_blank");
-        } catch (_) {}
-
-        stopOAuthPolling();
-        currentOAuthPollInterval = setInterval(async () => {
-          try {
-            const check = await api(`/api/codex/oauth/status/${flow.flow_id}`);
-            if (check.status === "complete") {
-              stopOAuthPolling();
-              showToast(`Codex account '${check.account.name}' connected!`);
-              closeModal(el.modalAccount);
-              await fetchAccounts();
-              if (state.currentFullscreenPluginId) {
-                renderFullscreenAccounts(state.currentFullscreenPluginId);
-              }
-            } else if (check.status === "error") {
-              stopOAuthPolling();
-              showToast(`OAuth error: ${check.error}`, "error");
-              if (statusText) statusText.textContent = `Error: ${check.error}`;
-            }
-          } catch (_) {}
-        }, 2000);
-      } catch (err) {
-        btnStartCodexOAuth.disabled = false;
-        btnStartCodexOAuth.innerHTML = `<span>Sign in with ChatGPT (OAuth)</span>`;
-        showToast(`Failed to start Codex OAuth: ${err.message}`, "error");
-      }
-    });
-  }
-
-  const btnImportLocalCodex = document.getElementById("btn-import-local-codex");
-  if (btnImportLocalCodex) {
-    btnImportLocalCodex.addEventListener("click", async () => {
-      try {
-        btnImportLocalCodex.disabled = true;
-        btnImportLocalCodex.textContent = "Importing...";
-        const res = await api("/api/codex/oauth/import-local", { method: "POST" });
-        showToast(res.message || "Codex account imported!");
-        closeModal(el.modalAccount);
-        await fetchAccounts();
-        if (state.currentFullscreenPluginId) {
-          renderFullscreenAccounts(state.currentFullscreenPluginId);
-        }
-      } catch (err) {
-        showToast(`Import failed: ${err.message}`, "error");
-      } finally {
-        btnImportLocalCodex.disabled = false;
-        btnImportLocalCodex.textContent = "⟳ Auto-Import";
-      }
-    });
-  }
-
-  const btnCopyCodexUrl = document.getElementById("btn-copy-codex-url");
-  if (btnCopyCodexUrl) {
-    btnCopyCodexUrl.addEventListener("click", () => {
-      const authLink = document.getElementById("btn-open-codex-auth");
-      if (authLink && authLink.href) {
-        navigator.clipboard.writeText(authLink.href);
-        showToast("ChatGPT sign-in URL copied to clipboard!");
-      }
-    });
-  }
-
-  const btnSubmitCodexCallbackPaste = document.getElementById("btn-submit-codex-callback-paste");
-  if (btnSubmitCodexCallbackPaste) {
-    btnSubmitCodexCallbackPaste.addEventListener("click", async () => {
-      const pasteInput = document.getElementById("codex-callback-url-paste");
-      const val = pasteInput ? pasteInput.value.trim() : "";
-      if (!val) {
-        showToast("Please paste the callback URL or code first", "error");
-        return;
-      }
-      try {
-        btnSubmitCodexCallbackPaste.disabled = true;
-        btnSubmitCodexCallbackPaste.textContent = "Connecting...";
-        const res = await api("/api/codex/oauth/callback", {
-          method: "POST",
-          body: JSON.stringify({ callback_url: val }),
-        });
-        showToast(`Connected Codex account '${res.account.name}'!`);
-        stopOAuthPolling();
-        closeModal(el.modalAccount);
-        await fetchAccounts();
-        if (state.currentFullscreenPluginId) {
-          renderFullscreenAccounts(state.currentFullscreenPluginId);
-        }
-      } catch (err) {
-        showToast(`Connection failed: ${err.message}`, "error");
-      } finally {
-        btnSubmitCodexCallbackPaste.disabled = false;
-        btnSubmitCodexCallbackPaste.textContent = "Connect";
+        btnSubmitPluginOAuthCallback.disabled = false;
+        btnSubmitPluginOAuthCallback.textContent = "Connect";
       }
     });
   }
@@ -4091,8 +3988,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     });
     enhanceSelect(provSelect);
 
-    resetGoogleOAuthUI();
-    resetCodexOAuthUI();
+    resetPluginOAuthUI();
 
     if (account) {
       title.textContent = "Edit Provider Account";
@@ -4136,6 +4032,15 @@ curl -X POST ${baseUrl}/chat/completions \\
   const btnSaveAccount = document.getElementById("btn-save-account");
   if (btnSaveAccount) {
     btnSaveAccount.addEventListener("click", async () => {
+      const providerSelect = document.getElementById("account-provider-select");
+      const formId = document.getElementById("account-form-id");
+      const oauthPlugin = providerSelect
+        ? (state.plugins || []).find((plugin) => plugin.id === providerSelect.value)
+        : null;
+      if (oauthPlugin && oauthPlugin.oauth_login && !(formId && formId.value)) {
+        showToast("Use the OAuth sign-in button to connect this provider.", "warning");
+        return;
+      }
       const idInput = document.getElementById("account-form-id");
       const provSelect = document.getElementById("account-provider-select");
       const nameInput = document.getElementById("account-name");

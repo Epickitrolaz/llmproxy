@@ -24,7 +24,7 @@ Tests for Feature 1 (Example Response with Useful Details) and Feature 2 (New Co
    - Deterministic SHA-256 UUIDs and session ID derivation
    - Telemetry headers: ChatGPT-Account-Id, User-Agent: codex/cli/...
    - Local session auto-import from ~/.codex/auth.json
-   - OAuth endpoints: /api/codex/oauth/start, /api/codex/oauth/status, /api/codex/oauth/callback, /api/codex/oauth/import-local, /api/codex/status
+   - OAuth endpoints: /api/plugins/codex/oauth/start, /api/codex/oauth/status, /api/codex/oauth/callback, /api/plugins/codex/oauth/import-local, /api/codex/status
 """
 
 import json
@@ -35,7 +35,7 @@ from fastapi.testclient import TestClient
 
 from llmproxy.main import app
 from llmproxy.core.manager import plugin_manager
-from llmproxy.core.codex_oauth import (
+from templates.codex import (
     CODEX_BACKEND_API,
     CODEX_CLIENT_ID,
     CODEX_SCOPES,
@@ -344,7 +344,7 @@ async def test_feature2_codex_local_session_import():
 def test_feature2_codex_oauth_endpoints():
     """Verify Codex dashboard OAuth endpoints: start, status, and import-local."""
     # 1. Start OAuth Flow
-    res_start = client.post("/api/codex/oauth/start")
+    res_start = client.post("/api/plugins/codex/oauth/start")
     assert res_start.status_code == 200
     start_data = res_start.json()
     assert "flow_id" in start_data
@@ -356,12 +356,12 @@ def test_feature2_codex_oauth_endpoints():
     flow_id = start_data["flow_id"]
 
     # 2. Check Flow Status
-    res_status = client.get(f"/api/codex/oauth/status/{flow_id}")
+    res_status = client.get(f"/api/plugins/codex/oauth/status/{flow_id}")
     assert res_status.status_code == 200
-    assert res_status.json()["status"] in ("waiting", "complete")
+    assert res_status.json()["status"] in ("pending", "complete")
 
     # 3. Auto-Import Local Session
-    res_import = client.post("/api/codex/oauth/import-local")
+    res_import = client.post("/api/plugins/codex/oauth/import-local")
     assert res_import.status_code == 200
     import_data = res_import.json()
     assert import_data["status"] == "ok"

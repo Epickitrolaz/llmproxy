@@ -217,3 +217,21 @@ __all__ = [
     "redact_extra_config",
     "require_admin",
 ]
+
+
+def sanitize_ssl_env() -> None:
+    """Drop SSL certificate env vars that point at missing files.
+
+    Generic host hygiene shared by OAuth-aware plugins and dashboard probes;
+    provider-specific OAuth logic does not live here.
+    """
+    import os
+
+    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        value = os.environ.get(var)
+        if value and not os.path.exists(value):
+            os.environ.pop(var, None)
+    for var in ("SSL_CERT_DIR",):
+        value = os.environ.get(var)
+        if value and not os.path.isdir(value):
+            os.environ.pop(var, None)

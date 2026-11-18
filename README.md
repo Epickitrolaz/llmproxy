@@ -23,6 +23,9 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/codex.py`: OpenAI Codex provider (GPT-6 Luna, GPT-4o, GPT-4o Mini, reasoning effort control).
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
+    - `plugins/nous.py`: Nous Portal free tier (anonymous `nous/welcome` inference, no API key; first use may need a one-time browser check).
+    - `plugins/nous_oauth.py`: Nous Portal OAuth session (Hermes Agent device login from the Accounts tab; Free-plan `:free` models without an API key).
+    - OAuth providers expose one generic **Sign in / Connect Account** flow from the Accounts tab. The plugin owns the device or loopback flow, callback parsing, local import, and token refresh; the dashboard calls `/api/plugins/{id}/oauth/*` and never has provider-specific OAuth routes.
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
 - **Image / Vision Input Across Providers**:
   - Accepts OpenAI `image_url` parts plus Anthropic (`image`) and Gemini
@@ -147,6 +150,8 @@ provider's native ID in `upstream_model`:
 | `codex` | `cx` | `cx/gpt-6-luna` |
 | `gemini` | `gm` | `gm/gemini-3.8-flash` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
+| `nous` | `nous` | `nous/welcome` |
+| `nous_oauth` | `np` | `np/qwen/qwen4-max:free` |
 | `openai_compatible` | `compat` | `compat/default-model` |
 | `opencode_free` | `oc` | `oc/deepseek-v4.1-flash-free` |
 | `opencode_go` | `ocg` | `ocg/gpt-6-luna` |

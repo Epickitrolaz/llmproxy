@@ -315,6 +315,11 @@ class PluginMetadata(BaseModel):
     # Plugins that expose a live upstream usage/quota meter set this to True and
     # either capture rate-limit headers or implement ``fetch_usage_quota``.
     supports_usage_meter: bool = False
+    # Provider-owned OAuth login shown in the Accounts tab. The dashboard calls
+    # the generic BasePlugin.oauth_* methods; no provider-specific routes.
+    oauth_login: bool = False
+    oauth_local_import: bool = False
+    oauth_hint: str = ""
     variables: List[PluginVariable] = Field(default_factory=list)
     models: List[PluginModelConfig] = Field(default_factory=list)
 

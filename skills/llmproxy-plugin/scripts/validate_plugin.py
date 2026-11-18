@@ -54,6 +54,14 @@ def _validate_plugin(plugin: BasePlugin, path: Path) -> tuple[list[str], list[st
         errors.append("metadata.name is required")
     if not meta.models:
         errors.append("metadata.models must contain at least one model")
+    if getattr(meta, "oauth_login", False):
+        for method in ("oauth_start", "oauth_status", "refresh_account"):
+            if not callable(getattr(plugin, method, None)):
+                errors.append(f"oauth_login=True requires a callable {method}()")
+        if getattr(meta, "oauth_local_import", False) and not callable(
+            getattr(plugin, "oauth_import_local", None)
+        ):
+            errors.append("oauth_local_import=True requires a callable oauth_import_local()")
 
     model_ids = [model.id for model in meta.models]
     if len(model_ids) != len(set(model_ids)):

@@ -24,8 +24,6 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from llmproxy.core.antigravity_oauth import antigravity_oauth
-from llmproxy.core.codex_oauth import codex_oauth
 from llmproxy.core.manager import plugin_manager
 from llmproxy.schemas import Account
 
@@ -178,11 +176,12 @@ async def _refresh_account_if_needed(account: Account, provider: str, force: boo
     if not force and account.api_key and (expires_at <= 0 or expires_at - time.time() >= 120):
         return
 
-    if provider == "codex":
-        refreshed = await codex_oauth.refresh_account_token(account)
-    elif provider == "antigravity":
-        refreshed = await antigravity_oauth.refresh_account_token(account)
-    else:
+    plugin = plugin_manager.plugins.get(provider)
+    if plugin is None:
+        return
+    try:
+        refreshed = bool(await plugin.refresh_account(account))
+    except Exception:
         refreshed = False
 
     if refreshed:

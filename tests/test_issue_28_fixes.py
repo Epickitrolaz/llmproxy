@@ -260,14 +260,12 @@ def test_issue3_account_priority_uniqueness_per_provider():
 # =========================================================================
 
 def test_issue4_redirect_url_input_styling():
-    """Verify Google and Codex OAuth callback paste inputs use flex: 1 to fill dialog width."""
+    """Verify the generic OAuth callback paste input fills the dialog width."""
     html = Path("llmproxy/static/index.html").read_text(encoding="utf-8")
-    assert 'id="google-callback-url-paste"' in html
-    assert 'id="codex-callback-url-paste"' in html
+    assert 'id="plugin-oauth-callback-url"' in html
 
-    # Look for flex: 1 styling on callback inputs
     for line in html.splitlines():
-        if "google-callback-url-paste" in line or "codex-callback-url-paste" in line:
+        if "plugin-oauth-callback-url" in line:
             assert "flex: 1" in line
 
 

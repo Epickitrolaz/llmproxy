@@ -221,7 +221,7 @@ def test_accounts_api_endpoints():
 def test_antigravity_oauth_start_and_status():
     """Verify Google Antigravity OAuth start, loopback redirect URL, and status endpoints."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
-        start_res = client.post("/api/antigravity/oauth/start")
+        start_res = client.post("/api/plugins/antigravity/oauth/start")
         assert start_res.status_code == 200
         data = start_res.json()
         assert "flow_id" in data
@@ -231,15 +231,15 @@ def test_antigravity_oauth_start_and_status():
         assert "127.0.0.1" in data["redirect_uri"]
 
         # Check status initially is waiting
-        status_res = client.get(f"/api/antigravity/oauth/status/{data['flow_id']}")
+        status_res = client.get(f"/api/plugins/antigravity/oauth/status/{data['flow_id']}")
         assert status_res.status_code == 200
-        assert status_res.json()["status"] == "waiting"
+        assert status_res.json()["status"] == "pending"
 
 
 def test_antigravity_import_local_and_live_quota():
     """Verify local Antigravity session auto-discovery and live CloudCode PA quota retrieval."""
     with TestClient(app, headers={"X-Admin-Token": "test-admin-token"}) as client:
-        import_res = client.post("/api/antigravity/oauth/import-local")
+        import_res = client.post("/api/plugins/antigravity/oauth/import-local")
         # May be 200 if acp_token is present on host
         if import_res.status_code == 200:
             acc_data = import_res.json()["account"]
@@ -335,9 +335,11 @@ def test_fetch_antigravity_quota_endpoint_ordering_and_401_refresh(monkeypatch):
         account.api_key = "new-refreshed-token"
         return True
 
-    from llmproxy.core.antigravity_oauth import antigravity_oauth
+    from llmproxy.core.manager import plugin_manager
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.setattr(antigravity_oauth, "refresh_account_token", mock_refresh)
+    plugin = plugin_manager.plugins.get("antigravity")
+    if plugin is not None:
+        monkeypatch.setattr(plugin, "refresh_account", mock_refresh)
 
     import asyncio
     result = asyncio.run(fetch_antigravity_quota(acc))
@@ -387,7 +389,7 @@ def test_sanitize_ssl_env_prevents_file_not_found_error(monkeypatch):
     """Verify that invalid SSL_CERT_FILE or CA bundle paths are cleared and don't cause [Errno 2] No such file or directory."""
     import os
     import httpx
-    from llmproxy.core.antigravity_oauth import sanitize_ssl_env
+    from llmproxy.core.security import sanitize_ssl_env
 
     # Simulate environment where SSL_CERT_FILE was set to a non-existent path
     monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/data/ca.crt")
