@@ -187,6 +187,7 @@ class PluginCreateRequest(BaseModel):
 
 
 class PluginModelUpdate(BaseModel):
+    id: Optional[str] = None  # New exposed model ID (rename)
     name: Optional[str] = None
     upstream_model: Optional[str] = None
     enabled: Optional[bool] = None
@@ -616,6 +617,11 @@ async def create_load_balancing_rule(body: LoadBalancingRuleCreate):
         raise HTTPException(status_code=400, detail="Custom model ID is required")
     if not body.targets:
         raise HTTPException(status_code=400, detail="At least one target model must be selected")
+    body.model_id = body.model_id.strip()
+    if any(rule.model_id == body.model_id for rule in plugin_manager.get_load_balancing_rules()):
+        raise HTTPException(
+            status_code=400, detail=f"A load balancing rule for '{body.model_id}' already exists"
+        )
     return plugin_manager.add_load_balancing_rule(body)
 
 
@@ -630,7 +636,23 @@ async def get_load_balancing_rule(rule_id: str):
 
 @router.put("/load-balancing-rules/{rule_id}", response_model=LoadBalancingRule)
 async def update_load_balancing_rule(rule_id: str, body: LoadBalancingRuleUpdate):
-    """Update a custom load balancing rule."""
+    """Update a custom load balancing rule (including its exposed model ID)."""
+    existing = plugin_manager.get_load_balancing_rule(rule_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Load balancing rule '{rule_id}' not found")
+    if body.model_id is not None:
+        new_model_id = body.model_id.strip()
+        if not new_model_id:
+            raise HTTPException(status_code=400, detail="Custom model ID is required")
+        if any(
+            rule.id != rule_id and rule.model_id == new_model_id
+            for rule in plugin_manager.get_load_balancing_rules()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"A load balancing rule for '{new_model_id}' already exists",
+            )
+        body.model_id = new_model_id
     updated = plugin_manager.update_load_balancing_rule(rule_id, body)
     if not updated:
         raise HTTPException(status_code=404, detail=f"Load balancing rule '{rule_id}' not found")
@@ -707,6 +729,17 @@ async def update_custom_model(plugin_id: str, model_id: str, body: PluginModelUp
             status_code=404, detail=f"Model '{model_id}' not found in plugin '{plugin_id}'"
         )
 
+    if body.id is not None:
+        new_id = body.id.strip()
+        if not new_id:
+            raise HTTPException(status_code=400, detail="Model ID cannot be empty")
+        if new_id != model_id:
+            if any(m.id == new_id for m in current_models):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model with ID '{new_id}' already exists in plugin '{plugin_id}'",
+                )
+            target_model.id = new_id
     if body.name is not None:
         target_model.name = body.name
     if body.upstream_model is not None:
