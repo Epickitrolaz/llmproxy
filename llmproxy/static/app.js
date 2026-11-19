@@ -124,6 +124,8 @@
     playgroundAttachBtn: document.getElementById("playground-attach-btn"),
     playgroundImageInput: document.getElementById("playground-image-input"),
     playgroundAttachments: document.getElementById("playground-attachments"),
+    playgroundSidebar: document.getElementById("playground-sidebar"),
+    playgroundParamsToggle: document.getElementById("playground-params-toggle"),
     // Status
     statusProviderTabs: document.getElementById("status-provider-tabs"),
     statusAccountsGrid: document.getElementById("status-accounts-grid"),
@@ -663,6 +665,45 @@
   });
 
   // =========================================================================
+  // RESPONSIVE LAYOUT METRICS
+  // =========================================================================
+
+  let playgroundParamsTouched = false;
+
+  function setPlaygroundParamsCollapsed(collapsed) {
+    if (!el.playgroundSidebar || !el.playgroundParamsToggle) return;
+    el.playgroundSidebar.classList.toggle("is-collapsed", collapsed);
+    el.playgroundParamsToggle.setAttribute("aria-expanded", String(!collapsed));
+    el.playgroundParamsToggle.textContent = collapsed ? "Parameters" : "Hide Parameters";
+  }
+
+  function syncResponsiveLayout() {
+    const header = document.querySelector(".app-header");
+    if (header) {
+      document.documentElement.style.setProperty("--app-header-h", `${header.offsetHeight}px`);
+    }
+    if (!playgroundParamsTouched) {
+      // Match the CSS breakpoint that stacks the playground into one column.
+      setPlaygroundParamsCollapsed(window.matchMedia("(max-width: 1024px)").matches);
+    }
+  }
+
+  if (el.playgroundParamsToggle) {
+    el.playgroundParamsToggle.addEventListener("click", () => {
+      if (!el.playgroundSidebar) return;
+      playgroundParamsTouched = true;
+      const collapsed = !el.playgroundSidebar.classList.contains("is-collapsed");
+      setPlaygroundParamsCollapsed(collapsed);
+    });
+  }
+
+  window.addEventListener("resize", syncResponsiveLayout, { passive: true });
+  if (typeof ResizeObserver !== "undefined") {
+    const headerEl = document.querySelector(".app-header");
+    if (headerEl) new ResizeObserver(syncResponsiveLayout).observe(headerEl);
+  }
+
+  // =========================================================================
   // TAB 1: OVERVIEW & LOCAL API KEYS
   // =========================================================================
 
@@ -726,25 +767,25 @@
         : "Never";
 
       tr.innerHTML = `
-        <td><strong>${escapeHtml(k.name)}</strong></td>
-        <td>
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <code style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-secondary);">${escapeHtml(maskedSecret)}</code>
+        <td data-label="Key Name"><strong>${escapeHtml(k.name)}</strong></td>
+        <td data-label="Secret">
+          <div class="cell-inline">
+            <code class="cell-mono">${escapeHtml(maskedSecret)}</code>
             <button class="btn btn-secondary btn-sm btn-copy-key" data-id="${k.id}" style="padding: 2px 6px; font-size: 11px;">Copy</button>
           </div>
         </td>
-        <td>
+        <td data-label="Status">
           <span class="badge ${k.enabled ? 'badge-active' : 'badge-muted'}">
             ${k.enabled ? "Active" : "Disabled"}
           </span>
         </td>
-        <td style="font-family: var(--font-mono);">${k.total_requests || 0}</td>
-        <td style="font-family: var(--font-mono);">${k.prompt_tokens || 0}</td>
-        <td style="font-family: var(--font-mono);">${k.completion_tokens || 0}</td>
-        <td style="font-family: var(--font-mono); font-weight: 600;">${k.total_tokens || 0}</td>
-        <td style="font-size: 11.5px; color: var(--ink-muted);">${escapeHtml(lastUsed)}</td>
-        <td>
-          <div style="display: flex; gap: 6px;">
+        <td data-label="Requests" class="cell-num">${k.total_requests || 0}</td>
+        <td data-label="Prompt Tokens" class="cell-num">${k.prompt_tokens || 0}</td>
+        <td data-label="Completion Tokens" class="cell-num">${k.completion_tokens || 0}</td>
+        <td data-label="Total Tokens" class="cell-num cell-strong">${k.total_tokens || 0}</td>
+        <td data-label="Last Used" class="cell-muted">${escapeHtml(lastUsed)}</td>
+        <td data-label="Actions">
+          <div class="cell-inline">
             <button class="btn btn-secondary btn-sm btn-edit-key" data-id="${k.id}">Edit</button>
             <button class="btn btn-danger btn-sm btn-delete-key" data-id="${k.id}">Delete</button>
           </div>
@@ -1640,15 +1681,15 @@ curl -X POST ${baseUrl}/chat/completions \\
           : `<span class="badge badge-muted">Disabled</span>`;
 
       tr.innerHTML = `
-        <td><strong>${escapeHtml(acc.name)}</strong></td>
-        <td><code style="font-family: var(--font-mono); font-size: 11.5px;">${escapeHtml(maskedKey)}</code></td>
-        <td>${acc.priority || 1}</td>
-        <td>${acc.weight || 1}</td>
-        <td>${statusBadge}</td>
-        <td>${acc.success_count || 0} / ${acc.error_count || 0}</td>
-        <td style="font-size: 11.5px; color: var(--ink-muted);">${acc.last_used_at ? new Date(acc.last_used_at * 1000).toLocaleTimeString() : 'Never'}</td>
-        <td>
-          <div style="display: flex; gap: 6px;">
+        <td data-label="Account Name"><strong>${escapeHtml(acc.name)}</strong></td>
+        <td data-label="API Key / Token"><code class="cell-mono">${escapeHtml(maskedKey)}</code></td>
+        <td data-label="Priority" class="cell-num">${acc.priority || 1}</td>
+        <td data-label="Weight" class="cell-num">${acc.weight || 1}</td>
+        <td data-label="Status">${statusBadge}</td>
+        <td data-label="Success / Errors" class="cell-num">${acc.success_count || 0} / ${acc.error_count || 0}</td>
+        <td data-label="Last Used" class="cell-muted">${acc.last_used_at ? new Date(acc.last_used_at * 1000).toLocaleTimeString() : 'Never'}</td>
+        <td data-label="Actions">
+          <div class="cell-inline">
             ${inCooldown ? `<button class="btn btn-secondary btn-sm btn-reset-cd" data-id="${acc.id}">Reset</button>` : ''}
             <button class="btn btn-secondary btn-sm btn-edit-acc" data-id="${acc.id}">Edit</button>
             <button class="btn btn-danger btn-sm btn-del-acc" data-id="${acc.id}">Delete</button>
@@ -1848,18 +1889,18 @@ curl -X POST ${baseUrl}/chat/completions \\
         ? ' <span style="font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border-solid); border-radius: 4px; padding: 1px 5px; color: var(--ink-secondary);">Vision</span>'
         : "";
       tr.innerHTML = `
-        <td><strong>${escapeHtml(m.id)}</strong>${visionBadge}</td>
-        <td>${escapeHtml(m.name || m.id)}</td>
-        <td><code style="font-family: var(--font-mono); font-size: 11.5px;">${escapeHtml(m.upstream_model || m.id)}</code></td>
-        <td style="font-family: var(--font-mono);">${m.context_window || 8192} / ${m.max_tokens || 4096}</td>
-        <td>
+        <td data-label="Model ID"><div class="cell-inline wrap"><strong>${escapeHtml(m.id)}</strong>${visionBadge}</div></td>
+        <td data-label="Display Name">${escapeHtml(m.name || m.id)}</td>
+        <td data-label="Upstream ID"><code class="cell-mono">${escapeHtml(m.upstream_model || m.id)}</code></td>
+        <td data-label="Context / Max" class="cell-num">${m.context_window || 8192} / ${m.max_tokens || 4096}</td>
+        <td data-label="Enabled">
           <label class="switch">
             <input type="checkbox" class="fs-model-toggle" data-mid="${m.id}" ${m.enabled ? "checked" : ""}>
             <span class="slider"></span>
           </label>
         </td>
-        <td>
-          <div style="display: flex; gap: 6px; align-items: center;">
+        <td data-label="Actions">
+          <div class="cell-inline">
             <button class="btn btn-secondary btn-sm btn-test btn-fs-test-model" data-mid="${m.id}" title="Test model response">Test</button>
             <button class="btn btn-secondary btn-sm btn-fs-edit-model" data-mid="${m.id}">Edit</button>
             <button class="btn btn-danger btn-sm btn-fs-del-model" data-mid="${m.id}">Delete</button>
@@ -2133,19 +2174,19 @@ curl -X POST ${baseUrl}/chat/completions \\
            </div>`;
 
       tr.innerHTML = `
-        <td><strong style="color: var(--accent-white);">${escapeHtml(r.model_id)}</strong></td>
-        <td>${escapeHtml(r.name || r.model_id)}</td>
-        <td><code style="font-family: var(--font-mono); text-transform: uppercase; font-size: 11.5px;">${escapeHtml(r.strategy)}</code></td>
-        <td><div style="display: flex; flex-wrap: wrap; gap: 4px;">${targetCell}</div></td>
-        <td>${reasoningCell}</td>
-        <td>
+        <td data-label="Model ID"><strong class="cell-strong">${escapeHtml(r.model_id)}</strong></td>
+        <td data-label="Name">${escapeHtml(r.name || r.model_id)}</td>
+        <td data-label="Strategy"><code class="cell-mono cell-upper">${escapeHtml(r.strategy)}</code></td>
+        <td data-label="Targets"><div class="cell-inline wrap">${targetCell}</div></td>
+        <td data-label="Reasoning">${reasoningCell}</td>
+        <td data-label="Status">
           <label class="switch">
             <input type="checkbox" class="rule-enable-toggle" data-id="${r.id}" ${r.enabled ? "checked" : ""}>
             <span class="slider"></span>
           </label>
         </td>
-        <td>
-          <div style="display: flex; gap: 6px;">
+        <td data-label="Actions">
+          <div class="cell-inline">
             <button class="btn btn-secondary btn-sm btn-edit-rule" data-id="${r.id}">Edit</button>
             <button class="btn btn-danger btn-sm btn-del-rule" data-id="${r.id}">Delete</button>
           </div>
@@ -3594,17 +3635,15 @@ curl -X POST ${baseUrl}/chat/completions \\
           : `<span style="color: var(--ink-muted);">—</span>`;
 
       tr.innerHTML = `
-        <td style="font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-muted);">${escapeHtml(timeStr)}</td>
-        <td>${statusBadge}</td>
-        <td><strong style="color: var(--ink-primary);">${escapeHtml(log.model)}</strong></td>
-        <td><span class="badge">${escapeHtml(log.plugin_id || "load_balancer")}</span></td>
-        <td><code style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-secondary);">${escapeHtml(log.api_key_id || "direct")}</code></td>
-        <td style="font-family: var(--font-mono);">${log.latency_ms || 0} ms</td>
-        <td style="font-family: var(--font-mono);">${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
-        <td>${cacheCell}</td>
-        <td style="font-size: 11.5px; color: var(--ink-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-          ${escapeHtml(log.error_message || "Completed")}
-        </td>
+        <td data-label="Time" class="cell-time">${escapeHtml(timeStr)}</td>
+        <td data-label="Status">${statusBadge}</td>
+        <td data-label="Model"><strong class="cell-strong">${escapeHtml(log.model)}</strong></td>
+        <td data-label="Provider"><span class="badge">${escapeHtml(log.plugin_id || "load_balancer")}</span></td>
+        <td data-label="API Key"><code class="cell-key">${escapeHtml(log.api_key_id || "direct")}</code></td>
+        <td data-label="Latency" class="cell-num">${log.latency_ms || 0} ms</td>
+        <td data-label="Tokens" class="cell-num">${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
+        <td data-label="Cache">${cacheCell}</td>
+        <td data-label="Details" class="cell-details">${escapeHtml(log.error_message || "Completed")}</td>
       `;
       el.logsTableBody.appendChild(tr);
     });
@@ -4271,6 +4310,7 @@ curl -X POST ${baseUrl}/chat/completions \\
 
   // Global initial boot
   async function init() {
+    syncResponsiveLayout();
     if (!adminToken) {
       showAuthGate();
       return;
