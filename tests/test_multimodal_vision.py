@@ -30,6 +30,9 @@ PNG_BASE64 = base64.b64encode(b"not-a-real-png").decode("ascii")
 PNG_DATA_URL = f"data:image/png;base64,{PNG_BASE64}"
 IMAGE_URL = "https://example.com/cat.png"
 
+VIDEO_BASE64 = base64.b64encode(b"not-a-real-video").decode("ascii")
+VIDEO_DATA_URL = f"data:video/mp4;base64,{VIDEO_BASE64}"
+
 
 def _message(content):
     return ChatMessage(role="user", content=content)
@@ -175,6 +178,30 @@ def test_antigravity_adapter_emits_inline_data_for_vision():
     parts = body["request"]["contents"][0]["parts"]
     assert parts[0] == {"text": "Describe."}
     assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": PNG_BASE64}}
+
+
+def test_antigravity_adapter_inlines_video_url_and_file_parts():
+    plugin = AntigravityPlugin()
+    model = plugin.metadata.models[0]
+    request = ChatCompletionRequest(
+        model=model.id,
+        messages=[
+            _message(
+                [
+                    {"type": "text", "text": "Describe."},
+                    {"type": "video_url", "video_url": {"url": VIDEO_DATA_URL}},
+                    {"type": "file", "file": {"file_data": VIDEO_DATA_URL}},
+                ]
+            )
+        ],
+    )
+
+    _, body = plugin._build_upstream_request(request, model, account=None)
+
+    parts = body["request"]["contents"][0]["parts"]
+    assert parts[0] == {"text": "Describe."}
+    assert parts[1] == {"inlineData": {"mimeType": "video/mp4", "data": VIDEO_BASE64}}
+    assert parts[2] == {"inlineData": {"mimeType": "video/mp4", "data": VIDEO_BASE64}}
 
 
 def test_codex_adapter_emits_input_image_items():

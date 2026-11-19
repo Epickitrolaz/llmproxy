@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from pathlib import Path
@@ -89,6 +90,22 @@ def test_gemini_template_metadata_and_prefixes():
         "high",
     ]
     assert by_id["gm/gemma-4-31b-it"].reasoning_levels == []
+
+
+def test_gemini_content_parts_inlines_video_url():
+    plugin = GeminiPlugin()
+    video = base64.b64encode(b"not-a-real-video").decode("ascii")
+    parts = plugin._content_parts(
+        [
+            {"type": "text", "text": "Describe."},
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video}"}},
+            {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+        ]
+    )
+
+    assert parts[0] == {"text": "Describe."}
+    assert parts[1] == {"inlineData": {"mimeType": "video/mp4", "data": video}}
+    assert parts[2] == {"text": "[video URL not inlined]"}
 
 
 def test_gemini_payload_translates_messages_tools_cache_and_thinking():
