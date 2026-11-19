@@ -1263,6 +1263,16 @@ class GeminiPlugin(BasePlugin):
                     parts.append(image_part)
                 continue
 
+            if part.get("type") == "video_url":
+                _vu = part.get("video_url") or {}
+                _url = _vu.get("url") if isinstance(_vu, dict) else _vu
+                _parsed = parse_data_url(_url) if isinstance(_url, str) else None
+                if _parsed:
+                    _mime, _data = _parsed
+                    parts.append({"inlineData": {"mimeType": _mime, "data": _data}})
+                else:
+                    parts.append({"text": "[video URL not inlined]"})
+                continue
             part_type = str(part.get("type") or "").lower()
             if part_type in ("text", "input_text", "output_text"):
                 parts.append({"text": str(part.get("text") or "")})

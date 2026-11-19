@@ -1081,6 +1081,24 @@ class AntigravityPlugin(BasePlugin):
                                 else:
                                     parts.append({"text": "[Image could not be loaded]"})
                                 continue
+                            if p.get("type") == "file":
+                                _f = p.get("file") or {}
+                                _fd = _f.get("file_data") or _f.get("fileData")
+                                if _fd and str(_fd).startswith("data:"):
+                                    _head, _, _data = str(_fd).partition(",")
+                                    _mime = _head[5:].split(";")[0] or "application/octet-stream"
+                                    parts.append({"inlineData": {"mimeType": _mime, "data": _data}})
+                                    continue
+                            if p.get("type") == "video_url":
+                                _v = p.get("video_url") or {}
+                                _u = _v.get("url") if isinstance(_v, dict) else _v
+                                if isinstance(_u, str) and _u.startswith("data:"):
+                                    _head, _, _data = _u.partition(",")
+                                    _mime = _head[5:].split(";")[0] or "video/mp4"
+                                    parts.append({"inlineData": {"mimeType": _mime, "data": _data}})
+                                else:
+                                    parts.append({"text": "[video URL not inlined]"})
+                                continue
                             ptype = p.get("type")
                             if ptype in ("text", "input_text"):
                                 part: Dict[str, Any] = {"text": p.get("text", "")}
