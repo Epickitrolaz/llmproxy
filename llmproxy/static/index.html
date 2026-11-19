@@ -19,12 +19,12 @@
     </div>
 
     <!-- Navigation Tabs -->
-    <nav class="nav-tabs">
-      <button class="nav-tab active" data-tab="overview">Overview</button>
-      <button class="nav-tab" data-tab="providers">Providers & Plugins</button>
-      <button class="nav-tab" data-tab="rules">Load Balancing Rules</button>
-      <button class="nav-tab" data-tab="playground">Playground</button>
-      <button class="nav-tab" data-tab="logs">Status</button>
+    <nav class="nav-tabs" aria-label="Dashboard sections">
+      <button class="nav-tab active" data-tab="overview"><span class="nav-label-full">Overview</span><span class="nav-label-short">Overview</span></button>
+      <button class="nav-tab" data-tab="providers"><span class="nav-label-full">Providers &amp; Plugins</span><span class="nav-label-short">Providers</span></button>
+      <button class="nav-tab" data-tab="rules"><span class="nav-label-full">Load Balancing Rules</span><span class="nav-label-short">Rules</span></button>
+      <button class="nav-tab" data-tab="playground"><span class="nav-label-full">Playground</span><span class="nav-label-short">Playground</span></button>
+      <button class="nav-tab" data-tab="logs"><span class="nav-label-full">Status</span><span class="nav-label-short">Status</span></button>
     </nav>
 
     <!-- Header Quick Actions -->
@@ -90,26 +90,26 @@
       </div>
 
       <!-- CLIProxyAPI-compatible Usage Hub -->
-      <div class="card" style="margin-bottom: 24px;">
-        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-          <div style="display: flex; align-items: center; gap: 12px;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title-row">
             <h3>CLIProxyAPI Usage Hub</h3>
             <span class="badge">T3 Code / OpenCode</span>
           </div>
           <button class="btn btn-secondary btn-sm" id="copy-management-key-btn">Copy Key</button>
         </div>
-        <div class="card-body" style="display: flex; flex-direction: column; gap: 10px;">
-          <p style="margin: 0; font-size: 12.5px; color: var(--ink-secondary);">
+        <div class="card-body hub-body">
+          <p class="hub-description">
             Add this router as a CLIProxyAPI-compatible usage hub in T3 Code or OpenCode to see pooled account limits.
             Use the base URL below (the client appends <code>/v0/management/</code>).
           </p>
-          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <span style="font-size: 12px; color: var(--ink-muted); min-width: 110px;">Hub URL</span>
-            <code id="management-hub-url" style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-secondary);">Loading...</code>
+          <div class="hub-row">
+            <span class="hub-row-label">Hub URL</span>
+            <code class="hub-row-value" id="management-hub-url">Loading...</code>
           </div>
-          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <span style="font-size: 12px; color: var(--ink-muted); min-width: 110px;">Management Key</span>
-            <code id="management-hub-key" style="font-family: var(--font-mono); font-size: 12px; color: var(--ink-secondary);">Loading...</code>
+          <div class="hub-row">
+            <span class="hub-row-label">Management Key</span>
+            <code class="hub-row-value" id="management-hub-key">Loading...</code>
           </div>
         </div>
       </div>
@@ -144,9 +144,9 @@
       </div>
 
       <!-- Local API Keys & Usage Tracking -->
-      <div class="card" style="margin-bottom: 24px;">
-        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-          <div style="display: flex; align-items: center; gap: 12px;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title-row">
             <h3>Local API Keys & Usage Tracking</h3>
             <span class="badge" id="api-keys-count-badge">0 keys</span>
           </div>
@@ -218,7 +218,7 @@
       </div>
 
       <!-- Accounts & Providers Overview Strip -->
-      <div class="stats-grid" style="margin-bottom: 24px;">
+      <div class="stats-grid">
         <div class="stat-card">
           <span class="stat-eyebrow">Total Providers</span>
           <span class="stat-value" id="stat-providers-count">0</span>
@@ -299,14 +299,15 @@
           <p>Test completion routing and evaluate model output, latency, and token consumption.</p>
         </div>
         <div class="section-actions">
+          <button class="btn btn-secondary btn-sm playground-params-toggle" id="playground-params-toggle" type="button" aria-expanded="false" aria-controls="playground-sidebar">Parameters</button>
           <button class="btn btn-secondary btn-sm" id="playground-clear-btn">Clear Thread</button>
         </div>
       </div>
 
       <div class="playground-grid">
         <!-- Playground Parameters Sidebar -->
-        <div class="playground-sidebar">
-          <div class="card" style="height: 100%;">
+        <div class="playground-sidebar is-collapsed" id="playground-sidebar">
+          <div class="card">
             <div class="card-header">
               <h3>Parameters</h3>
             </div>
@@ -494,7 +495,7 @@
 
         <!-- FS Panel: Accounts -->
         <div class="modal-fullscreen-panel" id="fs-panel-accounts">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div class="fs-panel-intro">
             <div>
               <h4 style="font-size: 14px; color: var(--ink-primary);">Connected Accounts for Provider</h4>
               <p style="font-size: 12px; color: var(--ink-secondary);">Multi-account pool for round-robin, fallback priorities, and automatic rate-limit cooldowns.</p>
@@ -580,7 +581,7 @@
 
         <!-- FS Panel: Models -->
         <div class="modal-fullscreen-panel" id="fs-panel-models">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div class="fs-panel-intro">
             <div>
               <h4 style="font-size: 14px; color: var(--ink-primary);">Provider Model Aliases</h4>
               <p style="font-size: 12px; color: var(--ink-secondary);">Models exposed to the OpenAI API and their upstream identifier mappings.</p>
