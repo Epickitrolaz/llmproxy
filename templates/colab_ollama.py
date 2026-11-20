@@ -7,28 +7,34 @@ VM), pulls the requested model from the Ollama registry, and serves
 OpenAI-compatible chat completions through the hosted Colab MCP endpoint
 (``https://colaboratory.googleapis.com/mcp``).
 
-Authentication — same as the official Colab CLI
------------------------------------------------
-The plugin owns the Google OAuth login, exactly like ``google-colab-cli``:
+Authentication — plain Google OAuth, no fixed redirect
+------------------------------------------------------
+The plugin owns the login and uses a standard **loopback redirect**
+(``http://localhost`` by default), so nothing depends on Google's
+``sdk.cloud.google.com`` landing page or on any domain being registered for a
+shared client. In the dashboard you open the consent URL, approve, and paste
+the full redirect URL (or just the ``code``) back - even when the browser shows
+"site can't be reached", the address bar still carries ``?code=...``.
 
-* It ships the same **public installed-app OAuth client** the CLI bundles
-  (``764086051850-...``) and the same scope set
-  (``openid``, ``userinfo.profile``, ``userinfo.email``, ``cloud-platform``,
-  ``colaboratory``, ``drive.file``).
-* It uses the CLI's **remote copy-paste flow** (the one
-  ``gcloud auth application-default login`` uses): the dashboard shows a Google
-  consent URL, Google displays an authorization code on
-  ``sdk.cloud.google.com/applicationdefaultauthcode.html``, and the code is
-  pasted back into the generic plugin callback route. No local server, no
-  browser on the proxy host required.
-* The refresh token is stored on the account and every request refreshes the
-  short-lived access token itself, so a login lasts until it is revoked.
-* ``Import local login`` reuses an existing CLI sign-in
-  (``~/.config/colab-cli/token.json`` or the ``google-colab-cli`` keyring entry),
-  so users who already ran ``colab new`` do not sign in twice.
-* A Desktop-app client can be supplied through
-  ``~/.colab-cli-oauth-config.json`` (the CLI's ``-c`` file) or the
-  ``oauth_client_id`` / ``oauth_client_secret`` variables.
+Client selection, in priority order:
+
+1. ``oauth_client_id`` / ``oauth_client_secret`` variables (your own Desktop-app
+   client from your GCP project).
+2. ``oauth_client_config`` JSON (default ``~/.colab-cli-oauth-config.json``, the
+   same ``-c`` file the Colab CLI accepts).
+3. The public installed-app client bundled with ``google-colab-cli``.
+
+The redirect URI is ``oauth_redirect_uri`` when set, otherwise the first
+loopback URI declared by the client config (``redirect_uris``), otherwise
+``http://localhost``. Whatever your client registers, the plugin uses it, and
+the token exchange reuses exactly the same value.
+
+Scopes match the CLI (``openid``, ``userinfo.profile``, ``userinfo.email``,
+``cloud-platform``, ``colaboratory``, ``drive.file``). The refresh token is
+stored on the account and every request refreshes the short-lived access token
+itself, so one login lasts until it is revoked. ``Import local login`` reuses an
+existing CLI sign-in (``~/.config/colab-cli/token.json`` or the
+``google-colab-cli`` keyring entry).
 
 Runtime lifecycle
 -----------------
@@ -107,8 +113,10 @@ CLI_CLIENT_ID = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleuserco
 CLI_CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
 CLI_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 CLI_TOKEN_URI = "https://oauth2.googleapis.com/token"
-# Registered landing page for the cloud-SDK client: Google shows the auth code here.
+# Only used when the caller explicitly selects Google's cloud-SDK landing page.
 REMOTE_REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
+# Generic loopback redirect: registered by desktop clients and needs no domain.
+DEFAULT_REDIRECT_URI = "http://localhost"
 USERINFO_URI = "https://openidconnect.googleapis.com/v1/userinfo"
 
 PUBLIC_SCOPES = (
@@ -278,25 +286,26 @@ class ColabOllamaPlugin(BasePlugin):
             name="Colab Ollama",
             description=(
                 "Runs Ollama on a Google Colab GPU runtime (T4 default); signs in "
-                "with Google like the Colab CLI and serves an OpenAI-compatible API."
+                "with your own Google OAuth client and serves an OpenAI-compatible API."
             ),
-            version="1.1.0",
+            version="1.2.0",
             author="llmproxy",
             enabled=True,
             filename="colab_ollama.py",
             oauth_login=True,
             oauth_local_import=True,
             oauth_hint=(
-                "Sign in with Google, or import an existing Colab CLI login "
-                "(colab new / ~/.config/colab-cli/token.json)."
+                "Sign in with Google using a loopback redirect (no fixed domain), "
+                "or import an existing Colab CLI login."
             ),
             variables=[
                 PluginVariable(name="timeout", label="Request Timeout (s)", type="number", default=620, description="Timeout for the Colab MCP calls."),
                 PluginVariable(name="mcp_base_url", label="Colab MCP Endpoint", type="string", default=DEFAULT_MCP_URL, description="Hosted Colab MCP JSON-RPC endpoint."),
-                PluginVariable(name="oauth_client_config", label="OAuth Client Config Path", type="string", default=CLI_CLIENT_CONFIG_PATH, description="Installed-app client JSON (same file as colab -c). Defaults to the CLI's public client."),
-                PluginVariable(name="oauth_client_id", label="OAuth Client ID Override", type="string", default="", description="Optional Desktop-app client id; overrides the bundled CLI client."),
-                PluginVariable(name="oauth_client_secret", label="OAuth Client Secret Override", type="secret", default="", description="Optional secret for the client id above."),
-                PluginVariable(name="quota_project", label="Default GCP Quota Project", type="string", default="", description="Optional x-goog-user-project. The CLI client usually needs none."),
+                PluginVariable(name="oauth_client_config", label="OAuth Client Config Path", type="string", default=CLI_CLIENT_CONFIG_PATH, description="Installed-app client JSON (same file as colab -c). Its client id and redirect_uris are used."),
+                PluginVariable(name="oauth_client_id", label="OAuth Client ID", type="string", default="", description="Your own Desktop-app client id from your GCP project. Overrides the config file and bundled client."),
+                PluginVariable(name="oauth_client_secret", label="OAuth Client Secret", type="secret", default="", description="Secret for the client id above (optional for PKCE-only clients)."),
+                PluginVariable(name="oauth_redirect_uri", label="OAuth Redirect URI", type="string", default="", description="Redirect registered for the client, e.g. http://localhost. Empty = first loopback URI in the client config, else http://localhost."),
+                PluginVariable(name="quota_project", label="Default GCP Quota Project", type="string", default="", description="Optional x-goog-user-project. Usually unnecessary when the client belongs to your project."),
                 PluginVariable(name="colab_headers", label="Extra HTTP Headers (JSON)", type="string", default="{}", description="Extra JSON headers for Colab API calls."),
                 PluginVariable(name="accelerator", label="Runtime Accelerator", type="string", default="T4", description="Preferred accelerator (T4, L4, A100, G4)."),
                 PluginVariable(name="runtime_variant", label="Runtime Variant", type="select", default="VARIANT_GPU", options=["VARIANT_GPU", "VARIANT_CPU", "VARIANT_TPU"], description="Colab runtime variant."),
@@ -331,7 +340,7 @@ class ColabOllamaPlugin(BasePlugin):
         return self._metadata
 
     # ------------------------------------------------------------------
-    # Google OAuth (same client + flow as the official Colab CLI)
+    # Google OAuth (loopback redirect, your client or the CLI's public one)
     # ------------------------------------------------------------------
 
     def _plugin_variables(self) -> Dict[str, Any]:
@@ -341,14 +350,15 @@ class ColabOllamaPlugin(BasePlugin):
         except Exception:
             return {}
 
-    def _oauth_client(self, variables: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        """Resolve the installed-app OAuth client the CLI would use."""
+    def _oauth_client(self, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Resolve the installed-app OAuth client and its registered redirects."""
         variables = variables or {}
-        client = {
+        client: Dict[str, Any] = {
             "client_id": CLI_CLIENT_ID,
             "client_secret": CLI_CLIENT_SECRET,
             "auth_uri": CLI_AUTH_URI,
             "token_uri": CLI_TOKEN_URI,
+            "redirect_uris": [DEFAULT_REDIRECT_URI],
         }
         raw_path = str(variables.get("oauth_client_config") or CLI_CLIENT_CONFIG_PATH)
         path = Path(os.path.expanduser(raw_path))
@@ -359,6 +369,9 @@ class ColabOllamaPlugin(BasePlugin):
                 for key in ("client_id", "client_secret", "auth_uri", "token_uri"):
                     if installed.get(key):
                         client[key] = str(installed[key])
+                redirects = installed.get("redirect_uris") or []
+                if isinstance(redirects, list):
+                    client["redirect_uris"] = [str(r) for r in redirects if r]
         except Exception:
             pass
         if str(variables.get("oauth_client_id") or "").strip():
@@ -367,13 +380,23 @@ class ColabOllamaPlugin(BasePlugin):
             client["client_secret"] = str(variables["oauth_client_secret"]).strip()
         return client
 
+    def _resolve_redirect(self, variables: Dict[str, Any], client: Dict[str, Any]) -> str:
+        """Pick a redirect URI the configured client actually registers."""
+        configured = str(variables.get("oauth_redirect_uri") or "").strip()
+        if configured:
+            return configured
+        for uri in client.get("redirect_uris") or []:
+            if uri.startswith("http://localhost") or uri.startswith("http://127.0.0.1"):
+                return uri
+        return DEFAULT_REDIRECT_URI
+
     @staticmethod
     def _prune_flows(flows: Dict[str, Dict[str, Any]]) -> None:
         cutoff = time.time() - 900
         for flow_id in [k for k, v in flows.items() if float(v.get("created") or 0) < cutoff]:
             flows.pop(flow_id, None)
 
-    def _account_from_tokens(self, tokens: Dict[str, Any], client: Dict[str, str], email: Optional[str] = None) -> Account:
+    def _account_from_tokens(self, tokens: Dict[str, Any], client: Dict[str, Any], email: Optional[str] = None) -> Account:
         access_token = str(tokens.get("access_token") or "").strip()
         if not access_token:
             raise ColabError("Google OAuth response contained no access token")
@@ -419,22 +442,26 @@ class ColabOllamaPlugin(BasePlugin):
     async def oauth_start(self) -> Dict[str, Any]:
         variables = self._plugin_variables()
         client = self._oauth_client(variables)
+        redirect = self._resolve_redirect(variables, client)
         self._prune_flows(self._oauth_flows)
         flow_id = secrets.token_urlsafe(16)
         params = {
             "client_id": client["client_id"],
-            "redirect_uri": REMOTE_REDIRECT_URI,
+            "redirect_uri": redirect,
             "response_type": "code",
             "scope": " ".join(PUBLIC_SCOPES),
             "access_type": "offline",
             "prompt": "consent",
-            "token_usage": "remote",
             "state": flow_id,
         }
+        # token_usage=remote is only meaningful for Google's cloud-SDK landing page.
+        if redirect == REMOTE_REDIRECT_URI:
+            params["token_usage"] = "remote"
         auth_url = f"{client.get('auth_uri') or CLI_AUTH_URI}?{urlencode(params)}"
         self._oauth_flows[flow_id] = {
             "created": time.time(),
             "client": client,
+            "redirect_uri": redirect,
             "account": None,
             "error": None,
         }
@@ -442,12 +469,14 @@ class ColabOllamaPlugin(BasePlugin):
             "flow_id": flow_id,
             "mode": "loopback",
             "auth_url": auth_url,
-            "redirect_uri": REMOTE_REDIRECT_URI,
+            "redirect_uri": redirect,
             "state": flow_id,
             "supports_callback_paste": True,
             "instructions": (
-                "Open the URL, approve access, then paste the authorization code "
-                "Google shows on the page."
+                "Open the URL and approve access. Google then redirects to "
+                f"{redirect} - if the page fails to load, copy the full address "
+                "from the address bar (it contains ?code=...) and paste it here, "
+                "or paste just the code."
             ),
         }
 
@@ -467,6 +496,7 @@ class ColabOllamaPlugin(BasePlugin):
         if not flow:
             return {"status": "error", "message": "Unknown or expired OAuth flow"}
         client = flow["client"]
+        redirect = str(flow.get("redirect_uri") or DEFAULT_REDIRECT_URI)
         try:
             code = self._extract_code(callback_url)
             if not code:
@@ -478,7 +508,7 @@ class ColabOllamaPlugin(BasePlugin):
                     "code": code,
                     "client_id": client["client_id"],
                     "client_secret": client["client_secret"],
-                    "redirect_uri": REMOTE_REDIRECT_URI,
+                    "redirect_uri": redirect,
                     "grant_type": "authorization_code",
                 },
                 proxy,
@@ -488,8 +518,15 @@ class ColabOllamaPlugin(BasePlugin):
             flow["account"] = account
             return {"status": "complete", "account": account}
         except Exception as exc:
-            flow["error"] = str(exc)
-            return {"status": "error", "message": str(exc)}
+            message = str(exc)
+            if "redirect_uri_mismatch" in message:
+                message += (
+                    " - this redirect URI is not registered for the OAuth client. "
+                    "Set 'oauth_redirect_uri' to a redirect registered for your client, "
+                    "or add a Desktop-app client via oauth_client_id/oauth_client_secret."
+                )
+            flow["error"] = message
+            return {"status": "error", "message": message}
 
     @staticmethod
     def _extract_code(value: str) -> str:
@@ -502,6 +539,10 @@ class ColabOllamaPlugin(BasePlugin):
                 code = parse_qs(parsed.query).get("code")
                 if code:
                     return code[0]
+                if "#" in raw:
+                    frag = parse_qs(parsed.fragment)
+                    if frag.get("code"):
+                        return frag["code"][0]
             except Exception:
                 pass
         return raw
@@ -553,7 +594,7 @@ class ColabOllamaPlugin(BasePlugin):
             )
         if not refresh_token and not access_token:
             raise ValueError("The stored CLI credential has no usable token. Sign in again with colab.")
-        client = {"client_id": client_id, "client_secret": client_secret, "token_uri": token_uri, "auth_uri": client["auth_uri"]}
+        client = {"client_id": client_id, "client_secret": client_secret, "token_uri": token_uri, "auth_uri": client["auth_uri"], "redirect_uris": client.get("redirect_uris") or [DEFAULT_REDIRECT_URI]}
         tokens: Dict[str, Any] = {
             "access_token": access_token,
             "refresh_token": refresh_token,
