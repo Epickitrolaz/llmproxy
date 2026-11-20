@@ -7,49 +7,56 @@ VM), pulls the requested model from the Ollama registry, and serves
 OpenAI-compatible chat completions through the hosted Colab MCP endpoint
 (``https://colaboratory.googleapis.com/mcp``).
 
-How it works
-------------
-1. The provider account stores a Google OAuth access token (``account.api_key``)
-   carrying the ``https://www.googleapis.com/auth/colaboratory`` scope, plus an
-   optional Google Cloud quota project in ``account.extra_config["quota_project"]``
-   (sent as ``x-goog-user-project``). Get a refreshable token with the Colab CLI:
+Authentication — same as the official Colab CLI
+-----------------------------------------------
+The plugin owns the Google OAuth login, exactly like ``google-colab-cli``:
 
-   .. code-block:: bash
+* It ships the same **public installed-app OAuth client** the CLI bundles
+  (``764086051850-...``) and the same scope set
+  (``openid``, ``userinfo.profile``, ``userinfo.email``, ``cloud-platform``,
+  ``colaboratory``, ``drive.file``).
+* It uses the CLI's **remote copy-paste flow** (the one
+  ``gcloud auth application-default login`` uses): the dashboard shows a Google
+  consent URL, Google displays an authorization code on
+  ``sdk.cloud.google.com/applicationdefaultauthcode.html``, and the code is
+  pasted back into the generic plugin callback route. No local server, no
+  browser on the proxy host required.
+* The refresh token is stored on the account and every request refreshes the
+  short-lived access token itself, so a login lasts until it is revoked.
+* ``Import local login`` reuses an existing CLI sign-in
+  (``~/.config/colab-cli/token.json`` or the ``google-colab-cli`` keyring entry),
+  so users who already ran ``colab new`` do not sign in twice.
+* A Desktop-app client can be supplied through
+  ``~/.colab-cli-oauth-config.json`` (the CLI's ``-c`` file) or the
+  ``oauth_client_id`` / ``oauth_client_secret`` variables.
 
-       pip install google-colab-cli
-       colab --auth oauth2 sessions
+Runtime lifecycle
+-----------------
+The plugin lists existing runtimes and reuses one with the ``llmproxy-``
+prefix, otherwise creates ``runtimes/llmproxy-*``. The spec comes from
+``list_runtime_specs`` so free and Pro accounts both land on the best eligible
+accelerator (T4 preferred, then L4/A100/G4/H100, optional CPU fallback).
 
-   If the account also carries ``refresh_token`` + ``client_id`` + ``client_secret``
-   in ``extra_config``, the plugin refreshes the access token itself before use.
-2. On the first request the plugin lists existing runtimes and reuses one with
-   the ``llmproxy-`` prefix, otherwise it creates a fresh ``runtimes/llmproxy-*``
-   runtime. The spec comes from ``list_runtime_specs`` so free and Pro accounts
-   both land on the best eligible accelerator (T4 preferred).
-3. Ollama runs on the VM at 127.0.0.1:11434. Because Colab's public proxy only
-   forwards the Jupyter port (8080), the plugin drives the VM through
-   ``execute_code``: a worker cell ensures Ollama is installed/serving, pulls the
-   model when missing, and runs the completion. Streaming responses are written
-   chunk-by-chunk to ``/content/llmproxy_stream.jsonl``; the plugin tails that
-   file with a cheap second kernel session and yields each delta to the client
-   as SSE in near-real-time.
-4. Multiple provider accounts (one per Google account) work with the router's
-   built-in failover: auth/quota/capacity failures raise, and the router moves
-   on to the next account.
+Ollama runs on the VM at 127.0.0.1:11434. Colab's public proxy only forwards
+the Jupyter port (8080), so the plugin drives the VM through ``execute_code``:
+a worker cell ensures Ollama is installed/serving, pulls the model when
+missing, and runs the completion. Streaming chunks are appended to
+``/content/llmproxy_stream.jsonl`` and tailed with a second kernel session, so
+deltas reach the client as SSE while the VM is still generating.
 
 Latency notes
 -------------
-Cold path (no runtime yet): VM allocation (~30-60s) + Ollama install (~45s) +
-model pull (~5-25s for 0.5B-3B on Colab's network). Warm path (runtime alive,
-model resident): ~2-5s plus generation. Nothing is installed with ``pip`` on the
-VM; ``apt`` is only used once for ``zstd`` (the one dependency of Ollama's
-official installer).
+Cold path: VM allocation (~30-60s) + Ollama install (~45s) + model pull
+(~5-25s for 0.5B-3B on Colab's network). Warm path: ~2-5s plus generation.
+Nothing is installed with ``pip`` on the VM; ``apt`` is used once for ``zstd``
+(the single dependency of Ollama's official installer).
 
 Reasoning / cache / vision
 --------------------------
-The default models are text-only and expose no native reasoning controls, so
+Default models are text-only with no native reasoning controls, so
 ``reasoning_levels`` stays empty and image input raises a clear error. Ollama
-hints such as ``keep_alive``, ``think``, ``cache_prompt``, ``num_ctx`` and
-``num_predict`` are forwarded from ``extra_body`` when supplied.
+hints (``keep_alive``, ``think``, ``cache_prompt``, ``num_ctx``,
+``num_predict``) are forwarded from ``extra_body`` when supplied.
 """
 
 from __future__ import annotations
@@ -57,10 +64,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
+import secrets
 import time
 import uuid
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Union
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -80,12 +91,39 @@ from llmproxy.schemas import (
     PluginVariable,
 )
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 DEFAULT_MCP_URL = "https://colaboratory.googleapis.com/mcp"
 RUNTIME_PREFIX = "llmproxy"
 WORKER_OUT_FILE = "/content/llmproxy_stream.jsonl"
 RESULT_MARK = "__COLABLLM_RESULT__"
 ERROR_MARK = "__COLABLLM_ERROR__"
 PROBE_MARK = "__COLABLLM_PROBE__"
+
+# Public installed-app client shipped with google-colab-cli (colab_cli/oauth_config.json).
+CLI_CLIENT_ID = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
+CLI_CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
+CLI_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+CLI_TOKEN_URI = "https://oauth2.googleapis.com/token"
+# Registered landing page for the cloud-SDK client: Google shows the auth code here.
+REMOTE_REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
+USERINFO_URI = "https://openidconnect.googleapis.com/v1/userinfo"
+
+PUBLIC_SCOPES = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/colaboratory",
+    "https://www.googleapis.com/auth/drive.file",
+)
+
+CLI_CLIENT_CONFIG_PATH = "~/.colab-cli-oauth-config.json"
+CLI_TOKEN_PATH = "~/.config/colab-cli/token.json"
+CLI_KEYRING_SERVICE = "google-colab-cli"
+CLI_KEYRING_USER = "oauth_token"
 
 OLLAMA_EXTRA_FIELDS = (
     "keep_alive",
@@ -239,18 +277,26 @@ class ColabOllamaPlugin(BasePlugin):
             id="colab_ollama",
             name="Colab Ollama",
             description=(
-                "Runs Ollama on a Google Colab GPU runtime (T4 default); spins up "
-                "the VM and pulls the model on demand, served through an "
-                "OpenAI-compatible API."
+                "Runs Ollama on a Google Colab GPU runtime (T4 default); signs in "
+                "with Google like the Colab CLI and serves an OpenAI-compatible API."
             ),
-            version="1.0.0",
+            version="1.1.0",
             author="llmproxy",
             enabled=True,
             filename="colab_ollama.py",
+            oauth_login=True,
+            oauth_local_import=True,
+            oauth_hint=(
+                "Sign in with Google, or import an existing Colab CLI login "
+                "(colab new / ~/.config/colab-cli/token.json)."
+            ),
             variables=[
                 PluginVariable(name="timeout", label="Request Timeout (s)", type="number", default=620, description="Timeout for the Colab MCP calls."),
                 PluginVariable(name="mcp_base_url", label="Colab MCP Endpoint", type="string", default=DEFAULT_MCP_URL, description="Hosted Colab MCP JSON-RPC endpoint."),
-                PluginVariable(name="quota_project", label="Default GCP Quota Project", type="string", default="", description="Google Cloud project sent as x-goog-user-project. Per-account extra_config['quota_project'] wins."),
+                PluginVariable(name="oauth_client_config", label="OAuth Client Config Path", type="string", default=CLI_CLIENT_CONFIG_PATH, description="Installed-app client JSON (same file as colab -c). Defaults to the CLI's public client."),
+                PluginVariable(name="oauth_client_id", label="OAuth Client ID Override", type="string", default="", description="Optional Desktop-app client id; overrides the bundled CLI client."),
+                PluginVariable(name="oauth_client_secret", label="OAuth Client Secret Override", type="secret", default="", description="Optional secret for the client id above."),
+                PluginVariable(name="quota_project", label="Default GCP Quota Project", type="string", default="", description="Optional x-goog-user-project. The CLI client usually needs none."),
                 PluginVariable(name="colab_headers", label="Extra HTTP Headers (JSON)", type="string", default="{}", description="Extra JSON headers for Colab API calls."),
                 PluginVariable(name="accelerator", label="Runtime Accelerator", type="string", default="T4", description="Preferred accelerator (T4, L4, A100, G4)."),
                 PluginVariable(name="runtime_variant", label="Runtime Variant", type="select", default="VARIANT_GPU", options=["VARIANT_GPU", "VARIANT_CPU", "VARIANT_TPU"], description="Colab runtime variant."),
@@ -278,17 +324,326 @@ class ColabOllamaPlugin(BasePlugin):
             ],
         )
         self._runtimes: Dict[str, str] = {}
-        self._ready_models: Dict[str, set] = {}
+        self._oauth_flows: Dict[str, Dict[str, Any]] = {}
 
     @property
     def metadata(self) -> PluginMetadata:
         return self._metadata
 
+    # ------------------------------------------------------------------
+    # Google OAuth (same client + flow as the official Colab CLI)
+    # ------------------------------------------------------------------
+
+    def _plugin_variables(self) -> Dict[str, Any]:
+        try:
+            from llmproxy.core.manager import plugin_manager
+            return dict(plugin_manager.get_plugin_variables(self.metadata.id) or {})
+        except Exception:
+            return {}
+
+    def _oauth_client(self, variables: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        """Resolve the installed-app OAuth client the CLI would use."""
+        variables = variables or {}
+        client = {
+            "client_id": CLI_CLIENT_ID,
+            "client_secret": CLI_CLIENT_SECRET,
+            "auth_uri": CLI_AUTH_URI,
+            "token_uri": CLI_TOKEN_URI,
+        }
+        raw_path = str(variables.get("oauth_client_config") or CLI_CLIENT_CONFIG_PATH)
+        path = Path(os.path.expanduser(raw_path))
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                installed = data.get("installed") or data.get("web") or data
+                for key in ("client_id", "client_secret", "auth_uri", "token_uri"):
+                    if installed.get(key):
+                        client[key] = str(installed[key])
+        except Exception:
+            pass
+        if str(variables.get("oauth_client_id") or "").strip():
+            client["client_id"] = str(variables["oauth_client_id"]).strip()
+        if str(variables.get("oauth_client_secret") or "").strip():
+            client["client_secret"] = str(variables["oauth_client_secret"]).strip()
+        return client
+
+    @staticmethod
+    def _prune_flows(flows: Dict[str, Dict[str, Any]]) -> None:
+        cutoff = time.time() - 900
+        for flow_id in [k for k, v in flows.items() if float(v.get("created") or 0) < cutoff]:
+            flows.pop(flow_id, None)
+
+    def _account_from_tokens(self, tokens: Dict[str, Any], client: Dict[str, str], email: Optional[str] = None) -> Account:
+        access_token = str(tokens.get("access_token") or "").strip()
+        if not access_token:
+            raise ColabError("Google OAuth response contained no access token")
+        scopes = tokens.get("scope") or " ".join(PUBLIC_SCOPES)
+        if isinstance(scopes, list):
+            scopes = " ".join(str(s) for s in scopes)
+        cfg: Dict[str, Any] = {
+            "client_id": client.get("client_id", CLI_CLIENT_ID),
+            "client_secret": client.get("client_secret", CLI_CLIENT_SECRET),
+            "token_uri": client.get("token_uri", CLI_TOKEN_URI),
+            "scopes": scopes,
+            "refresh_token": str(tokens.get("refresh_token") or ""),
+            "expires_at": time.time() + int(tokens.get("expires_in") or 3600) - 60,
+        }
+        quota = os.environ.get("COLAB_QUOTA_PROJECT", "").strip()
+        if quota:
+            cfg["quota_project"] = quota
+        if email:
+            cfg["email"] = email
+        name = f"Google ({email})" if email else "Google Colab"
+        return Account(provider_id=self.metadata.id, name=name, api_key=access_token, extra_config=cfg)
+
+    async def _fetch_email(self, access_token: str, proxy: Optional[str]) -> Optional[str]:
+        try:
+            async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+                resp = await client.get(USERINFO_URI, headers={"Authorization": f"Bearer {access_token}"})
+                if resp.status_code < 400:
+                    return str(resp.json().get("email") or "").strip() or None
+        except Exception:
+            pass
+        return None
+
+    async def _token_request(self, token_uri: str, data: Dict[str, str], proxy: Optional[str] = None) -> Dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
+                resp = await client.post(token_uri or CLI_TOKEN_URI, data=data)
+        except httpx.TransportError as exc:
+            raise ColabError(f"Google OAuth transport error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise ColabError(f"Google OAuth error ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
+    async def oauth_start(self) -> Dict[str, Any]:
+        variables = self._plugin_variables()
+        client = self._oauth_client(variables)
+        self._prune_flows(self._oauth_flows)
+        flow_id = secrets.token_urlsafe(16)
+        params = {
+            "client_id": client["client_id"],
+            "redirect_uri": REMOTE_REDIRECT_URI,
+            "response_type": "code",
+            "scope": " ".join(PUBLIC_SCOPES),
+            "access_type": "offline",
+            "prompt": "consent",
+            "token_usage": "remote",
+            "state": flow_id,
+        }
+        auth_url = f"{client.get('auth_uri') or CLI_AUTH_URI}?{urlencode(params)}"
+        self._oauth_flows[flow_id] = {
+            "created": time.time(),
+            "client": client,
+            "account": None,
+            "error": None,
+        }
+        return {
+            "flow_id": flow_id,
+            "mode": "loopback",
+            "auth_url": auth_url,
+            "redirect_uri": REMOTE_REDIRECT_URI,
+            "state": flow_id,
+            "supports_callback_paste": True,
+            "instructions": (
+                "Open the URL, approve access, then paste the authorization code "
+                "Google shows on the page."
+            ),
+        }
+
+    async def oauth_status(self, flow_id: str) -> Dict[str, Any]:
+        flow = self._oauth_flows.get(flow_id)
+        if not flow:
+            return {"status": "error", "message": "Unknown or expired OAuth flow"}
+        if flow.get("error"):
+            return {"status": "error", "message": flow["error"]}
+        account = flow.get("account")
+        if account is not None:
+            return {"status": "complete", "account": account}
+        return {"status": "pending"}
+
+    async def oauth_callback(self, flow_id: str, callback_url: str) -> Dict[str, Any]:
+        flow = self._oauth_flows.get(flow_id)
+        if not flow:
+            return {"status": "error", "message": "Unknown or expired OAuth flow"}
+        client = flow["client"]
+        try:
+            code = self._extract_code(callback_url)
+            if not code:
+                raise ColabError("No authorization code found in the pasted value")
+            proxy = self._proxy(self._plugin_variables(), None)
+            tokens = await self._token_request(
+                client.get("token_uri", CLI_TOKEN_URI),
+                {
+                    "code": code,
+                    "client_id": client["client_id"],
+                    "client_secret": client["client_secret"],
+                    "redirect_uri": REMOTE_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+                proxy,
+            )
+            email = await self._fetch_email(str(tokens.get("access_token") or ""), proxy)
+            account = self._account_from_tokens(tokens, client, email)
+            flow["account"] = account
+            return {"status": "complete", "account": account}
+        except Exception as exc:
+            flow["error"] = str(exc)
+            return {"status": "error", "message": str(exc)}
+
+    @staticmethod
+    def _extract_code(value: str) -> str:
+        raw = (value or "").strip().strip('"').strip("'")
+        if not raw:
+            return ""
+        if "code=" in raw or raw.startswith("http"):
+            try:
+                parsed = urlparse(raw)
+                code = parse_qs(parsed.query).get("code")
+                if code:
+                    return code[0]
+            except Exception:
+                pass
+        return raw
+
+    def _read_cli_credential(self) -> Optional[Dict[str, Any]]:
+        """Read the credential the Colab CLI stored (token file or OS keyring)."""
+        candidates = []
+        env_path = os.environ.get("COLAB_CLI_TOKEN_FILE", "").strip()
+        if env_path:
+            candidates.append(Path(os.path.expanduser(env_path)))
+        candidates.append(Path(os.path.expanduser(CLI_TOKEN_PATH)))
+        for path in candidates:
+            try:
+                if path.is_file():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                continue
+        try:  # optional: only if the keyring package and backend exist
+            import keyring  # type: ignore
+            raw = keyring.get_password(CLI_KEYRING_SERVICE, CLI_KEYRING_USER)
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return None
+
+    async def oauth_import_local(self) -> Optional[Account]:
+        data = self._read_cli_credential()
+        if not data:
+            raise ValueError(
+                "No Colab CLI login found. Run `pip install google-colab-cli && colab new` "
+                "(or `colab --auth oauth2 sessions`) once, then import again."
+            )
+        client = self._oauth_client(self._plugin_variables())
+        client_id = str(data.get("client_id") or client["client_id"])
+        client_secret = str(data.get("client_secret") or client["client_secret"])
+        token_uri = str(data.get("token_uri") or client["token_uri"])
+        refresh_token = str(data.get("refresh_token") or "")
+        access_token = str(data.get("token") or data.get("access_token") or "")
+        scopes = data.get("scopes") or list(PUBLIC_SCOPES)
+        if isinstance(scopes, list) and not any("colaboratory" in str(s) for s in scopes):
+            raise ValueError(
+                "The stored CLI credential lacks the colaboratory scope. "
+                "Re-run `colab --auth oauth2 sessions`."
+            )
+        if not refresh_token and not access_token:
+            raise ValueError("The stored CLI credential has no usable token. Sign in again with colab.")
+        client = {"client_id": client_id, "client_secret": client_secret, "token_uri": token_uri, "auth_uri": client["auth_uri"]}
+        tokens: Dict[str, Any] = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "scope": " ".join(scopes) if isinstance(scopes, list) else str(scopes),
+            "expires_in": 0,
+        }
+        account = self._account_from_tokens(tokens, client)
+        try:
+            await self._refresh_access_token(account, self._plugin_variables())
+        except Exception:
+            if not access_token:
+                raise
+        email = await self._fetch_email(account.api_key, None)
+        if email:
+            account.name = f"Google ({email})"
+            account.extra_config["email"] = email
+        return account
+
+    async def _refresh_access_token(self, account: Account, variables: Dict[str, Any]) -> str:
+        cfg = dict(account.extra_config or {})
+        refresh_token = str(cfg.get("refresh_token") or "").strip()
+        client = self._oauth_client(variables)
+        client_id = str(cfg.get("client_id") or client["client_id"])
+        client_secret = str(cfg.get("client_secret") or client["client_secret"])
+        token_uri = str(cfg.get("token_uri") or client["token_uri"])
+        if not refresh_token:
+            raise ColabError(
+                f"Account '{account.name}' has no Google refresh token. "
+                "Reconnect it with Sign in with Google or Import local login."
+            )
+        proxy = self._proxy(variables, account)
+        tokens = await self._token_request(
+            token_uri,
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            proxy,
+        )
+        access_token = str(tokens.get("access_token") or "").strip()
+        if not access_token:
+            raise ColabError("Google OAuth refresh returned no access token")
+        account.api_key = access_token
+        cfg["expires_at"] = time.time() + int(tokens.get("expires_in") or 3600) - 60
+        if tokens.get("refresh_token"):
+            cfg["refresh_token"] = tokens["refresh_token"]
+        if tokens.get("scope"):
+            scope = tokens["scope"]
+            cfg["scopes"] = " ".join(scope) if isinstance(scope, list) else str(scope)
+        account.extra_config = cfg
+        try:
+            from llmproxy.core.manager import plugin_manager
+            plugin_manager._save_accounts()
+        except Exception:
+            pass
+        return access_token
+
+    async def refresh_account(self, account: Account) -> bool:
+        try:
+            before = account.api_key
+            await self._refresh_access_token(account, self._plugin_variables())
+            return account.api_key != before or bool(account.api_key)
+        except Exception:
+            return False
+
+    async def _ensure_access_token(self, account: Optional[Account], variables: Dict[str, Any]) -> str:
+        if account is None:
+            return ""
+        token = (account.api_key or "").strip()
+        cfg = account.extra_config or {}
+        refresh = str(cfg.get("refresh_token") or "").strip()
+        expires_at = float(cfg.get("expires_at") or 0)
+        if refresh and (not token or (expires_at and expires_at - 120 <= time.time())):
+            token = await self._refresh_access_token(account, variables)
+        return token
+
+    # ------------------------------------------------------------------
+    # Simulation mode (offline tests / no account configured)
+    # ------------------------------------------------------------------
+
     def _is_test_mode(self, api_key: str, account: Optional[Account] = None) -> bool:
         key = (api_key or "").lower().strip()
         if not key:
             if account is not None and not str(account.id).startswith("default-"):
-                raise ValueError(f"Account '{account.name}' has no Google access token configured.")
+                raise ValueError(
+                    f"Account '{account.name}' has no Google credential. Use "
+                    "'Sign in with Google' or 'Import local login' in the Accounts tab."
+                )
             return True
         return any(key.startswith(prefix) for prefix in _SIM_PREFIXES)
 
@@ -338,6 +693,10 @@ class ColabOllamaPlugin(BasePlugin):
         yield ChatCompletionChunk(id=chunk_id, created=created, model=request.model,
                                   choices=[ChatChoiceDelta(index=0, delta={}, finish_reason="stop")], usage=resp.usage)
 
+    # ------------------------------------------------------------------
+    # Colab MCP JSON-RPC client
+    # ------------------------------------------------------------------
+
     def _request_headers(self, account: Optional[Account], variables: Dict[str, Any]) -> Dict[str, str]:
         headers: Dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         token = (account.api_key if account and account.api_key else "").strip()
@@ -365,30 +724,6 @@ class ColabOllamaPlugin(BasePlugin):
 
     def _endpoint(self, variables: Dict[str, Any]) -> str:
         return str(variables.get("mcp_base_url") or DEFAULT_MCP_URL).rstrip("/")
-
-    async def _refresh_token_if_needed(self, account: Account, variables: Dict[str, Any]) -> None:
-        cfg = account.extra_config or {}
-        refresh = str(cfg.get("refresh_token") or "").strip()
-        client_id = str(cfg.get("client_id") or "").strip()
-        client_secret = str(cfg.get("client_secret") or "").strip()
-        if not (refresh and client_id):
-            return
-        try:
-            proxy = self._proxy(variables, account)
-            async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
-                resp = await client.post("https://oauth2.googleapis.com/token", data={"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id, "client_secret": client_secret})
-                resp.raise_for_status()
-                data = resp.json()
-                new_token = data.get("access_token")
-                if new_token:
-                    account.api_key = new_token
-                    try:
-                        from llmproxy.core.manager import plugin_manager
-                        plugin_manager._save_accounts()
-                    except Exception:
-                        pass
-        except Exception:
-            return
 
     @staticmethod
     def _parse_mcp_response(resp: httpx.Response) -> Dict[str, Any]:
@@ -506,7 +841,7 @@ class ColabOllamaPlugin(BasePlugin):
             specs = await self._list_runtime_specs(account, variables)
             eligible = [s.get("key") for s in specs if isinstance(s, dict) and s.get("eligible") and isinstance(s.get("key"), dict)]
             if not eligible:
-                raise ColabError("No eligible Colab runtime specs for this account. Check the account token/scope and Colab quota.")
+                raise ColabError("No eligible Colab runtime specs for this account. Check the account login and Colab quota.")
             exact = next((k for k in eligible if k.get("variant") == variant and k.get("accelerator") == accelerator and k.get("shape") == shape), None)
             if exact:
                 return exact
@@ -533,7 +868,7 @@ class ColabOllamaPlugin(BasePlugin):
         cached = self._runtimes.get(account_key)
         if cached and bool(variables.get("reuse_runtime", True)):
             return cached
-        prefix = str(variables.get("runtime_prefix") or RUNTIME_PREFIX).strip("-_")
+        prefix = str(variables.get("runtime_prefix") or RUNTIME_PREFIX).strip("- _")
         if not prefix:
             prefix = RUNTIME_PREFIX
         reuse = bool(variables.get("reuse_runtime", True))
@@ -679,7 +1014,7 @@ class ColabOllamaPlugin(BasePlugin):
         return body
 
     async def chat_completion(self, request: ChatCompletionRequest, model_config: PluginModelConfig, variables: Dict[str, Any], account: Optional[Account] = None) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionChunk]]:
-        api_key = (account.api_key if account else "").strip()
+        api_key = await self._ensure_access_token(account, variables)
         if self._is_test_mode(api_key, account):
             if request.stream:
                 return self._simulation_stream(request, model_config)
