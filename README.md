@@ -70,9 +70,6 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Select a routing strategy: Round Robin, Least Used, Random, or Fallback.
   - Ordered target list: in Fallback mode the first entry is the primary and lower
     entries are the next fallbacks; Round Robin follows the same order.
-  - Optional context window and max output tokens for the virtual model. When
-    left blank, `/v1/models` reports the smallest limit across the targets.
-  - The exposed model ID can be renamed at any time from the rule editor.
   - Transparently exposed in `GET /v1/models` and routed dynamically during completions.
   - Request logs and status views attribute each call to the target model that
     actually served it and that model's provider, not the virtual rule ID.
@@ -179,9 +176,6 @@ plugin-backed model reports its configured limits through `context_window` and
 Clients can use those levels to offer a reasoning selector and send the chosen
 level as `reasoning_effort` in the request body. The proxy maps it internally;
 no separate model IDs are required.
-
-Every model's exposed ID — built-in, custom, or a virtual rule — can be renamed
-after creation from the dashboard; requests must then use the new ID.
 
 The `:<level>` suffix is also accepted generically for any provider model and is
 stripped before routing. For example `cx/gpt-6-luna:high` resolves to

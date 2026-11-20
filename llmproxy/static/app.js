@@ -1992,7 +1992,7 @@ curl -X POST ${baseUrl}/chat/completions \\
     document.getElementById("model-form-plugin-id").value = pluginId;
     const idInput = document.getElementById("model-form-id");
     idInput.value = isEdit ? model.id : "";
-    idInput.dataset.originalId = isEdit ? model.id : "";
+    idInput.disabled = isEdit;
     document.getElementById("model-form-name").value = isEdit ? (model.name || "") : "";
     document.getElementById("model-form-upstream").value = isEdit ? (model.upstream_model || "") : "";
     document.getElementById("model-form-context").value = isEdit ? (model.context_window || 8192) : 128000;
@@ -2025,8 +2025,6 @@ curl -X POST ${baseUrl}/chat/completions \\
     btnSaveModel.addEventListener("click", async () => {
       const mode = document.getElementById("model-form-mode").value;
       const pId = document.getElementById("model-form-plugin-id").value;
-      const originalId =
-        document.getElementById("model-form-id").dataset.originalId || "";
       const mId = document.getElementById("model-form-id").value.trim();
       const mName = document.getElementById("model-form-name").value.trim() || mId;
       const mUpstream = document.getElementById("model-form-upstream").value.trim() || mId;
@@ -2077,13 +2075,10 @@ curl -X POST ${baseUrl}/chat/completions \\
 
       try {
         if (mode === "edit") {
-          await api(
-            `/api/plugins/${encodeURIComponent(pId)}/models/${encodeURIComponent(originalId || mId)}`,
-            {
-              method: "PUT",
-              body: JSON.stringify({ id: mId, ...payload }),
-            }
-          );
+          await api(`/api/plugins/${encodeURIComponent(pId)}/models/${encodeURIComponent(mId)}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
           showToast(`Model '${mId}' updated`);
         } else {
           await api(`/api/plugins/${encodeURIComponent(pId)}/models`, {
@@ -2325,8 +2320,6 @@ curl -X POST ${baseUrl}/chat/completions \\
     const mIdInput = document.getElementById("rule-form-model-id");
     const nameInput = document.getElementById("rule-form-name");
     const stratSelect = document.getElementById("rule-form-strategy");
-    const contextInput = document.getElementById("rule-form-context");
-    const maxTokensInput = document.getElementById("rule-form-max-tokens");
     const descInput = document.getElementById("rule-form-desc");
     const enabledInput = document.getElementById("rule-form-enabled");
     const targetsContainer = document.getElementById("rule-targets-container");
@@ -2747,11 +2740,9 @@ curl -X POST ${baseUrl}/chat/completions \\
       title.textContent = "Edit Custom Load Balancing Rule";
       idInput.value = rule.id;
       mIdInput.value = rule.model_id;
-      mIdInput.disabled = false;
+      mIdInput.disabled = true;
       nameInput.value = rule.name;
       stratSelect.value = rule.strategy;
-      contextInput.value = rule.context_window || "";
-      maxTokensInput.value = rule.max_tokens || "";
       descInput.value = rule.description || "";
       enabledInput.checked = !!rule.enabled;
     } else {
@@ -2761,8 +2752,6 @@ curl -X POST ${baseUrl}/chat/completions \\
       mIdInput.disabled = false;
       nameInput.value = "";
       stratSelect.value = "round_robin";
-      contextInput.value = "";
-      maxTokensInput.value = "";
       descInput.value = "";
       enabledInput.checked = true;
     }
@@ -2784,22 +2773,11 @@ curl -X POST ${baseUrl}/chat/completions \\
       const mIdInput = document.getElementById("rule-form-model-id");
       const nameInput = document.getElementById("rule-form-name");
       const stratSelect = document.getElementById("rule-form-strategy");
-      const contextInput = document.getElementById("rule-form-context");
-      const maxTokensInput = document.getElementById("rule-form-max-tokens");
       const descInput = document.getElementById("rule-form-desc");
       const enabledInput = document.getElementById("rule-form-enabled");
       const manualReasoningInput = document.getElementById("rule-form-manual-reasoning");
 
       const manualReasoning = manualReasoningInput ? manualReasoningInput.checked : true;
-      const parseLimit = (value) => {
-        const trimmed = (value || "").trim();
-        if (!trimmed) return null;
-        const parsed = parseInt(trimmed, 10);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-      };
-      const contextWindow = parseLimit(contextInput.value);
-      const maxTokens = parseLimit(maxTokensInput.value);
-
       const draftTargets = (el.modalRule && el.modalRule._ruleTargets) || [];
       const selectedTargets = draftTargets
         .map((target) => (manualReasoning && target.level ? `${target.id}:${target.level}` : target.id))
@@ -2841,15 +2819,12 @@ curl -X POST ${baseUrl}/chat/completions \\
           await api(`/api/load-balancing-rules/${idInput.value}`, {
             method: "PUT",
             body: JSON.stringify({
-              model_id: modelId,
               name,
               strategy: stratSelect.value,
               targets: selectedTargets,
               manual_reasoning: manualReasoning,
               exposed_reasoning_levels: exposedLevels,
               reasoning_overrides: reasoningOverrides,
-              context_window: contextWindow,
-              max_tokens: maxTokens,
               description: descInput.value,
               enabled: enabledInput.checked,
             }),
@@ -2867,8 +2842,6 @@ curl -X POST ${baseUrl}/chat/completions \\
               manual_reasoning: manualReasoning,
               exposed_reasoning_levels: exposedLevels,
               reasoning_overrides: reasoningOverrides,
-              context_window: contextWindow,
-              max_tokens: maxTokens,
               description: descInput.value,
               enabled: enabledInput.checked,
             }),

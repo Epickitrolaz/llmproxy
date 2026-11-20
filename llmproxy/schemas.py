@@ -401,10 +401,6 @@ class LoadBalancingRule(BaseModel):
     # Per-target remapping of a client-requested level to the level that target
     # should receive, e.g. {"cx/gpt-6-luna": {"high": "max"}}.
     reasoning_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
-    # Advertised limits for the virtual model. ``None`` derives the value from
-    # the rule's targets (the smallest limit wins).
-    context_window: Optional[int] = None
-    max_tokens: Optional[int] = None
     created_at: float = Field(default_factory=time.time)
     description: Optional[str] = ""
 
@@ -418,8 +414,6 @@ class LoadBalancingRuleCreate(BaseModel):
     manual_reasoning: bool = True
     exposed_reasoning_levels: List[str] = Field(default_factory=list)
     reasoning_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
-    context_window: Optional[int] = None
-    max_tokens: Optional[int] = None
     description: Optional[str] = ""
 
 
@@ -432,8 +426,6 @@ class LoadBalancingRuleUpdate(BaseModel):
     manual_reasoning: Optional[bool] = None
     exposed_reasoning_levels: Optional[List[str]] = None
     reasoning_overrides: Optional[Dict[str, Dict[str, str]]] = None
-    context_window: Optional[int] = None
-    max_tokens: Optional[int] = None
     description: Optional[str] = None
 
 

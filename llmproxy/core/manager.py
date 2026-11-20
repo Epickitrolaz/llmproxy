@@ -697,8 +697,6 @@ class PluginManager:
                 manual_reasoning=rule_data.manual_reasoning,
                 exposed_reasoning_levels=rule_data.exposed_reasoning_levels,
                 reasoning_overrides=rule_data.reasoning_overrides,
-                context_window=rule_data.context_window,
-                max_tokens=rule_data.max_tokens,
                 description=rule_data.description or "",
             )
         else:
@@ -720,12 +718,8 @@ class PluginManager:
 
         upd = updates.model_dump(exclude_unset=True) if isinstance(updates, LoadBalancingRuleUpdate) else updates
         for k, v in upd.items():
-            if not hasattr(rule, k):
-                continue
-            # Explicit nulls for the advertised limits mean "derive from targets".
-            if v is None and k not in ("context_window", "max_tokens"):
-                continue
-            setattr(rule, k, v)
+            if v is not None and hasattr(rule, k):
+                setattr(rule, k, v)
 
         self._normalize_rule_reasoning(rule)
         self._save_rules()
@@ -1596,16 +1590,6 @@ class PluginManager:
             self._save_configs()
             return True
 
-        # A renamed built-in model keeps its edit entry under the plugin's
-        # original default ID. Locate it so later edits (and further renames)
-        # update that entry instead of appending a duplicate custom model.
-        edited = cfg.setdefault("edited_models", {})
-        for original_id, stored in list(edited.items()):
-            if isinstance(stored, dict) and stored.get("id") == model_id:
-                edited[original_id] = model_config.model_dump()
-                self._save_configs()
-                return True
-
         for i, m in enumerate(custom_models):
             if m.get("id") == model_id:
                 custom_models[i] = model_config.model_dump()
@@ -1634,24 +1618,14 @@ class PluginManager:
         custom_models = cfg.setdefault("custom_models", [])
         cfg["custom_models"] = [m for m in custom_models if m.get("id") != model_id]
 
+        if model_id in cfg.get("edited_models", {}):
+            del cfg["edited_models"][model_id]
+
         plugin = self.plugins[plugin_id]
         default_models = getattr(plugin, "_default_models", plugin.metadata.models)
         default_model_ids = {m.id for m in default_models}
-        deleted = cfg.setdefault("deleted_models", [])
-
-        # A renamed built-in model is stored in ``edited_models`` under its
-        # original default ID, so deleting the exposed (renamed) ID must clear
-        # that entry and hide the original default as well.
-        edited = cfg.get("edited_models", {})
-        for original_id, stored in list(edited.items()):
-            if isinstance(stored, dict) and stored.get("id") == model_id:
-                del edited[original_id]
-                if original_id in default_model_ids and original_id not in deleted:
-                    deleted.append(original_id)
-        if model_id in edited:
-            del edited[model_id]
-
         if model_id in default_model_ids:
+            deleted = cfg.setdefault("deleted_models", [])
             if model_id not in deleted:
                 deleted.append(model_id)
 

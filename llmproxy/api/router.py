@@ -998,39 +998,17 @@ def _model_card(
 
 
 def _rule_model_card(rule: Any, active_models: List[Tuple[Any, Any]]) -> ModelCard:
-    """Advertise vision only when every target of a rule accepts images.
-
-    Explicit rule limits win; otherwise the smallest target limit is used so a
-    virtual model never advertises more context than one of its backends holds.
-    """
+    """Advertise vision only when every target of a rule accepts images."""
     by_id = {model_config.id: model_config for model_config, _ in active_models}
     targets = [by_id.get(target) for target in rule.targets]
     known_targets = [target for target in targets if target is not None]
     supports_vision = bool(known_targets) and all(
         bool(getattr(target, "supports_vision", False)) for target in known_targets
     )
-    target_contexts = [
-        target.context_window
-        for target in known_targets
-        if getattr(target, "context_window", None)
-    ]
-    target_max_tokens = [
-        target.max_tokens
-        for target in known_targets
-        if getattr(target, "max_tokens", None)
-    ]
-    context_window = getattr(rule, "context_window", None)
-    if context_window is None and target_contexts:
-        context_window = min(target_contexts)
-    max_tokens = getattr(rule, "max_tokens", None)
-    if max_tokens is None and target_max_tokens:
-        max_tokens = min(target_max_tokens)
     modalities = ["text", "image"] if supports_vision else ["text"]
     return ModelCard(
         id=rule.model_id,
         owned_by="load_balancer",
-        context_window=context_window,
-        max_tokens=max_tokens,
         supports_vision=supports_vision,
         reasoning_levels=list(plugin_manager.get_rule_reasoning_levels(rule)),
         input_modalities=modalities,
