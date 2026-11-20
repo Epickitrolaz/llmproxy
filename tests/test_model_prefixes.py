@@ -26,7 +26,6 @@ EXPECTED_PREFIXES = {
     "opencode_free": "oc",
     "opencode_go": "ocg",
     "openrouter": "or",
-    "colab_ollama": "cl",
 }
 
 REASONING_TEMPLATES = {
