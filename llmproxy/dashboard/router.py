@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import time
 import uuid
@@ -22,6 +23,7 @@ from llmproxy.dashboard.loader import (
     is_safe_path,
     load_plugin_from_file,
     read_persisted_configs,
+    sanitize_plugin_id,
     validate_python_syntax,
     write_persisted_configs,
 )
@@ -186,6 +188,12 @@ class PluginCreateRequest(BaseModel):
     code: str
 
 
+class PluginIdentityUpdate(BaseModel):
+    id: Optional[str] = None
+    name: Optional[str] = None
+    filename: Optional[str] = None
+
+
 class PluginModelUpdate(BaseModel):
     id: Optional[str] = None  # New exposed model ID (rename)
     name: Optional[str] = None
@@ -269,6 +277,64 @@ def _effective_plugin_metadata(plugin_id: str, fallback: PluginMetadata) -> Plug
         if plugin_meta.id == plugin_id:
             return plugin_meta
     return fallback
+
+
+def _rewrite_metadata_identity(code: str, plugin_id: str, name: str) -> str:
+    """Replace the ``id`` and ``name`` string literals in ``PluginMetadata(...)``.
+
+    Provider identity lives in the plugin source, so editing it in the dashboard
+    has to update the source rather than a runtime override. Using the AST keeps
+    the edit precise and avoids touching model IDs or other ``id=`` assignments.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise ValueError(f"Syntax error on line {e.lineno}: {e.msg}") from e
+
+    metadata_call = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            func_name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if func_name == "PluginMetadata":
+                metadata_call = node
+                break
+
+    if metadata_call is None:
+        raise ValueError(
+            "Plugin source has no PluginMetadata(...) declaration to update"
+        )
+
+    keywords = {kw.arg: kw.value for kw in metadata_call.keywords if kw.arg}
+    replacements = []
+    for key, new_value in (("id", plugin_id), ("name", name)):
+        node = keywords.get(key)
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            raise ValueError(
+                f"PluginMetadata.{key} must be a plain string literal to edit it here"
+            )
+        if not hasattr(node, "end_lineno") or not hasattr(node, "end_col_offset"):
+            raise ValueError("Unable to locate source span for PluginMetadata fields")
+        replacements.append((node, json.dumps(new_value)))
+
+    raw = code.encode("utf-8")
+    line_starts = [0]
+    for line in raw.split(b"\n")[:-1]:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    def byte_offset(lineno: int, col_offset: int) -> int:
+        return line_starts[lineno - 1] + col_offset
+
+    for node, literal in sorted(
+        replacements,
+        key=lambda item: byte_offset(item[0].lineno, item[0].col_offset),
+        reverse=True,
+    ):
+        start = byte_offset(node.lineno, node.col_offset)
+        end = byte_offset(node.end_lineno, node.end_col_offset)
+        raw = raw[:start] + literal.encode("utf-8") + raw[end:]
+
+    return raw.decode("utf-8")
 
 
 # =========================================================================
@@ -355,6 +421,150 @@ async def update_plugin_code(plugin_id: str, body: PluginSourceUpdate):
     return {
         "status": "ok",
         "message": f"Plugin '{plugin_id}' code updated and hot-reloaded successfully",
+        "plugin": meta,
+    }
+
+
+@router.put("/plugins/{plugin_id}/identity")
+async def update_plugin_identity(plugin_id: str, body: PluginIdentityUpdate):
+    """Rename a provider's ID, display name, and/or source filename."""
+    _ensure_plugins_loaded()
+    plugin = plugin_manager.plugins.get(plugin_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
+
+    file_path = find_plugin_file_path(plugin_manager, plugin_id)
+    if not file_path or not file_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Source file for plugin '{plugin_id}' not found"
+        )
+
+    plugins_dir = Path(plugin_manager.plugins_dir)
+    current_meta = plugin.metadata
+
+    new_id = plugin_id
+    if body.id is not None and body.id.strip():
+        new_id = sanitize_plugin_id(body.id.strip())
+        if not new_id:
+            raise HTTPException(status_code=400, detail="Provider ID is required")
+    new_name = body.name.strip() if body.name and body.name.strip() else current_meta.name
+
+    new_filename = file_path.name
+    if body.filename is not None and body.filename.strip():
+        candidate = Path(body.filename.strip()).name
+        if not candidate.endswith(".py"):
+            candidate = f"{candidate}.py"
+        candidate = sanitize_plugin_id(candidate)
+        if not candidate or candidate == ".py":
+            raise HTTPException(status_code=400, detail="Invalid plugin filename")
+        new_filename = candidate
+
+    if new_id != plugin_id and (
+        new_id in plugin_manager.plugins or new_id in plugin_manager.configs
+    ):
+        raise HTTPException(
+            status_code=409, detail=f"Provider ID '{new_id}' is already in use"
+        )
+
+    target_path = (plugins_dir / new_filename).resolve()
+    if not is_safe_path(plugins_dir, target_path):
+        raise HTTPException(status_code=400, detail="Invalid plugin file path")
+    if target_path != file_path.resolve() and target_path.exists():
+        raise HTTPException(
+            status_code=409, detail=f"File '{new_filename}' already exists"
+        )
+
+    old_code = file_path.read_text(encoding="utf-8")
+    try:
+        new_code = _rewrite_metadata_identity(old_code, new_id, new_name)
+        validate_python_syntax(new_code, new_filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    target_path.write_text(new_code, encoding="utf-8")
+
+    # Move persisted config to the new key before reloading so variables,
+    # models, enabled/pinned state, and account linkage survive the rename.
+    moved_config = None
+    if new_id != plugin_id:
+        moved_config = plugin_manager.configs.pop(plugin_id, None)
+        if moved_config is not None:
+            plugin_manager.configs[new_id] = moved_config
+
+    def _rollback() -> None:
+        if target_path != file_path.resolve():
+            try:
+                target_path.unlink()
+            except OSError:
+                pass
+        else:
+            file_path.write_text(old_code, encoding="utf-8")
+        if new_id != plugin_id and moved_config is not None:
+            plugin_manager.configs.pop(new_id, None)
+            plugin_manager.configs[plugin_id] = moved_config
+
+    try:
+        reloaded = plugin_manager.load_plugin_file(target_path)
+    except Exception as e:
+        _rollback()
+        raise HTTPException(
+            status_code=400, detail=f"Identity saved, but reload failed: {e}"
+        ) from e
+
+    if reloaded is None or reloaded.metadata.id != new_id:
+        if reloaded is not None:
+            plugin_manager.plugins.pop(reloaded.metadata.id, None)
+            plugin_manager.plugin_files.pop(reloaded.metadata.id, None)
+        _rollback()
+        raise HTTPException(
+            status_code=400, detail="Reloaded plugin did not report the new ID"
+        )
+
+    if new_id != plugin_id:
+        plugin_manager.plugins.pop(plugin_id, None)
+        plugin_manager.plugin_files.pop(plugin_id, None)
+        plugin_manager.configs.pop(plugin_id, None)
+        if plugin_id in plugin_manager.rr_indices:
+            plugin_manager.rr_indices[new_id] = plugin_manager.rr_indices.pop(plugin_id)
+
+        moved_accounts = 0
+        for account in plugin_manager.accounts.values():
+            if account.provider_id == plugin_id:
+                account.provider_id = new_id
+                moved_accounts += 1
+        if moved_accounts:
+            plugin_manager._save_accounts()
+
+    if target_path != file_path.resolve():
+        try:
+            file_path.unlink()
+        except OSError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Provider renamed, but the old file could not be removed: {e}",
+            ) from e
+
+    meta = reloaded.metadata.model_copy(update={"filename": new_filename})
+    reloaded.metadata.filename = new_filename
+    # Keep saved variable values; the freshly loaded metadata only carries the
+    # defaults from the source file.
+    saved_vars = plugin_manager.configs.get(new_id, {}).get("variables", {})
+    if isinstance(saved_vars, dict):
+        for var in meta.variables:
+            if saved_vars.get(var.name) not in (None, ""):
+                var.value = saved_vars[var.name]
+    _persist_plugin_metadata(new_id, meta)
+
+    if new_id != plugin_id:
+        saved_configs = read_persisted_configs(plugin_manager.data_dir)
+        if plugin_id in saved_configs:
+            saved_configs.pop(plugin_id, None)
+            write_persisted_configs(plugin_manager.data_dir, saved_configs)
+
+    return {
+        "status": "ok",
+        "message": f"Provider '{new_id}' updated successfully",
+        "plugin_id": new_id,
         "plugin": meta,
     }
 

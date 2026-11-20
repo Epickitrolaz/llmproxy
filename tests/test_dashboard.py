@@ -4,7 +4,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from llmproxy.main import app
 from llmproxy.core.manager import plugin_manager
-from llmproxy.schemas import PluginMetadata, PluginModelConfig, PluginVariable, RequestLogEntry
+from llmproxy.schemas import (
+    Account,
+    PluginMetadata,
+    PluginModelConfig,
+    PluginVariable,
+    RequestLogEntry,
+)
 
 
 @pytest.fixture
@@ -193,6 +199,99 @@ def test_plugin_lifecycle_crud(client):
     reload_res = client.post("/api/plugins/test_plugin/reload")
     assert reload_res.status_code == 200
     assert reload_res.json()["status"] == "ok"
+
+
+def test_update_plugin_identity(client):
+    """Rename a provider's ID, display name, and source filename together."""
+    client.post(
+        "/api/plugins",
+        json={"filename": "test_plugin.py", "code": SAMPLE_PLUGIN_CODE},
+    )
+    client.put(
+        "/api/plugins/test_plugin/config",
+        json={"variables": {"api_token": "kept-secret"}},
+    )
+    plugins_dir = plugin_manager.plugins_dir
+
+    res = client.put(
+        "/api/plugins/test_plugin/identity",
+        json={
+            "id": "renamed_plugin",
+            "name": "Renamed Provider",
+            "filename": "renamed_provider.py",
+        },
+    )
+    assert res.status_code == 200, res.text
+    payload = res.json()
+    assert payload["plugin_id"] == "renamed_plugin"
+    assert payload["plugin"]["id"] == "renamed_plugin"
+    assert payload["plugin"]["name"] == "Renamed Provider"
+    assert payload["plugin"]["filename"] == "renamed_provider.py"
+
+    assert not (plugins_dir / "test_plugin.py").exists()
+    new_path = plugins_dir / "renamed_provider.py"
+    assert new_path.exists()
+
+    code = new_path.read_text(encoding="utf-8")
+    assert 'id="renamed_plugin"' in code
+    assert 'name="Renamed Provider"' in code
+    # Model IDs must not be touched by the identity rewrite.
+    assert 'id="test-model-1"' in code
+
+    listed = client.get("/api/plugins").json()
+    assert [p["id"] for p in listed] == ["renamed_plugin"]
+    assert listed[0]["filename"] == "renamed_provider.py"
+    assert listed[0]["variables"][0]["value"] == "kept-secret"
+
+    code_res = client.get("/api/plugins/renamed_plugin/code")
+    assert code_res.status_code == 200
+    assert code_res.json()["code"] == code
+
+    # A name-only edit keeps the current ID and filename.
+    rename_only = client.put(
+        "/api/plugins/renamed_plugin/identity",
+        json={"name": "Renamed Provider v2"},
+    )
+    assert rename_only.status_code == 200
+    assert rename_only.json()["plugin_id"] == "renamed_plugin"
+    assert rename_only.json()["plugin"]["filename"] == "renamed_provider.py"
+
+    # Renaming onto an existing provider ID is rejected.
+    client.post(
+        "/api/plugins",
+        json={
+            "filename": "other.py",
+            "code": SAMPLE_PLUGIN_CODE.replace("test_plugin", "other_plugin"),
+        },
+    )
+    conflict = client.put(
+        "/api/plugins/renamed_plugin/identity", json={"id": "other_plugin"}
+    )
+    assert conflict.status_code == 409
+
+
+def test_plugin_identity_rename_moves_accounts(client, monkeypatch):
+    """Accounts follow the provider when its ID is renamed."""
+    original_accounts = dict(plugin_manager.accounts)
+    plugin_manager.accounts.clear()
+    monkeypatch.setattr(plugin_manager, "_save_accounts", lambda: None)
+    try:
+        client.post(
+            "/api/plugins",
+            json={"filename": "test_plugin.py", "code": SAMPLE_PLUGIN_CODE},
+        )
+        plugin_manager.accounts["acc_rename"] = Account(
+            id="acc_rename", provider_id="test_plugin", name="Rename account"
+        )
+
+        res = client.put(
+            "/api/plugins/test_plugin/identity", json={"id": "renamed_plugin"}
+        )
+        assert res.status_code == 200, res.text
+        assert plugin_manager.accounts["acc_rename"].provider_id == "renamed_plugin"
+    finally:
+        plugin_manager.accounts.clear()
+        plugin_manager.accounts.update(original_accounts)
 
 
 def test_plugin_config_update(client):

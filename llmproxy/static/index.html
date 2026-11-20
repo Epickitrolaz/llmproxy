@@ -447,6 +447,7 @@
           <h3 id="fs-provider-title">Configure Provider</h3>
           <span class="badge" id="fs-provider-id-badge">provider_id</span>
           <span class="badge" id="fs-provider-filename-badge">file.py</span>
+          <button class="btn btn-secondary btn-sm" id="btn-edit-provider-identity" title="Edit provider ID, display name and source filename" style="margin-left: 4px;">Edit identity</button>
         </div>
         <div style="display: flex; align-items: center; gap: 12px;">
           <label class="switch" title="Toggle plugin enabled status">
@@ -627,6 +628,37 @@
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary modal-close">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Edit Provider Identity -->
+  <div class="modal-overlay" id="modal-provider-identity">
+    <div class="modal-dialog" style="max-width: 520px;">
+      <div class="modal-header">
+        <h3>Edit Provider Identity</h3>
+        <button class="btn btn-secondary btn-sm modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Provider ID <span style="color: var(--accent-red);">*</span></label>
+          <input type="text" class="form-input" id="identity-provider-id" placeholder="e.g. my_provider">
+          <span class="form-hint">Unique ID used by the API and stored configs. Accounts move with the provider.</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Display Name <span style="color: var(--accent-red);">*</span></label>
+          <input type="text" class="form-input" id="identity-provider-name" placeholder="e.g. My Provider">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Source Filename</label>
+          <input type="text" class="form-input" id="identity-provider-filename" placeholder="e.g. my_provider.py">
+          <span class="form-hint">File in the <code style="color: var(--ink-primary);">plugins/</code> directory. Renames the file on disk.</span>
+        </div>
+        <div class="feedback-banner" id="identity-provider-feedback" style="display: none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button class="btn btn-primary" id="btn-save-provider-identity">Save Identity</button>
       </div>
     </div>
   </div>

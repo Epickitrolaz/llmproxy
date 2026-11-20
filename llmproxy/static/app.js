@@ -1363,6 +1363,24 @@ curl -X POST ${baseUrl}/chat/completions \\
     if (idBadge) idBadge.textContent = plugin.id;
     if (fnBadge) fnBadge.textContent = plugin.filename || `${plugin.id}.py`;
 
+    const editIdentityBtn = document.getElementById("btn-edit-provider-identity");
+    if (editIdentityBtn) {
+      editIdentityBtn.onclick = () => {
+        const current = state.plugins.find(
+          (p) => p.id === state.currentFullscreenPluginId
+        );
+        if (!current) return;
+        if (isFullscreenDirty()) {
+          showToast(
+            "Save or discard your unsaved changes before editing the provider identity",
+            "error"
+          );
+          return;
+        }
+        openProviderIdentityModal(current);
+      };
+    }
+
     if (pinBtn) {
       pinBtn.remove();
     }
@@ -3784,6 +3802,95 @@ curl -X POST ${baseUrl}/chat/completions \\
         fetchPlugins();
       } catch (err) {
         showToast(`Failed to create plugin: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // =========================================================================
+  // PROVIDER IDENTITY EDITING (ID, NAME, SOURCE FILENAME)
+  // =========================================================================
+
+  function openProviderIdentityModal(plugin) {
+    const idInput = document.getElementById("identity-provider-id");
+    const nameInput = document.getElementById("identity-provider-name");
+    const fnInput = document.getElementById("identity-provider-filename");
+    const feedback = document.getElementById("identity-provider-feedback");
+
+    if (feedback) {
+      feedback.style.display = "none";
+      feedback.className = "feedback-banner";
+      feedback.textContent = "";
+    }
+    if (idInput) idInput.value = plugin.id || "";
+    if (nameInput) nameInput.value = plugin.name || "";
+    if (fnInput) fnInput.value = plugin.filename || `${plugin.id}.py`;
+
+    openModal(document.getElementById("modal-provider-identity"));
+    if (idInput) idInput.focus();
+  }
+
+  const btnSaveProviderIdentity = document.getElementById("btn-save-provider-identity");
+  if (btnSaveProviderIdentity) {
+    btnSaveProviderIdentity.addEventListener("click", async () => {
+      const pluginId = state.currentFullscreenPluginId;
+      if (!pluginId) return;
+
+      const idInput = document.getElementById("identity-provider-id");
+      const nameInput = document.getElementById("identity-provider-name");
+      const fnInput = document.getElementById("identity-provider-filename");
+      const feedback = document.getElementById("identity-provider-feedback");
+
+      const newId = (idInput ? idInput.value : "").trim();
+      const newName = (nameInput ? nameInput.value : "").trim();
+      const newFilename = (fnInput ? fnInput.value : "").trim();
+
+      const showError = (message) => {
+        if (!feedback) {
+          showToast(message, "error");
+          return;
+        }
+        feedback.style.display = "block";
+        feedback.className = "feedback-banner error";
+        feedback.textContent = message;
+      };
+
+      if (!newId) return showError("Provider ID is required");
+      if (!newName) return showError("Display name is required");
+
+      btnSaveProviderIdentity.disabled = true;
+      try {
+        const res = await api(`/api/plugins/${pluginId}/identity`, {
+          method: "PUT",
+          body: JSON.stringify({ id: newId, name: newName, filename: newFilename }),
+        });
+
+        const updated = res.plugin || {};
+        const finalId = updated.id || newId;
+        state.currentFullscreenPluginId = finalId;
+
+        const titleEl = document.getElementById("fs-provider-title");
+        const idBadge = document.getElementById("fs-provider-id-badge");
+        const fnBadge = document.getElementById("fs-provider-filename-badge");
+        if (titleEl) titleEl.textContent = `Configure ${updated.name || newName}`;
+        if (idBadge) idBadge.textContent = finalId;
+        if (fnBadge) fnBadge.textContent = updated.filename || `${finalId}.py`;
+
+        closeModal(document.getElementById("modal-provider-identity"));
+        showToast("Provider identity updated");
+        await fetchPlugins();
+        // The provider ID changed, so re-render the sub-tabs with the refreshed
+        // object and reload the editor from the (possibly renamed) source file.
+        const updatedPlugin = state.plugins.find((p) => p.id === finalId);
+        if (updatedPlugin) {
+          renderFullscreenAccounts(finalId);
+          renderFullscreenConfig(updatedPlugin);
+          renderFullscreenModels(updatedPlugin);
+        }
+        await loadFullscreenPluginCode(finalId);
+      } catch (err) {
+        showError(`Update failed: ${err.message}`);
+      } finally {
+        btnSaveProviderIdentity.disabled = false;
       }
     });
   }
