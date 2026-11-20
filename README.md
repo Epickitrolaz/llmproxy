@@ -48,6 +48,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
 - **Provider Management & Fullscreen Configuration**:
   - Three concise actions per provider: **Edit**, **Refresh**, and **Delete**.
   - **Pin to Top**: Pin favorite providers to prioritize them across the dashboard and status overview.
+  - **Edit Identity**: Rename a provider's ID, display name, and source filename from the fullscreen window header. Accounts and saved variables follow the provider to its new ID.
   - **Fullscreen Configuration Window**: Fits the entire screen with dedicated tabs for:
     - **Python Code**: Live syntax validation, template insertion, local file swap, and hot-reload.
     - **Accounts & Pool**: Multi-account credentials, failovers, and priority weights.
