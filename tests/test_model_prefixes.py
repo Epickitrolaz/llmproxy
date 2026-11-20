@@ -26,7 +26,8 @@ EXPECTED_PREFIXES = {
     "opencode_free": "oc",
     "opencode_go": "ocg",
     "openrouter": "or",
-    "colab_ollama": "cl",
+    "google_colab": "gc",
+    "colab": "cl",
 }
 
 REASONING_TEMPLATES = {
@@ -38,6 +39,8 @@ REASONING_TEMPLATES = {
     "opencode_free",
     "opencode_go",
     "openrouter",
+    "google_colab",
+    "colab",
 }
 
 
