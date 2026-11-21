@@ -24,6 +24,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
     - `plugins/nous_oauth.py`: Nous Free Tier (Hermes Agent device login from the Accounts tab; Free-plan `:free` models without an API key).
+    - `plugins/colab.py`: Ollama on reusable Google Colab VMs, using the official CLI's OAuth/allocation/Jupyter protocol; configurable account splitting, VM lifetime and model retention. See [Colab setup](docs/COLAB.md).
     - OAuth providers expose one generic **Sign in / Connect Account** flow from the Accounts tab. The plugin owns the device or loopback flow, callback parsing, local import, and token refresh; the dashboard calls `/api/plugins/{id}/oauth/*` and never has provider-specific OAuth routes.
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
 - **Image / Vision Input Across Providers**:
@@ -150,6 +151,7 @@ provider's native ID in `upstream_model`:
 | `anthropic_proxy` | `ap` | `ap/claude-opus-5-5` |
 | `antigravity` | `ag` | `ag/gemini-3.8-flash` |
 | `codex` | `cx` | `cx/gpt-6-luna` |
+| `colab` | `cl` | `cl/qwen3:0.6b` |
 | `gemini` | `gm` | `gm/gemini-3.8-flash` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
 | `nous_oauth` | `np` | `np/qwen/qwen4-max:free` |

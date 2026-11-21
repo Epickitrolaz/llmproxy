@@ -422,6 +422,13 @@ async def delete_plugin(plugin_id: str):
     if not plugin and not file_path:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found")
 
+    if plugin:
+        try:
+            await plugin_manager.prepare_plugin(plugin)
+            await plugin_manager.close_plugin(plugin)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Plugin resource cleanup failed: {exc}") from exc
+
     if file_path and file_path.exists():
         try:
             file_path.unlink()
@@ -1608,6 +1615,7 @@ async def get_provider_usage_status():
             if implementation is None or implementation is BasePlugin.fetch_usage_quota:
                 return None
             try:
+                await plugin_manager.prepare_plugin(plugin)
                 quota = await plugin.fetch_usage_quota(acc, _variables_for(acc.provider_id))
             except Exception as exc:  # pragma: no cover - defensive
                 quota = {"error": str(exc)}
@@ -1938,6 +1946,7 @@ async def test_chat(req: TestChatRequest):
             if init_proxy_url:
                 attempt_vars["proxy"] = init_proxy_url
 
+            await plugin_manager.prepare_plugin(matched_plugin)
             import inspect
             sig = inspect.signature(matched_plugin.chat_completion)
             if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
