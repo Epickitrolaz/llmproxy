@@ -59,6 +59,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    await plugin_manager.close_plugins()
     plugin_manager.flush()
 
 # Try to register API routers if available
