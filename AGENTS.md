@@ -239,7 +239,7 @@ Do not add provider-specific routes or core OAuth modules to the proxy.
   exposed ID. Do not publish synthetic `<model>:<level>` entries as separate models.
 - Built-in templates expose model IDs as `<short-prefix>/<model-name>` and keep
   the provider's native ID in `upstream_model`. The current prefixes are `ap`,
-  `ag`, `cx`, `cl`, `gm`, `mock`, `np`, `compat`, `oc`, `ocg`, and `or`.
+  `ag`, `cx`, `gm`, `mock`, `np`, `compat`, `oc`, `ocg`, and `or`.
 - Advertise supported reasoning through `reasoning_levels` on
   `PluginModelConfig` and `ModelCard`. Clients select a level with
   `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
@@ -287,23 +287,6 @@ same provider/name, so singleton providers can return a fresh ID.
 Keep the provider's PKCE/device flow, callback parsing, local import, token
 exchange, and refresh logic inside the plugin template. Do not add
 provider-specific OAuth routes or core OAuth modules to the proxy.
-
-## Stateful compute providers
-
-`templates/colab.py` runs Ollama on plugin-owned Google Colab VMs using the
-official CLI's wire protocol; see `docs/COLAB.md`. It is not a Gemini provider.
-Do not adopt, stop or overwrite unrelated notebook/CLI sessions. Keep VM starts
-lazy, reuse kernels/models, reconcile uncertain allocations with the same
-notebook hash, and persist runtime ownership/tokens in account extra_config.
-`split_across_accounts=false` keeps priority routing with router-owned failover;
-enabling it distributes separate requests, not cross-VM model shards.
-
-Stateful providers may implement `BasePlugin.astart(variables, accounts)` to
-re-arm owned-resource timers without allocating VMs or blocking imports, and
-`BasePlugin.aclose(release_resources=True)` to close connections/resources.
-Shutdown/deletion releases owned resources according to provider settings; hot
-reload passes `False` so VMs survive and can be reattached. Cleanup timers must
-not interrupt active work or leave exceptions containing credentials in logs.
 
 ## Provider reasoning and caching
 

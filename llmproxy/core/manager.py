@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import asyncio
 import importlib.util
 import json
 import logging
@@ -111,7 +110,6 @@ class PluginManager:
         self._api_keys_dirty = False
         self._api_keys_timer: Optional[threading.Timer] = None
         self._flush_interval: float = 3.0
-        self._plugin_close_tasks: Set[asyncio.Task] = set()
 
         atexit.register(self.flush)
 
@@ -854,7 +852,7 @@ class PluginManager:
         if not available:
             return None
 
-        strat = self.account_strategy(provider_id, strategy)
+        strat = (strategy or "round_robin").lower().replace("-", "_")
 
         if strat == "least_used":
             return min(available, key=lambda a: (a.success_count, a.last_used_at or 0))
@@ -889,7 +887,7 @@ class PluginManager:
         if not available:
             return []
 
-        strat = self.account_strategy(provider_id, strategy)
+        strat = (strategy or "round_robin").lower().replace("-", "_")
 
         if strat == "least_used":
             available.sort(key=lambda a: (a.success_count, a.last_used_at or 0))
@@ -904,92 +902,6 @@ class PluginManager:
             self.rr_indices[provider_id] = (idx + 1) % len(available)
 
         return available
-
-    def account_strategy(self, provider_id: str, strategy: Optional[str] = None) -> str:
-        """Honor an optional compute-provider account-splitting switch.
-
-        Plugins that do not declare the switch keep their existing behavior.
-        With splitting off the router still attempts every eligible account on
-        failure, but starts with the priority account rather than creating a cold
-        VM for each successful round-robin request.
-        """
-        plugin = self.plugins.get(provider_id)
-        variable = next((item for item in plugin.metadata.variables
-                         if item.name == "split_across_accounts"), None) if plugin else None
-        if variable is None:
-            return (strategy or "round_robin").lower().replace("-", "_")
-        split = self.configs.get(provider_id, {}).get("variables", {}).get(
-            "split_across_accounts", variable.default if variable else None
-        )
-        if split is not None and (split is False or split == 0 or
-                                  isinstance(split, str) and split.lower() == "false"):
-            return "fallback"
-        return (strategy or "round_robin").lower().replace("-", "_")
-
-    async def close_plugin(self, plugin: BasePlugin, *, release_resources: bool = True) -> None:
-        """Safely invoke the optional lifecycle hook without affecting stateless plugins."""
-        close = getattr(plugin, "aclose", None)
-        if close is None:
-            return
-        await close(release_resources=release_resources)
-
-    def _activate_plugin(self, plugin: BasePlugin, previous: Optional[BasePlugin]) -> None:
-        # Lifecycle hooks run asynchronously, not during import. Await retirement
-        # before activating a replacement so they never execute on the same
-        # owned kernel concurrently or overwrite each other's saved state.
-        starts = getattr(type(plugin), "astart", None) not in (None, BasePlugin.astart)
-        closes = previous is not None and getattr(type(previous), "aclose", None) not in (None, BasePlugin.aclose)
-        if not starts and not closes:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # synchronous inspection/import never starts lifecycle work
-
-        async def activate() -> None:
-            if previous is not None:
-                await self.prepare_plugin(previous)
-                if closes:
-                    await self.close_plugin(previous, release_resources=False)
-            if starts:
-                defaults = {variable.name: variable.default for variable in plugin.metadata.variables}
-                variables = {**defaults, **self.configs.get(plugin.metadata.id, {}).get("variables", {})}
-                await plugin.astart(variables, self.get_accounts(plugin.metadata.id))
-
-        task = loop.create_task(activate())
-        setattr(plugin, "_activation_task", task)
-        self._plugin_close_tasks.add(task)
-        def finished(completed: asyncio.Task) -> None:
-            self._plugin_close_tasks.discard(completed)
-            if not completed.cancelled() and completed.exception() is not None:
-                logger.warning("Could not activate plugin %s; owned resources remain recoverable", plugin.metadata.id)
-        task.add_done_callback(finished)
-
-    async def prepare_plugin(self, plugin: BasePlugin) -> None:
-        """Wait for reload state transfer before the first provider request."""
-        task = getattr(plugin, "_activation_task", None)
-        if task is not None:
-            await asyncio.shield(task)
-            if getattr(plugin, "_activation_task", None) is task:
-                delattr(plugin, "_activation_task")
-
-    async def close_plugins(self) -> None:
-        """Finish reload cleanup, then close current provider resources in parallel."""
-        if self._plugin_close_tasks:
-            await asyncio.gather(*self._plugin_close_tasks, return_exceptions=True)
-        plugins = list(self.plugins.values())
-        async def close(plugin: BasePlugin) -> None:
-            try:
-                await self.prepare_plugin(plugin)
-            finally:
-                await self.close_plugin(plugin)
-        results = await asyncio.gather(
-            *(close(plugin) for plugin in plugins),
-            return_exceptions=True,
-        )
-        for plugin, result in zip(plugins, results):
-            if isinstance(result, BaseException):
-                logger.warning("Could not close plugin %s; owned resources remain recoverable", plugin.metadata.id)
 
     def mark_account_result(
         self,
@@ -1295,7 +1207,6 @@ class PluginManager:
         setattr(plugin_instance, "_filename", file_path.name)
         plugin_id = plugin_instance.metadata.id
 
-        previous = self.plugins.get(plugin_id)
         self.plugins[plugin_id] = plugin_instance
         self.plugin_files[plugin_id] = file_path
 
@@ -1336,7 +1247,6 @@ class PluginManager:
         if "pinned" in cfg:
             plugin_instance.metadata.pinned = cfg["pinned"]
 
-        self._activate_plugin(plugin_instance, previous)
         return plugin_instance
 
     def reload_plugin(self, plugin_id: str) -> Optional[BasePlugin]:

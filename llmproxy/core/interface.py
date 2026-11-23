@@ -53,25 +53,6 @@ class BasePlugin(ABC):
                 errors.append(f"Variable '{var.name}' ({var.label}) is required.")
         return errors
 
-    async def astart(self, variables: Dict[str, Any], accounts: List[Account]) -> None:
-        """Restore optional provider state after loading, without blocking imports.
-
-        Compute providers may re-arm timers for their previously owned resources.
-        This hook must not allocate fresh resources or perform expensive startup;
-        provisioning remains lazy on the first real completion request.
-        """
-        return None
-
-    async def aclose(self, *, release_resources: bool = True) -> None:
-        """Close optional provider connections/background work.
-
-        Stateful compute providers can release owned resources on deletion or
-        shutdown. Hot reload passes ``release_resources=False`` so a replacement
-        instance can reconnect without a fresh, potentially billable allocation.
-        Stateless plugins need not implement this hook.
-        """
-        return None
-
     # ------------------------------------------------------------------ OAuth
     # Optional plugin-owned OAuth login. Providers that expose "Sign in" in the
     # Accounts tab set ``metadata.oauth_login`` and implement these methods.
