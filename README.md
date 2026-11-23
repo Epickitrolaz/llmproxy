@@ -24,6 +24,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
     - `plugins/anthropic_proxy.py`: Anthropic Messages API provider (Claude Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2, extended thinking).
     - `plugins/openrouter.py`: OpenRouter gateway with curated free models (Nemotron 3 Ultra, ERNIE 5.5 Flash Preview, Inkling 2 Small, and more).
     - `plugins/nous_oauth.py`: Nous Free Tier (Hermes Agent device login from the Accounts tab; Free-plan `:free` models without an API key).
+    - `plugins/mistral_vibe.py`: Mistral Vibe (the same browser sign-in as the Vibe CLI; Free-plan Vibe models with reasoning, vision, and prompt caching).
     - OAuth providers expose one generic **Sign in / Connect Account** flow from the Accounts tab. The plugin owns the device or loopback flow, callback parsing, local import, and token refresh; the dashboard calls `/api/plugins/{id}/oauth/*` and never has provider-specific OAuth routes.
     - `plugins/openai_compatible.py`: Generic proxy for local Ollama, vLLM, LMStudio, etc.
 - **Image / Vision Input Across Providers**:
@@ -152,6 +153,7 @@ provider's native ID in `upstream_model`:
 | `antigravity` | `ag` | `ag/gemini-3.8-flash` |
 | `codex` | `cx` | `cx/gpt-6-luna` |
 | `gemini` | `gm` | `gm/gemini-3.8-flash` |
+| `mistral_vibe` | `mv` | `mv/mistral-medium-3.5` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
 | `nous_oauth` | `np` | `np/qwen/qwen4-max:free` |
 | `openai_compatible` | `compat` | `compat/default-model` |

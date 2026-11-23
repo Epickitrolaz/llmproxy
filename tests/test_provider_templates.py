@@ -23,6 +23,7 @@ from llmproxy.schemas import Account
         "antigravity",
         "codex",
         "gemini",
+        "mistral_vibe",
         "opencode_go",
         "openrouter",
     ],
