@@ -124,7 +124,6 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 async def _invoke_plugin_completion(plugin, request, model_config, variables, account):
-    await plugin_manager.prepare_plugin(plugin)
     import inspect
     sig = inspect.signature(plugin.chat_completion)
     if "account" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
