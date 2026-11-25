@@ -1869,6 +1869,7 @@ class AntigravityOAuthManager:
             }
             project_id = ANTIGRAVITY_DEFAULT_PROJECT
             tier_id = "free-tier"
+            tier_name = ""
             try:
                 ca_resp = await client.post(
                     f"{CLOUDCODE_PA_ENDPOINTS[0]}/v1internal:loadCodeAssist",
@@ -1878,7 +1879,9 @@ class AntigravityOAuthManager:
                 if ca_resp.status_code == 200:
                     ca_data = ca_resp.json()
                     project_id = ca_data.get("cloudaicompanionProject") or project_id
-                    tier_id = ca_data.get("currentTier", {}).get("id") or tier_id
+                    tier_obj = ca_data.get("paidTier") or ca_data.get("currentTier") or {}
+                    tier_id = tier_obj.get("id") or tier_id
+                    tier_name = tier_obj.get("name") or ""
             except Exception as e:
                 logger.warning("loadCodeAssist lookup warning: %s", e)
 
@@ -1902,6 +1905,8 @@ class AntigravityOAuthManager:
                     "email": email,
                     "expires_at": time.time() + expires_in,
                     "tier": tier_id,
+                    "tier_name": tier_name,
+                    "tier_checked_at": time.time(),
                 },
             )
             return account
@@ -2006,6 +2011,7 @@ class AntigravityOAuthManager:
                     "Content-Type": "application/json",
                 }
                 tier_id = "free-tier"
+                tier_name = ""
                 try:
                     ca_resp = await client.post(
                         f"{CLOUDCODE_PA_ENDPOINTS[0]}/v1internal:loadCodeAssist",
@@ -2015,7 +2021,9 @@ class AntigravityOAuthManager:
                     if ca_resp.status_code == 200:
                         ca_data = ca_resp.json()
                         project_id = ca_data.get("cloudaicompanionProject") or project_id
-                        tier_id = ca_data.get("currentTier", {}).get("id") or tier_id
+                        tier_obj = ca_data.get("paidTier") or ca_data.get("currentTier") or {}
+                        tier_id = tier_obj.get("id") or tier_id
+                        tier_name = tier_obj.get("name") or ""
                 except Exception:
                     pass
 
@@ -2039,6 +2047,8 @@ class AntigravityOAuthManager:
                         "email": email,
                         "expires_at": time.time() + expires_in,
                         "tier": tier_id,
+                        "tier_name": tier_name,
+                        "tier_checked_at": time.time(),
                         "source": str(token_path),
                     },
                 )

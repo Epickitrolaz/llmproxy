@@ -339,8 +339,9 @@ def test_status_ui_shows_remaining_quota_and_uses_3s_refresh():
     app_js = Path("llmproxy/static/app.js").read_text(encoding="utf-8")
     index_html = Path("llmproxy/static/index.html").read_text(encoding="utf-8")
 
-    assert "b.remainingFraction * 100" in app_js
-    assert "100 - b.usedPercent" in app_js
+    assert "function bucketRemainingFraction(bucket)" in app_js
+    assert "bucket.remainingFraction" in app_js
+    assert "bucket.usedPercent" in app_js
     assert "}, 3000);" in app_js
     assert "Auto-refresh (3s)" in index_html
 

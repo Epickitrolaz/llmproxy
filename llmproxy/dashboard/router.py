@@ -1230,9 +1230,36 @@ async def fetch_antigravity_quota(account: Account) -> Dict[str, Any]:
 
                     if resp.status_code == 200:
                         data = resp.json()
+                        tier_checked_at = account.extra_config.get("tier_checked_at") or 0
+                        needs_tier_refresh = (
+                            not account.extra_config.get("tier_name")
+                            or (time.time() - float(tier_checked_at)) > 21600
+                        )
+                        if needs_tier_refresh:
+                            try:
+                                ca_resp = await client.post(
+                                    f"{ep}/v1internal:loadCodeAssist",
+                                    headers=headers,
+                                    json={"metadata": {"ideType": "ANTIGRAVITY"}},
+                                )
+                                if ca_resp.status_code == 200:
+                                    ca_data = ca_resp.json() or {}
+                                    tier_obj = (
+                                        ca_data.get("paidTier")
+                                        or ca_data.get("currentTier")
+                                        or {}
+                                    )
+                                    if isinstance(tier_obj, dict) and tier_obj.get("id"):
+                                        account.extra_config["tier"] = tier_obj["id"]
+                                        account.extra_config["tier_name"] = tier_obj.get("name") or ""
+                                        account.extra_config["tier_checked_at"] = time.time()
+                                        plugin_manager._save_accounts()
+                            except Exception:
+                                pass
                         data["account_id"] = account.id
                         data["account_name"] = account.name
                         data["tier"] = account.extra_config.get("tier", "free-tier")
+                        data["tier_name"] = account.extra_config.get("tier_name", "")
                         data["email"] = account.extra_config.get("email", "")
                         return data
                     last_error = f"Upstream error ({resp.status_code}) from {ep}: {resp.text}"
@@ -1275,6 +1302,7 @@ async def get_antigravity_all_status():
             "enabled": acc.enabled,
             "email": acc.extra_config.get("email", ""),
             "tier": acc.extra_config.get("tier", "free-tier"),
+            "tier_name": acc.extra_config.get("tier_name", ""),
             "rate_limited": not acc.is_available(),
             "quota": quota_data,
         }
@@ -1876,9 +1904,11 @@ async def get_provider_usage_status():
         payload = dict(quota)
         payload.setdefault("account_id", acc.id)
         payload.setdefault("account_name", acc.name)
+        payload.setdefault("provider_id", acc.provider_id)
         return {
             "account_id": acc.id,
             "account_name": acc.name,
+            "provider_id": acc.provider_id,
             "enabled": acc.enabled,
             "rate_limited": not acc.is_available(),
             "quota": payload,
