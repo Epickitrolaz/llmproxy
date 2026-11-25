@@ -3290,14 +3290,15 @@ curl -X POST ${baseUrl}/chat/completions \\
   function resolveAccountTier(acc, quota) {
     const providerId = acc.provider_id;
     const q = quota || {};
+    const extra = acc.extra_config && typeof acc.extra_config === "object" ? acc.extra_config : {};
     let raw = "";
     if (providerId === "antigravity") {
-      raw = acc.tier || q.tier || "free-tier";
-      const label = q.tier_name || acc.tier_name || TIER_LABELS[raw] || raw;
+      raw = acc.tier || q.tier || extra.tier || "free-tier";
+      const label = q.tier_name || acc.tier_name || extra.tier_name || TIER_LABELS[raw] || raw;
       return { key: String(raw || "free-tier").toLowerCase(), label, pro: /pro|ultra/i.test(raw) };
     }
     if (providerId === "codex") {
-      raw = acc.plan_type || q.plan_type || "standard";
+      raw = acc.plan_type || q.plan_type || extra.plan_type || "standard";
       return { key: String(raw).toLowerCase(), label: TIER_LABELS[raw] || raw, pro: /plus|pro|team|business|enterprise/i.test(raw) };
     }
     if (providerId === "openrouter") {
@@ -3342,7 +3343,10 @@ curl -X POST ${baseUrl}/chat/completions \\
     accountsToDisplay.forEach((acc) => {
       if (acc.disable_usage_tracking) return;
       const quota = quotaDataMap[acc.id];
-      if (!quotaHasRenderableUsage(quota)) return;
+      // Keep accounts that reported an error (or an empty snapshot) in the
+      // roster so a partial outage is visible instead of silently shrinking
+      // the pool. A pool still needs at least one usable account to render.
+      if (!quota && !quotaHasRenderableUsage(quota)) return;
 
       const provider = providerMap[acc.provider_id] || { id: acc.provider_id, name: acc.provider_id, pinned: false };
       const tier = resolveAccountTier(acc, quota);
@@ -3364,11 +3368,14 @@ curl -X POST ${baseUrl}/chat/completions \\
           hasCredits: false,
           balances: new Map(),
           summaries: new Map(),
+          hasRenderable: false,
         };
         pools.set(key, pool);
       }
       if (acc.pinned) pool.providerPinned = true;
       pool.accounts.push({ acc, quota, tier });
+      if (quotaHasRenderableUsage(quota)) pool.hasRenderable = true;
+      if (!quota) return;
 
       if (quota.balance && typeof quota.balance === "object" && typeof quota.balance.value === "number") {
         const label = quota.balance.label || "available balance";
@@ -3417,8 +3424,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       });
     });
 
-    const result = Array.from(pools.values()).map((pool) => {
-      const activeAccounts = pool.accounts.filter(({ acc }) => acc.enabled);
+    const result = Array.from(pools.values()).filter((pool) => pool.hasRenderable).map((pool) => {
+      const activeAccounts = pool.accounts.filter(({ acc, quota }) => acc.enabled && quotaHasRenderableUsage(quota));
       const cooldownCount = pool.accounts.filter(({ acc }) => acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000).length;
       const errorCount = pool.accounts.filter(({ quota }) => quota && quota.error).length;
       const groups = Array.from(pool.groups.values()).map((group) => ({

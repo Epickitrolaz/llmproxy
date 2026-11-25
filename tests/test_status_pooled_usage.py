@@ -226,6 +226,9 @@ def test_status_view_groups_pools_by_provider_and_tier():
     assert 'isFree ? "Free" : "Paid"' in app_js
     # Combined remaining capacity is the mean across pooled accounts.
     assert "fractions.reduce((sum, value) => sum + value, 0) / entry.fractions.length" in app_js
+    # Pools with no usable account are hidden; errored accounts stay in the roster.
+    assert "filter((pool) => pool.hasRenderable)" in app_js
+    assert "acc.tier || q.tier || extra.tier" in app_js
 
 
 def test_status_tab_has_graph_view_with_provider_filtering():
