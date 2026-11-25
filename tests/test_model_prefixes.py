@@ -16,15 +16,21 @@ from llmproxy.schemas import (
 ROOT = Path(__file__).resolve().parent.parent
 
 EXPECTED_PREFIXES = {
+    "agentrouter": "ar",
     "anthropic_proxy": "ap",
     "antigravity": "ag",
+    "cloudflare_workers_ai": "cf",
     "codex": "cx",
     "gemini": "gm",
     "groqcloud": "groq",
     "mistral_vibe": "mv",
     "mock_provider": "mock",
+    "modelscope": "ms",
+    "moonmath_zro": "zro",
     "munito_ai": "munito",
+    "nanogpt": "ng",
     "nous_oauth": "np",
+    "nvidia_nim": "nim",
     "openai_compatible": "compat",
     "opencode_free": "oc",
     "opencode_go": "ocg",
@@ -33,14 +39,19 @@ EXPECTED_PREFIXES = {
 }
 
 REASONING_TEMPLATES = {
+    "agentrouter",
     "anthropic_proxy",
     "antigravity",
+    "cloudflare_workers_ai",
     "codex",
     "gemini",
     "groqcloud",
     "mistral_vibe",
+    "modelscope",
+    "moonmath_zro",
     "munito_ai",
     "nous_oauth",
+    "nvidia_nim",
     "opencode_free",
     "opencode_go",
     "openrouter",

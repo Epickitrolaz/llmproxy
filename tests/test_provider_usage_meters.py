@@ -384,12 +384,18 @@ def test_provider_usage_status_omits_empty_quota_from_hook(monkeypatch):
         ("groqcloud", True),
         ("mistral_vibe", True),
         ("munito_ai", True),
+        ("nanogpt", True),
         ("nous_oauth", True),
         ("opencode_go", True),
         ("openrouter", True),
+        ("agentrouter", False),
+        ("cloudflare_workers_ai", False),
         ("colab_ollama", False),
         ("gemini", False),
         ("mock_provider", False),
+        ("modelscope", False),
+        ("moonmath_zro", False),
+        ("nvidia_nim", False),
         ("openai_compatible", False),
         ("opencode_free", False),
     ],
@@ -397,6 +403,59 @@ def test_provider_usage_status_omits_empty_quota_from_hook(monkeypatch):
 def test_all_builtin_templates_declare_accurate_usage_meter_flag(template_name, expected):
     module = _load_template(template_name)
     assert module.plugin.metadata.supports_usage_meter is expected
+
+
+def test_nanogpt_fetch_usage_quota_reports_balance_and_active_subscription(monkeypatch):
+    import httpx
+
+    module = _load_template("nanogpt")
+    plugin = module.plugin
+    account = Account(
+        provider_id="nanogpt",
+        name="NanoGPT",
+        api_key="ng-live-key",
+        base_url="https://api.nano-gpt.com/api/v1",
+    )
+
+    class _Resp:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None):
+            assert url == "https://api.nano-gpt.com/api/check-balance"
+            assert headers["x-api-key"] == "ng-live-key"
+            return _Resp(200, {"usd_balance": "4.75", "usd_spendable_balance": 4.75})
+
+        async def get(self, url, headers=None):
+            assert url == "https://api.nano-gpt.com/api/subscription/v1/usage"
+            return _Resp(
+                200,
+                {
+                    "active": True,
+                    "weeklyInputTokens": {"percentUsed": 25, "resetAt": 1796000000000},
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    quota = asyncio.run(plugin.fetch_usage_quota(account, {}))
+    assert quota is not None
+    assert quota["balance"] == {"value": 4.75, "label": "available balance"}
+    assert quota["groups"][0]["buckets"][0]["usedPercent"] == pytest.approx(25.0)
+    assert quota["groups"][0]["buckets"][0]["remainingFraction"] == pytest.approx(0.75)
 
 
 @pytest.mark.parametrize("template_name", ["groqcloud", "munito_ai"])

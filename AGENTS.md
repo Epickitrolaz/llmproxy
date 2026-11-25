@@ -238,9 +238,9 @@ Do not add provider-specific routes or core OAuth modules to the proxy.
 - `GET /v1/models` and the dashboard model list expose each model once under its
   exposed ID. Do not publish synthetic `<model>:<level>` entries as separate models.
 - Built-in templates expose model IDs as `<short-prefix>/<model-name>` and keep
-  the provider's native ID in `upstream_model`. The current prefixes are `ap`,
-  `ag`, `cx`, `gm`, `groq`, `mv`, `mock`, `munito`, `np`, `compat`, `oc`,
-  `ocg`, and `or`.
+  the provider's native ID in `upstream_model`. The current prefixes are `ar`,
+  `ap`, `ag`, `cf`, `cx`, `gm`, `groq`, `mv`, `mock`, `ms`, `zro`, `munito`,
+  `ng`, `np`, `nim`, `compat`, `oc`, `ocg`, and `or`.
 - Advertise supported reasoning through `reasoning_levels` on
   `PluginModelConfig` and `ModelCard`. Clients select a level with
   `reasoning_effort`; the `:<level>` suffix stays accepted for compatibility.
