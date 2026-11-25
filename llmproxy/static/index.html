@@ -367,9 +367,13 @@
       <div class="section-header">
         <div class="section-title-group">
           <h2>Status</h2>
-          <p>Real-time account limits, provider health status, and persistent request audit logs.</p>
+          <p>Pooled quota limits grouped by provider tier, usage analytics graph, and persistent request audit logs.</p>
         </div>
         <div class="section-actions">
+          <div class="status-view-switcher" role="tablist" aria-label="Status view mode">
+            <button class="status-view-btn active" data-status-view="overview" id="btn-status-view-overview" role="tab" aria-selected="true" type="button">Pooled Status</button>
+            <button class="status-view-btn" data-status-view="graph" id="btn-status-view-graph" role="tab" aria-selected="false" type="button">Graph View</button>
+          </div>
           <button class="btn btn-secondary btn-sm" id="btn-logs-status" style="display: none;">Status</button>
           <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-secondary); cursor: pointer;">
             <input type="checkbox" id="logs-auto-toggle" style="accent-color: var(--accent-white);">
@@ -379,20 +383,25 @@
         </div>
       </div>
 
-      <div class="status-layout-grid">
-        <!-- Left: Usage / Account Status Tracker -->
-        <div class="status-col-usage">
+      <!-- VIEW 1: POOLED STATUS & AUDIT LOG -->
+      <div class="status-view-panel active" id="status-view-overview">
+        <div class="status-layout-stacked">
+          <!-- Top: Pooled Quota & Tier Windows -->
           <div class="card status-tracker-card" id="status-tracker-card">
-            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-              <h3>Account Usage & Quota</h3>
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <div class="card-title-row">
+                <h3>Pooled Usage &amp; Quota</h3>
+                <span class="badge" id="status-pool-summary-badge">0 pools</span>
+              </div>
+              <span style="font-size: 12px; color: var(--ink-muted);" id="status-pool-subtitle">Accounts grouped by provider and tier</span>
             </div>
             <div id="status-tracker-body">
-              <!-- Provider Tabs for Multi-Provider Status Scaling -->
+              <!-- Provider Tabs for Multi-Provider Status Filtering -->
               <div class="status-provider-tabs" id="status-provider-tabs">
                 <button class="status-provider-tab active" data-provider="">All Providers</button>
               </div>
 
-              <!-- Accounts Grid Layout Cards -->
+              <!-- Tier-Grouped Usage Windows Grid -->
               <div class="accounts-two-rows-grid" id="status-accounts-grid">
                 <div style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--ink-muted);">
                   Loading accounts and status...
@@ -400,13 +409,14 @@
               </div>
             </div>
           </div>
-        </div>
 
-        <!-- Right: Persistent Request Audit Log -->
-        <div class="status-col-logs">
+          <!-- Bottom: Persistent Request Audit Log -->
           <div class="card status-logs-card">
-            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
-              <h3>Persistent Request Audit Log</h3>
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <div class="card-title-row">
+                <h3>Persistent Request Audit Log</h3>
+                <span class="badge" id="logs-filter-badge">All Providers</span>
+              </div>
             </div>
             <div class="table-container">
               <table class="data-table">
@@ -428,6 +438,90 @@
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 2: USAGE GRAPH VIEW -->
+      <div class="status-view-panel" id="status-view-graph" hidden>
+        <div class="card status-graph-controls-card">
+          <div class="status-graph-toolbar">
+            <div class="status-graph-filter-group">
+              <span class="graph-control-label">Providers</span>
+              <div class="graph-provider-filters" id="graph-provider-filters">
+                <button class="status-provider-tab active" data-graph-provider="" type="button">All Providers</button>
+              </div>
+            </div>
+            <div class="status-graph-options">
+              <div class="graph-segmented" id="graph-metric-tabs" role="group" aria-label="Graph metric">
+                <button class="graph-seg-btn active" data-metric="tokens" type="button">Tokens</button>
+                <button class="graph-seg-btn" data-metric="requests" type="button">Requests</button>
+                <button class="graph-seg-btn" data-metric="cache" type="button">Cache %</button>
+                <button class="graph-seg-btn" data-metric="latency" type="button">Latency</button>
+              </div>
+              <div class="graph-segmented" id="graph-range-tabs" role="group" aria-label="Time range">
+                <button class="graph-seg-btn" data-range="1h" type="button">1H</button>
+                <button class="graph-seg-btn" data-range="6h" type="button">6H</button>
+                <button class="graph-seg-btn" data-range="24h" type="button">24H</button>
+                <button class="graph-seg-btn" data-range="7d" type="button">7D</button>
+                <button class="graph-seg-btn active" data-range="all" type="button">All</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stats-grid status-graph-kpis" id="graph-kpis-grid">
+          <div class="stat-card">
+            <span class="stat-eyebrow">Requests</span>
+            <span class="stat-value" id="graph-kpi-requests">0</span>
+            <span class="stat-subtext" id="graph-kpi-success">100% success</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-eyebrow">Total Tokens</span>
+            <span class="stat-value" id="graph-kpi-tokens">0</span>
+            <span class="stat-subtext" id="graph-kpi-tokens-sub">0 in / 0 out</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-eyebrow">Cache Hit Rate</span>
+            <span class="stat-value" id="graph-kpi-cache">0%</span>
+            <span class="stat-subtext" id="graph-kpi-cache-sub">0 cached tokens</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-eyebrow">Avg Latency</span>
+            <span class="stat-value" id="graph-kpi-latency">0 ms</span>
+            <span class="stat-subtext" id="graph-kpi-errors">0 errors</span>
+          </div>
+        </div>
+
+        <div class="card status-graph-chart-card">
+          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div class="card-title-row">
+              <h3 id="graph-chart-title">Token Usage Over Time</h3>
+              <span class="badge" id="graph-chart-subtitle">All Providers</span>
+            </div>
+            <div class="graph-legend" id="graph-timeseries-legend"></div>
+          </div>
+          <div class="graph-chart-stage" id="graph-timeseries-container"></div>
+        </div>
+
+        <div class="status-graph-secondary-grid">
+          <div class="card status-graph-subcard">
+            <div class="card-header">
+              <div class="card-title-row">
+                <h3>Pool Remaining Capacity</h3>
+                <span class="badge" id="graph-pool-count-badge">0 pools</span>
+              </div>
+            </div>
+            <div class="graph-subcard-body" id="graph-pool-capacity-container"></div>
+          </div>
+          <div class="card status-graph-subcard">
+            <div class="card-header">
+              <div class="card-title-row">
+                <h3 id="graph-breakdown-title">Usage by Provider</h3>
+                <span class="badge" id="graph-breakdown-badge">Requests &amp; Tokens</span>
+              </div>
+            </div>
+            <div class="graph-subcard-body" id="graph-provider-breakdown-container"></div>
           </div>
         </div>
       </div>

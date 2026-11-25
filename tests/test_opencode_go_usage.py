@@ -199,5 +199,5 @@ def test_dashboard_fetches_opencode_go_status():
     root = Path(__file__).resolve().parent.parent
     js = (root / "llmproxy" / "static" / "app.js").read_text(encoding="utf-8")
 
-    assert 'a.provider_id === "opencode_go"' in js
+    assert 'has("opencode_go")' in js
     assert "/api/opencode-go/status" in js

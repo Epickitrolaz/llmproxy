@@ -80,8 +80,18 @@ The only components hard-coded into the router are the **monochrome web dashboar
     actually served it and that model's provider, not the virtual rule ID.
 - **Unified Status & Limits Dashboard**:
   - Multi-provider tabbed view designed to scale cleanly across 50+ providers.
-  - Two-row layout of rounded square account cards sorted by provider name (pinned providers first).
-  - Clean limit progress bars with an option to hide specific limits that do not apply to a given account.
+  - Accounts are pooled per provider **and** subscription tier: five Google AI Pro
+    accounts share one usage window, while a Google free-tier account gets its own
+    separate window. Tier labels come from the live provider plan
+    (`paidTier` for Antigravity, `plan_type` for Codex, free/paid for OpenRouter),
+    not from a stale login snapshot.
+  - Each pool shows the combined remaining capacity across its accounts, the
+    account count, cooldown/no-data badges, and an expandable per-account roster.
+  - Clean limit progress bars with an option to hide specific limits that do not
+    apply to a pool.
+  - **Graph View** renders a provider-filtered time series of tokens, requests,
+    cache hit rate, or latency across 1H/6H/24H/7D/all ranges, with KPI cards,
+    pooled remaining capacity bars, and a per-provider usage breakdown.
   - Providers that expose a live usage meter set `supports_usage_meter`; the dashboard then shows real limits instead of a fabricated quota bar. Rate-limit headers (`x-ratelimit-*` and `anthropic-ratelimit-*`) are normalized automatically, and providers with a dedicated usage endpoint implement `fetch_usage_quota` (for example Ollama Cloud balance and 30-day usage).
   - Metered accounts can disable **Track usage &amp; quota** individually, which stops local request counters and rate-limit cooldowns for unlimited or externally billed endpoints. Providers without a usage meter show no quota section at all.
   - OpenRouter accounts display their live available credit balance as prominent text instead of a usage bar.

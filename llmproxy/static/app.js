@@ -26,7 +26,12 @@
     stats: {},
     logs: [],
     managementKey: "",
+    statusView: "overview", // "overview" | "graph"
     statusProviderFilter: "",
+    expandedStatusGroups: new Set(),
+    graphProviders: new Set(), // empty => All Providers
+    graphMetric: "tokens", // "tokens" | "requests" | "cache" | "latency"
+    graphRange: "all", // "1h" | "6h" | "24h" | "7d" | "all"
     activeSnippetLang: "python",
     selectedSnippetModel: "test-model",
     temporaryApiKey: null,
@@ -127,11 +132,38 @@
     playgroundSidebar: document.getElementById("playground-sidebar"),
     playgroundParamsToggle: document.getElementById("playground-params-toggle"),
     // Status
+    statusViewBtns: document.querySelectorAll(".status-view-btn"),
+    statusViewOverview: document.getElementById("status-view-overview"),
+    statusViewGraph: document.getElementById("status-view-graph"),
+    statusPoolSummaryBadge: document.getElementById("status-pool-summary-badge"),
+    statusPoolSubtitle: document.getElementById("status-pool-subtitle"),
     statusProviderTabs: document.getElementById("status-provider-tabs"),
     statusAccountsGrid: document.getElementById("status-accounts-grid"),
+    logsFilterBadge: document.getElementById("logs-filter-badge"),
     logsTableBody: document.getElementById("logs-table-body"),
     logsRefreshBtn: document.getElementById("logs-refresh-btn"),
     logsAutoToggle: document.getElementById("logs-auto-toggle"),
+    // Status Graph View
+    graphProviderFilters: document.getElementById("graph-provider-filters"),
+    graphMetricTabs: document.getElementById("graph-metric-tabs"),
+    graphRangeTabs: document.getElementById("graph-range-tabs"),
+    graphKpiRequests: document.getElementById("graph-kpi-requests"),
+    graphKpiSuccess: document.getElementById("graph-kpi-success"),
+    graphKpiTokens: document.getElementById("graph-kpi-tokens"),
+    graphKpiTokensSub: document.getElementById("graph-kpi-tokens-sub"),
+    graphKpiCache: document.getElementById("graph-kpi-cache"),
+    graphKpiCacheSub: document.getElementById("graph-kpi-cache-sub"),
+    graphKpiLatency: document.getElementById("graph-kpi-latency"),
+    graphKpiErrors: document.getElementById("graph-kpi-errors"),
+    graphChartTitle: document.getElementById("graph-chart-title"),
+    graphChartSubtitle: document.getElementById("graph-chart-subtitle"),
+    graphTimeseriesLegend: document.getElementById("graph-timeseries-legend"),
+    graphTimeseriesContainer: document.getElementById("graph-timeseries-container"),
+    graphPoolCountBadge: document.getElementById("graph-pool-count-badge"),
+    graphPoolCapacityContainer: document.getElementById("graph-pool-capacity-container"),
+    graphBreakdownTitle: document.getElementById("graph-breakdown-title"),
+    graphBreakdownBadge: document.getElementById("graph-breakdown-badge"),
+    graphProviderBreakdownContainer: document.getElementById("graph-provider-breakdown-container"),
     // Modals
     modalNewProvider: document.getElementById("modal-new-provider"),
     modalTemplates: document.getElementById("modal-templates"),
@@ -3148,6 +3180,8 @@ curl -X POST ${baseUrl}/chat/completions \\
     ]);
     await renderStatusAccountsGrid(fetchFreshQuota);
     renderStatusProviderTabs();
+    renderLogsTable();
+    if (state.statusView === "graph") renderGraphView();
   }
 
   async function togglePluginPin(plugin) {
@@ -3158,19 +3192,6 @@ curl -X POST ${baseUrl}/chat/completions \\
       if (pInState) pInState.pinned = res.pinned;
       showToast(`Provider '${plugin.name}' ${res.pinned ? "pinned to top" : "unpinned"}`);
       renderStatusProviderTabs();
-      renderStatusAccountsGrid(false);
-    } catch (err) {
-      showToast(`Pin failed: ${err.message}`, "error");
-    }
-  }
-
-  async function toggleAccountPin(account) {
-    try {
-      const res = await api(`/api/accounts/${account.id}/pin`, { method: "POST" });
-      account.pinned = res.pinned;
-      const accInState = state.accounts.find((a) => a.id === account.id);
-      if (accInState) accInState.pinned = res.pinned;
-      showToast(`Account '${account.name}' ${res.pinned ? "pinned to top" : "unpinned"}`);
       renderStatusAccountsGrid(false);
     } catch (err) {
       showToast(`Pin failed: ${err.message}`, "error");
@@ -3189,6 +3210,8 @@ curl -X POST ${baseUrl}/chat/completions \\
       state.statusProviderFilter = "";
       renderStatusProviderTabs();
       renderStatusAccountsGrid(false);
+      renderLogsTable();
+      if (state.statusView === "graph") renderGraphView();
     });
     el.statusProviderTabs.appendChild(allBtn);
 
@@ -3221,40 +3244,11 @@ curl -X POST ${baseUrl}/chat/completions \\
         state.statusProviderFilter = p.id;
         renderStatusProviderTabs();
         renderStatusAccountsGrid(false);
+        renderLogsTable();
+        if (state.statusView === "graph") renderGraphView();
       });
       el.statusProviderTabs.appendChild(btn);
     });
-  }
-
-  function updateCardUnhideBar(card, accId) {
-    const hiddenCount = state.hiddenLimits[accId] ? state.hiddenLimits[accId].size : 0;
-    let bar = card.querySelector(".unhide-limits-bar");
-    if (hiddenCount > 0) {
-      if (!bar) {
-        bar = document.createElement("div");
-        bar.className = "unhide-limits-bar";
-        card.appendChild(bar);
-      }
-      bar.innerHTML = `<button class="btn btn-secondary btn-sm btn-unhide-all" data-acc="${accId}" style="font-size: 10.5px; padding: 2px 8px;">Unhide all (${hiddenCount})</button>`;
-      bar.querySelector(".btn-unhide-all").addEventListener("click", (e) => {
-        e.stopPropagation();
-        unhideAllForCard(card, accId);
-      });
-    } else if (bar) {
-      bar.remove();
-    }
-  }
-
-  function unhideAllForCard(card, accId) {
-    if (state.hiddenLimits[accId]) {
-      delete state.hiddenLimits[accId];
-      saveHiddenLimits();
-    }
-    card.querySelectorAll(".limit-item").forEach((item) => {
-      item.classList.remove("hidden-limit");
-    });
-    const bar = card.querySelector(".unhide-limits-bar");
-    if (bar) bar.remove();
   }
 
   function formatTimeRemaining(resetTime) {
@@ -3278,373 +3272,491 @@ curl -X POST ${baseUrl}/chat/completions \\
     return `${Math.max(1, minutes)}m left`;
   }
 
+  // --- Provider tier / plan labelling -------------------------------------
+
+  const TIER_LABELS = {
+    "free-tier": "Free",
+    "g1-pro-tier": "Google AI Pro",
+    "g1-ultra-tier": "Google AI Ultra",
+    free: "Free",
+    plus: "Plus",
+    pro: "Pro",
+    team: "Team",
+    business: "Business",
+    enterprise: "Enterprise",
+    standard: "Standard",
+  };
+
+  function resolveAccountTier(acc, quota) {
+    const providerId = acc.provider_id;
+    const q = quota || {};
+    let raw = "";
+    if (providerId === "antigravity") {
+      raw = acc.tier || q.tier || "free-tier";
+      const label = q.tier_name || acc.tier_name || TIER_LABELS[raw] || raw;
+      return { key: String(raw || "free-tier").toLowerCase(), label, pro: /pro|ultra/i.test(raw) };
+    }
+    if (providerId === "codex") {
+      raw = acc.plan_type || q.plan_type || "standard";
+      return { key: String(raw).toLowerCase(), label: TIER_LABELS[raw] || raw, pro: /plus|pro|team|business|enterprise/i.test(raw) };
+    }
+    if (providerId === "openrouter") {
+      const isFree = q.is_free_tier === true;
+      return { key: isFree ? "free" : "paid", label: isFree ? "Free" : "Paid", pro: !isFree };
+    }
+    if (providerId === "opencode_go") {
+      return { key: "go", label: "Go", pro: true };
+    }
+    raw = acc.tier || q.tier || acc.plan_type || q.plan_type || "standard";
+    return { key: String(raw).toLowerCase(), label: TIER_LABELS[raw] || raw, pro: false };
+  }
+
+  function quotaHasRenderableUsage(quota) {
+    if (!quota || quota.error) return false;
+    if (typeof quota.available_credits === "number") return true;
+    if (quota.balance && typeof quota.balance === "object") return true;
+    if (Array.isArray(quota.summary) && quota.summary.length > 0) return true;
+    if (Array.isArray(quota.groups) && quota.groups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0)) {
+      return true;
+    }
+    return false;
+  }
+
+  function bucketRemainingFraction(bucket) {
+    if (bucket.remainingFraction !== undefined && bucket.remainingFraction !== null) {
+      return Math.min(1, Math.max(0, Number(bucket.remainingFraction)));
+    }
+    if (bucket.usedPercent !== undefined && bucket.usedPercent !== null) {
+      return Math.min(1, Math.max(0, 1 - Number(bucket.usedPercent) / 100));
+    }
+    return 1;
+  }
+
+  // --- Pool grouping -------------------------------------------------------
+
+  function buildUsagePools(accountsToDisplay, quotaDataMap) {
+    const providerMap = {};
+    state.plugins.forEach((p) => { providerMap[p.id] = p; });
+
+    const pools = new Map();
+    accountsToDisplay.forEach((acc) => {
+      if (acc.disable_usage_tracking) return;
+      const quota = quotaDataMap[acc.id];
+      if (!quotaHasRenderableUsage(quota)) return;
+
+      const provider = providerMap[acc.provider_id] || { id: acc.provider_id, name: acc.provider_id, pinned: false };
+      const tier = resolveAccountTier(acc, quota);
+      const key = `${acc.provider_id}::${tier.key}`;
+
+      let pool = pools.get(key);
+      if (!pool) {
+        pool = {
+          key,
+          providerId: acc.provider_id,
+          providerName: provider.name,
+          providerPinned: !!provider.pinned || !!acc.pinned,
+          tierKey: tier.key,
+          tierLabel: tier.label,
+          tierPro: !!tier.pro,
+          accounts: [],
+          groups: new Map(),
+          creditSum: 0,
+          hasCredits: false,
+          balances: new Map(),
+          summaries: new Map(),
+        };
+        pools.set(key, pool);
+      }
+      if (acc.pinned) pool.providerPinned = true;
+      pool.accounts.push({ acc, quota, tier });
+
+      if (quota.balance && typeof quota.balance === "object" && typeof quota.balance.value === "number") {
+        const label = quota.balance.label || "available balance";
+        const prev = pool.balances.get(label);
+        pool.balances.set(label, (prev || 0) + quota.balance.value);
+      }
+      if (typeof quota.available_credits === "number") {
+        pool.hasCredits = true;
+        pool.creditSum += quota.available_credits;
+      }
+      if (Array.isArray(quota.summary)) {
+        quota.summary.forEach((item) => {
+          if (!item || item.label === undefined) return;
+          const label = String(item.label);
+          const numeric = typeof item.value === "number" ? item.value : null;
+          if (numeric === null) return;
+          pool.summaries.set(label, (pool.summaries.get(label) || 0) + numeric);
+        });
+      }
+
+      (quota.groups || []).forEach((grp) => {
+        if (!grp || !Array.isArray(grp.buckets)) return;
+        const groupName = grp.displayName || "Usage";
+        let group = pool.groups.get(groupName);
+        if (!group) {
+          group = { displayName: groupName, buckets: new Map() };
+          pool.groups.set(groupName, group);
+        }
+        grp.buckets.forEach((bucket) => {
+          const bucketKey = bucket.bucketId || bucket.displayName || "limit";
+          let entry = group.buckets.get(bucketKey);
+          if (!entry) {
+            entry = {
+              bucketId: bucketKey,
+              displayName: bucket.displayName || bucketKey,
+              fractions: [],
+              resets: [],
+              accountCount: 0,
+            };
+            group.buckets.set(bucketKey, entry);
+          }
+          entry.fractions.push(bucketRemainingFraction(bucket));
+          if (bucket.resetTime) entry.resets.push(bucket.resetTime);
+          entry.accountCount += 1;
+        });
+      });
+    });
+
+    const result = Array.from(pools.values()).map((pool) => {
+      const activeAccounts = pool.accounts.filter(({ acc }) => acc.enabled);
+      const cooldownCount = pool.accounts.filter(({ acc }) => acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000).length;
+      const errorCount = pool.accounts.filter(({ quota }) => quota && quota.error).length;
+      const groups = Array.from(pool.groups.values()).map((group) => ({
+        displayName: group.displayName,
+        buckets: Array.from(group.buckets.values()).map((entry) => {
+          const avg = entry.fractions.length
+            ? entry.fractions.reduce((sum, value) => sum + value, 0) / entry.fractions.length
+            : 1;
+          const resets = entry.resets
+            .map((value) => new Date(value).getTime())
+            .filter((value) => !isNaN(value))
+            .sort((a, b) => a - b);
+          return {
+            bucketId: entry.bucketId,
+            displayName: entry.displayName,
+            remainingFraction: avg,
+            resetTime: resets.length ? new Date(resets[0]).toISOString() : null,
+            accountCount: entry.accountCount,
+          };
+        }),
+      }));
+      const totalBuckets = groups.reduce((sum, group) => sum + group.buckets.length, 0);
+      const poolRemaining = totalBuckets
+        ? groups.reduce((sum, group) => sum + group.buckets.reduce((s, b) => s + b.remainingFraction, 0), 0) / totalBuckets
+        : null;
+      return {
+        ...pool,
+        groups,
+        accountTotal: pool.accounts.length,
+        activeCount: activeAccounts.length,
+        cooldownCount,
+        errorCount,
+        poolRemaining,
+      };
+    });
+
+    result.sort((a, b) => {
+      if (a.providerPinned !== b.providerPinned) return a.providerPinned ? -1 : 1;
+      const nameCmp = a.providerName.localeCompare(b.providerName);
+      if (nameCmp !== 0) return nameCmp;
+      if (a.tierPro !== b.tierPro) return a.tierPro ? -1 : 1;
+      return a.tierLabel.localeCompare(b.tierLabel);
+    });
+
+    return { pools: result, providerMap };
+  }
+
+  function currentStatusAccounts() {
+    return state.statusProviderFilter
+      ? state.accounts.filter((a) => a.provider_id === state.statusProviderFilter)
+      : [...state.accounts];
+  }
+
+  function getQuotaDataMap() {
+    return state.cachedQuotaData || {};
+  }
+
+  // --- Pooled quota rendering ---------------------------------------------
+
+  async function loadQuotaData(accountsToDisplay, fetchFreshQuota) {
+    if (!(fetchFreshQuota || !state.cachedQuotaData)) return;
+    if (!state.cachedQuotaData) state.cachedQuotaData = {};
+    if (fetchFreshQuota) {
+      accountsToDisplay.forEach((acc) => {
+        delete state.cachedQuotaData[acc.id];
+      });
+    }
+
+    const has = (providerId) => accountsToDisplay.some((a) => a.provider_id === providerId);
+
+    const jobs = [];
+    const collect = (path, key) => api(path)
+      .then((res) => {
+        if (res && res.accounts) {
+          res.accounts.forEach((item) => {
+            if (item && item[key]) state.cachedQuotaData[item.account_id] = item[key];
+          });
+        }
+      })
+      .catch(() => {});
+
+    if (has("antigravity")) jobs.push(collect("/api/antigravity/status", "quota"));
+    if (has("codex")) jobs.push(collect("/api/codex/status", "quota"));
+    if (has("openrouter")) jobs.push(collect("/api/openrouter/status", "credits"));
+    if (has("opencode_go")) jobs.push(collect("/api/opencode-go/status", "quota"));
+
+    const pluginMeteredAccounts = accountsToDisplay.filter((account) => {
+      const plugin = (state.plugins || []).find((item) => item.id === account.provider_id);
+      return Boolean(plugin && plugin.supports_usage_meter);
+    });
+    if (pluginMeteredAccounts.length > 0) {
+      jobs.push(collect("/api/provider-usage/status", "quota"));
+    }
+
+    await Promise.all(jobs);
+  }
+
+  function quotaBarColor(pct) {
+    return pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
+  }
+
+  function renderPctBadge(pct) {
+    return `<span style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: ${quotaBarColor(pct)};">${pct}%</span>`;
+  }
+
   async function renderStatusAccountsGrid(fetchFreshQuota = false) {
     if (!el.statusAccountsGrid) return;
-    
-    // Only show loading placeholder if grid is completely empty
+
     if (el.statusAccountsGrid.children.length === 0) {
       el.statusAccountsGrid.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
-          Loading accounts status & quota limits...
+          Loading accounts status &amp; quota limits...
         </div>
       `;
     }
 
-    // Filter accounts by current filter
-    let accountsToDisplay = state.statusProviderFilter
-      ? state.accounts.filter((a) => a.provider_id === state.statusProviderFilter)
-      : [...state.accounts];
-
+    const accountsToDisplay = currentStatusAccounts();
     if (accountsToDisplay.length === 0) {
       el.statusAccountsGrid.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
           No accounts configured for this provider.
         </div>
       `;
+      if (el.statusPoolSummaryBadge) el.statusPoolSummaryBadge.textContent = "0 pools";
       return;
     }
 
-    // Sort accounts by provider name (pinned providers first)
-    const providerMap = {};
-    state.plugins.forEach((p) => { providerMap[p.id] = p; });
+    await loadQuotaData(accountsToDisplay, fetchFreshQuota);
 
-    accountsToDisplay.sort((a, b) => {
-      const pA = providerMap[a.provider_id];
-      const pB = providerMap[b.provider_id];
-      const pinA = !!a.pinned;
-      const pinB = !!b.pinned;
-      const provPinA = pA ? !!pA.pinned : false;
-      const provPinB = pB ? !!pB.pinned : false;
+    const quotaDataMap = getQuotaDataMap();
+    const { pools } = buildUsagePools(accountsToDisplay, quotaDataMap);
 
-      // 1. Specifically pinned account comes first
-      if (pinA && !pinB) return -1;
-      if (!pinA && pinB) return 1;
-
-      // 2. Accounts from specifically pinned providers next
-      if (provPinA && !provPinB) return -1;
-      if (!provPinA && provPinB) return 1;
-
-      // 3. Provider name alphabetical
-      const nameA = pA ? pA.name.toLowerCase() : "";
-      const nameB = pB ? pB.name.toLowerCase() : "";
-      if (nameA !== nameB) return nameA.localeCompare(nameB);
-
-      // 4. Account name alphabetical
-      return a.name.localeCompare(b.name);
+    const usageProviderIds = new Set();
+    accountsToDisplay.forEach((acc) => {
+      if (quotaHasRenderableUsage(quotaDataMap[acc.id])) usageProviderIds.add(acc.provider_id);
     });
-
-    // Fetch live quota for Antigravity and Codex accounts if requested fresh or not cached yet
-    if (fetchFreshQuota || !state.cachedQuotaData) {
-      if (!state.cachedQuotaData) state.cachedQuotaData = {};
-      if (fetchFreshQuota) {
-        accountsToDisplay.forEach((acc) => {
-          delete state.cachedQuotaData[acc.id];
-        });
-      }
-
-      const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
-      const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
-      const openrouterAccounts = accountsToDisplay.filter((a) => a.provider_id === "openrouter");
-      const opencodeGoAccounts = accountsToDisplay.filter((a) => a.provider_id === "opencode_go");
-
-      const antigravityPromise = antigravityAccounts.length > 0
-        ? api("/api/antigravity/status")
-            .then((agStatusRes) => {
-              if (agStatusRes && agStatusRes.accounts) {
-                agStatusRes.accounts.forEach((item) => {
-                  if (item.quota) {
-                    state.cachedQuotaData[item.account_id] = item.quota;
-                  }
-                });
-              }
-            })
-            .catch(() => {})
-        : Promise.resolve();
-
-      const codexPromise = codexAccounts.length > 0
-        ? api("/api/codex/status")
-            .then((codexStatusRes) => {
-              if (codexStatusRes && codexStatusRes.accounts) {
-                codexStatusRes.accounts.forEach((item) => {
-                  if (item.quota) {
-                    state.cachedQuotaData[item.account_id] = item.quota;
-                  }
-                });
-              }
-            })
-            .catch(() => {})
-        : Promise.resolve();
-
-      const openrouterPromise = openrouterAccounts.length > 0
-        ? api("/api/openrouter/status")
-            .then((orStatusRes) => {
-              if (orStatusRes && orStatusRes.accounts) {
-                orStatusRes.accounts.forEach((item) => {
-                  if (item.credits) {
-                    state.cachedQuotaData[item.account_id] = item.credits;
-                  }
-                });
-              }
-            })
-            .catch(() => {})
-        : Promise.resolve();
-
-      const opencodeGoPromise = opencodeGoAccounts.length > 0
-        ? api("/api/opencode-go/status")
-            .then((ocGoStatusRes) => {
-              if (ocGoStatusRes && ocGoStatusRes.accounts) {
-                ocGoStatusRes.accounts.forEach((item) => {
-                  if (item.quota) {
-                    state.cachedQuotaData[item.account_id] = item.quota;
-                  }
-                });
-              }
-            })
-            .catch(() => {})
-        : Promise.resolve();
-
-      const pluginMeteredAccounts = accountsToDisplay.filter((account) => {
-        const plugin = (state.plugins || []).find((item) => item.id === account.provider_id);
-        return Boolean(plugin && plugin.supports_usage_meter);
-      });
-      const providerUsagePromise = pluginMeteredAccounts.length > 0
-        ? api("/api/provider-usage/status")
-            .then((usageStatusRes) => {
-              if (usageStatusRes && usageStatusRes.accounts) {
-                usageStatusRes.accounts.forEach((item) => {
-                  if (item.quota) {
-                    state.cachedQuotaData[item.account_id] = item.quota;
-                  }
-                });
-              }
-            })
-            .catch(() => {})
-        : Promise.resolve();
-
-      await Promise.all([
-        antigravityPromise,
-        codexPromise,
-        openrouterPromise,
-        opencodeGoPromise,
-        providerUsagePromise,
-      ]);
-    }
-    const quotaDataMap = state.cachedQuotaData || {};
-    const hasRenderableUsage = (quota) => {
-      if (!quota || quota.error) return false;
-      if (typeof quota.available_credits === "number") return true;
-      if (quota.balance && typeof quota.balance === "object") return true;
-      if (Array.isArray(quota.summary) && quota.summary.length > 0) return true;
-      if (Array.isArray(quota.groups) && quota.groups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0)) {
-        return true;
-      }
-      return false;
-    };
-    const usageAccounts = accountsToDisplay.filter((acc) => {
-      if (acc.disable_usage_tracking) return false;
-      const quota = quotaDataMap[acc.id];
-      return hasRenderableUsage(quota);
-    });
-
-    state.usageProviderIds = new Set(usageAccounts.map((account) => account.provider_id));
-    if (state.statusProviderFilter && !state.usageProviderIds.has(state.statusProviderFilter)) {
+    state.usageProviderIds = usageProviderIds;
+    if (state.statusProviderFilter && !usageProviderIds.has(state.statusProviderFilter)) {
       state.statusProviderFilter = "";
+      renderStatusProviderTabs();
     }
 
-    if (usageAccounts.length === 0) {
+    if (pools.length === 0) {
       el.statusAccountsGrid.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--ink-muted);">
           No providers are reporting usage yet. Usage appears here after a metered provider returns a quota snapshot.
         </div>
       `;
+      if (el.statusPoolSummaryBadge) el.statusPoolSummaryBadge.textContent = "0 pools";
       return;
+    }
+
+    if (el.statusPoolSummaryBadge) {
+      el.statusPoolSummaryBadge.textContent = `${pools.length} pool${pools.length === 1 ? "" : "s"}`;
+    }
+    if (el.statusPoolSubtitle) {
+      const accountCount = pools.reduce((sum, pool) => sum + pool.accountTotal, 0);
+      el.statusPoolSubtitle.textContent = `${accountCount} account${accountCount === 1 ? "" : "s"} grouped into ${pools.length} usage window${pools.length === 1 ? "" : "s"}`;
     }
 
     el.statusAccountsGrid.innerHTML = "";
 
-    usageAccounts.forEach((acc) => {
-      const provider = providerMap[acc.provider_id] || { id: acc.provider_id, name: acc.provider_id, pinned: false };
+    pools.forEach((pool) => {
       const card = document.createElement("div");
-      card.className = "account-square-card";
+      const isExpanded = state.expandedStatusGroups.has(pool.key);
+      const hiddenSet = state.hiddenLimits[pool.key] || new Set();
 
-      const hiddenSet = state.hiddenLimits[acc.id] || new Set();
-
-      const inCooldown = acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000;
-      const statusPill = inCooldown
-        ? `<span class="badge" style="color: var(--accent-red); font-size: 11px;">Cooldown (${Math.round(acc.rate_limited_until - Date.now() / 1000)}s)</span>`
-        : acc.enabled
-          ? `<span class="badge badge-active" style="font-size: 11px;">Active</span>`
-          : `<span class="badge badge-muted" style="font-size: 11px;">Disabled</span>`;
+      const tierClass = pool.tierPro ? "is-pro" : /free/i.test(pool.tierKey) ? "is-free" : "";
+      const statusBits = [
+        `<span class="badge badge-active" style="font-size: 10.5px;">${pool.activeCount} active</span>`,
+      ];
+      if (pool.cooldownCount > 0) {
+        statusBits.push(`<span class="badge" style="font-size: 10.5px; color: var(--accent-red);">${pool.cooldownCount} cooling</span>`);
+      }
+      if (pool.errorCount > 0) {
+        statusBits.push(`<span class="badge" style="font-size: 10.5px; color: var(--accent-amber);">${pool.errorCount} no data</span>`);
+      }
 
       let limitsHtml = "";
-      const quota = quotaDataMap[acc.id];
-      const isOpenRouterAccount = acc.provider_id === "openrouter";
-      const hasGroups = Boolean(quota && Array.isArray(quota.groups) && quota.groups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0));
-
-      if (isOpenRouterAccount) {
-        // OpenRouter has no per-account quota bars on paid plans; show the live
-        // credit balance directly, or fall back to Free Daily Requests when present.
-        const availableCredits = quota && typeof quota.available_credits === "number"
-          ? quota.available_credits
-          : null;
-        if (availableCredits !== null) {
-          limitsHtml = `
-            <div class="credits-panel">
-              <span class="credits-value">$${availableCredits.toFixed(2)}</span>
-              <span class="credits-label">available credits</span>
-            </div>
-          `;
-        } else if (!hasGroups) {
-          const creditsError = quota && quota.error ? quota.error : "loading credits...";
-          limitsHtml = `
-            <div class="credits-panel credits-panel-unavailable" title="${escapeHtml(creditsError)}">
-              <span class="credits-value">—</span>
-              <span class="credits-label">${quota && quota.error ? "credits unavailable" : "loading credits..."}</span>
-            </div>
-          `;
-        }
-      }
-      if (!isOpenRouterAccount || hasGroups && !(quota && typeof quota.available_credits === "number")) {
-       if (hasGroups) {
-        quota.groups.forEach((grp) => {
-          (grp.buckets || []).forEach((b) => {
-            const bucketKey = b.bucketId || b.displayName || "limit";
-            const isHidden = hiddenSet.has(bucketKey);
-
-            let pct = 100;
-            let color = "#34d399";
-            let label = "";
-
-            // All quota meters show remaining capacity: 100% = fully available,
-            // 0% = used up. Codex reports usedPercent, so invert it when the
-            // normalized remainingFraction is not available.
-            if (b.remainingFraction !== undefined && b.remainingFraction !== null) {
-              pct = Math.min(100, Math.max(0, Math.round(b.remainingFraction * 100)));
-            } else if (b.usedPercent !== undefined && b.usedPercent !== null) {
-              pct = Math.min(100, Math.max(0, Math.round(100 - b.usedPercent)));
-            }
-            color = pct > 40 ? "#34d399" : pct > 10 ? "#fbbf24" : "#f43f5e";
-            label = `${pct}%`;
-
-            const resetStr = formatTimeRemaining(b.resetTime);
-            const groupName = grp.displayName || (b.usedPercent !== undefined ? "Usage" : "Quota");
-
-            limitsHtml += `
-              <div class="limit-item ${isHidden ? 'hidden-limit' : ''}" data-key="${escapeHtml(bucketKey)}">
-                <div class="limit-header">
-                  <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">${escapeHtml(b.displayName || bucketKey)}</span>
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: ${color};">${label}</span>
-                    <button class="btn-hide-limit" data-acc="${acc.id}" data-key="${escapeHtml(bucketKey)}" title="Hide this limit">✕</button>
-                  </div>
-                </div>
-                <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 5px; overflow: hidden;">
-                  <div style="background: ${color}; height: 100%; width: ${pct}%;"></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-muted);">
-                  <span>${escapeHtml(groupName)}</span>
-                  <span>Resets: ${escapeHtml(resetStr)}</span>
+      pool.groups.forEach((group) => {
+        group.buckets.forEach((bucket) => {
+          const bucketKey = bucket.bucketId || bucket.displayName || "limit";
+          if (hiddenSet.has(bucketKey)) return;
+          const pct = Math.round(bucket.remainingFraction * 100);
+          const resetStr = formatTimeRemaining(bucket.resetTime);
+          const coverage = bucket.accountCount > 1
+            ? `across ${bucket.accountCount} accounts`
+            : group.displayName;
+          limitsHtml += `
+            <div class="limit-item">
+              <div class="limit-header">
+                <span style="font-size: 12px; font-weight: 600; color: var(--ink-primary);">${escapeHtml(bucket.displayName)}</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  ${renderPctBadge(pct)}
+                  <button class="btn-hide-limit" data-pool="${escapeHtml(pool.key)}" data-key="${escapeHtml(bucketKey)}" title="Hide this limit">✕</button>
                 </div>
               </div>
-            `;
-          });
-        });
-       }
-      }
-
-      if (quota && quota.balance && typeof quota.balance === "object") {
-        const rawBalance = quota.balance.value;
-        const balanceValue = typeof rawBalance === "number"
-          ? `$${rawBalance.toFixed(2)}`
-          : String(rawBalance ?? "—");
-        limitsHtml += `
-          <div class="credits-panel">
-            <span class="credits-value">${escapeHtml(balanceValue)}</span>
-            <span class="credits-label">${escapeHtml(quota.balance.label || "available credit")}</span>
-          </div>
-        `;
-      }
-
-      if (quota && Array.isArray(quota.summary) && quota.summary.length > 0) {
-        limitsHtml += `
-          <div class="usage-summary-panel">
-            ${quota.summary.map((item) => `
-              <div class="usage-summary-row">
-                <span>${escapeHtml(item.label || "")}</span>
-                <strong>${escapeHtml(String(item.value ?? "—"))}</strong>
+              <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 5px; overflow: hidden;">
+                <div style="background: ${quotaBarColor(pct)}; height: 100%; width: ${pct}%;"></div>
               </div>
-            `).join("")}
-          </div>
-        `;
-      }
-
-      const hasHidden = hiddenSet.size > 0;
-
-      const isAccountPinned = !!acc.pinned;
-      const isProviderPinned = !!provider.pinned;
-      const isCardPinned = isAccountPinned || isProviderPinned;
-      const pinTitle = isAccountPinned
-        ? "Unpin account"
-        : isProviderPinned
-          ? "Provider is pinned (Click to pin this account specifically)"
-          : "Pin account to top";
-
-      card.className = `account-square-card ${isCardPinned ? 'is-pinned' : ''}`;
-
-      card.innerHTML = `
-        <div class="account-square-header">
-          <div style="min-width: 0; flex: 1;">
-            <div class="account-square-title">${escapeHtml(acc.name)}</div>
-            <span style="font-size: 11px; color: var(--ink-muted);">${escapeHtml(provider.name)}</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-            <button class="btn-pin ${isCardPinned ? 'pinned' : ''} btn-toggle-card-pin" data-acc-id="${acc.id}" title="${pinTitle}">
-              ${renderPinSvg(isCardPinned, 12)}
-            </button>
-            ${statusPill}
-          </div>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
-          ${limitsHtml}
-        </div>
-        ${hasHidden ? `
-          <div class="unhide-limits-bar">
-            <button class="btn btn-secondary btn-sm btn-unhide-all" data-acc="${acc.id}" style="font-size: 10.5px; padding: 2px 8px;">Unhide all (${hiddenSet.size})</button>
-          </div>
-        ` : ''}
-      `;
-
-      // Event: Pin toggle on account card (pins only this account)
-      const pinBtn = card.querySelector(".btn-toggle-card-pin");
-      if (pinBtn) {
-        pinBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          toggleAccountPin(acc);
-        });
-      }
-
-      // Events to hide limit (instantaneous DOM update without network roundtrip)
-      card.querySelectorAll(".btn-hide-limit").forEach((btn) => {
-        btn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const accId = btn.dataset.acc;
-          const k = btn.dataset.key;
-          if (!state.hiddenLimits[accId]) state.hiddenLimits[accId] = new Set();
-          state.hiddenLimits[accId].add(k);
-          saveHiddenLimits();
-
-          const limitItem = btn.closest(".limit-item");
-          if (limitItem) limitItem.classList.add("hidden-limit");
-          updateCardUnhideBar(card, accId);
+              <div style="display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: var(--ink-muted);">
+                <span>${escapeHtml(coverage)}</span>
+                <span>Resets: ${escapeHtml(resetStr)}</span>
+              </div>
+            </div>
+          `;
         });
       });
 
-      // Event to unhide all (instantaneous DOM update)
-      const unhideBtn = card.querySelector(".btn-unhide-all");
+      if (pool.hasCredits && pool.creditSum > 0) {
+        limitsHtml += `
+          <div class="credits-panel">
+            <span class="credits-value">$${pool.creditSum.toFixed(2)}</span>
+            <span class="credits-label">pooled credits (${pool.accountTotal} accounts)</span>
+          </div>
+        `;
+      }
+
+      pool.balances.forEach((value, label) => {
+        limitsHtml += `
+          <div class="credits-panel">
+            <span class="credits-value">$${value.toFixed(2)}</span>
+            <span class="credits-label">${escapeHtml(label)} (pooled)</span>
+          </div>
+        `;
+      });
+
+      if (pool.summaries.size > 0) {
+        const rows = Array.from(pool.summaries.entries()).map(([label, value]) => `
+          <div class="usage-summary-row">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(String(Math.round(value * 100) / 100))}</strong>
+          </div>
+        `).join("");
+        limitsHtml += `<div class="usage-summary-panel">${rows}</div>`;
+      }
+
+      if (!limitsHtml) {
+        limitsHtml = `<div style="font-size: 11.5px; color: var(--ink-muted); padding: 4px 0;">No live limits reported for this pool yet.</div>`;
+      }
+
+      const accountRows = pool.accounts.map(({ acc, quota }) => {
+        const inCooldown = acc.rate_limited_until && acc.rate_limited_until > Date.now() / 1000;
+        const accColor = quota && quota.error
+          ? "var(--accent-amber)"
+          : inCooldown
+            ? "var(--accent-red)"
+            : "var(--accent-green)";
+        const accState = quota && quota.error ? "No data" : inCooldown ? "Cooling" : acc.enabled ? "Active" : "Disabled";
+        const accToken = quota && typeof quota.available_credits === "number"
+          ? `$${quota.available_credits.toFixed(2)}`
+          : "";
+        return `
+          <div class="pool-account-row">
+            <span class="pool-account-name" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</span>
+            <span style="display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;">
+              ${accToken ? `<span class="pool-account-stat" style="color: var(--ink-secondary);">${escapeHtml(accToken)}</span>` : ""}
+              <span class="pool-account-stat" style="color: ${accColor}; font-family: var(--font-sans); font-size: 10.5px;">${accState}</span>
+            </span>
+          </div>
+        `;
+      }).join("");
+
+      const hiddenCount = hiddenSet.size;
+
+      card.className = `account-square-card ${pool.providerPinned ? "is-pinned" : ""}`;
+      card.innerHTML = `
+        <div class="account-square-header">
+          <div style="min-width: 0; flex: 1;">
+            <div class="account-square-title">${escapeHtml(pool.providerName)}</div>
+            <div class="pool-header-meta">
+              <span class="pool-tier-badge ${tierClass}">${escapeHtml(pool.tierLabel)}</span>
+              <span class="pool-count-pill">${pool.accountTotal} account${pool.accountTotal === 1 ? "" : "s"}</span>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
+            <button class="btn-pin ${pool.providerPinned ? "pinned" : ""} btn-toggle-pool-pin" data-pin-provider="${escapeHtml(pool.providerId)}" title="${pool.providerPinned ? "Unpin provider" : "Pin provider to top"}">
+              ${renderPinSvg(pool.providerPinned, 12)}
+            </button>
+          </div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 5px;">${statusBits.join("")}</div>
+        <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
+          ${limitsHtml}
+        </div>
+        <button class="pool-accounts-toggle" type="button">
+          <span>${isExpanded ? "Hide" : "Show"} accounts</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px;">
+            ${hiddenCount > 0 ? `<span class="pool-count-pill">${hiddenCount} hidden</span>` : ""}
+            <span>${isExpanded ? "▲" : "▼"}</span>
+          </span>
+        </button>
+        <div class="pool-accounts-drawer" ${isExpanded ? "" : "hidden"}>
+          ${accountRows}
+          ${hiddenCount > 0 ? `<button class="btn btn-secondary btn-sm btn-unhide-pool" style="font-size: 10.5px; padding: 2px 8px; align-self: flex-start;">Unhide all (${hiddenCount})</button>` : ""}
+        </div>
+      `;
+
+      const pinBtn = card.querySelector(".btn-toggle-pool-pin");
+      if (pinBtn) {
+        pinBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const plugin = state.plugins.find((p) => p.id === pool.providerId);
+          if (plugin) togglePluginPin(plugin);
+        });
+      }
+
+      const toggleBtn = card.querySelector(".pool-accounts-toggle");
+      if (toggleBtn) {
+        toggleBtn.addEventListener("click", () => {
+          if (state.expandedStatusGroups.has(pool.key)) {
+            state.expandedStatusGroups.delete(pool.key);
+          } else {
+            state.expandedStatusGroups.add(pool.key);
+          }
+          renderStatusAccountsGrid(false);
+        });
+      }
+
+      card.querySelectorAll(".btn-hide-limit").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const poolKey = btn.dataset.pool;
+          const key = btn.dataset.key;
+          if (!state.hiddenLimits[poolKey]) state.hiddenLimits[poolKey] = new Set();
+          state.hiddenLimits[poolKey].add(key);
+          saveHiddenLimits();
+          renderStatusAccountsGrid(false);
+        });
+      });
+
+      const unhideBtn = card.querySelector(".btn-unhide-pool");
       if (unhideBtn) {
         unhideBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          unhideAllForCard(card, acc.id);
+          delete state.hiddenLimits[pool.key];
+          saveHiddenLimits();
+          renderStatusAccountsGrid(false);
         });
       }
 
@@ -3652,10 +3764,11 @@ curl -X POST ${baseUrl}/chat/completions \\
     });
   }
 
-  // Request Audit Logs
+  // --- Request Audit Logs --------------------------------------------------
+
   async function fetchLogs() {
     try {
-      const data = await api("/api/logs?limit=100");
+      const data = await api("/api/logs?limit=1000");
       state.logs = data || [];
       renderLogsTable();
     } catch (err) {
@@ -3663,22 +3776,33 @@ curl -X POST ${baseUrl}/chat/completions \\
     }
   }
 
+  function filteredLogs() {
+    if (!state.statusProviderFilter) return state.logs;
+    return state.logs.filter((log) => log.plugin_id === state.statusProviderFilter);
+  }
+
   function renderLogsTable() {
     if (!el.logsTableBody) return;
     el.logsTableBody.innerHTML = "";
 
-    if (state.logs.length === 0) {
+    const logs = filteredLogs();
+    if (el.logsFilterBadge) {
+      const provider = state.plugins.find((p) => p.id === state.statusProviderFilter);
+      el.logsFilterBadge.textContent = provider ? provider.name : "All Providers";
+    }
+
+    if (logs.length === 0) {
       el.logsTableBody.innerHTML = `
         <tr>
           <td colspan="9" style="text-align: center; color: var(--ink-muted); padding: 24px;">
-            No requests logged yet. Make requests to <code>/v1/chat/completions</code> to see real-time persistent audit records.
+            No requests logged yet for this filter. Make requests to <code>/v1/chat/completions</code> to see real-time persistent audit records.
           </td>
         </tr>
       `;
       return;
     }
 
-    state.logs.forEach((log) => {
+    logs.slice(0, 100).forEach((log) => {
       const tr = document.createElement("tr");
       const timeStr = log.timestamp ? new Date(log.timestamp * 1000).toLocaleTimeString() : "";
       const isSuccess = log.status === "success" && (log.status_code >= 200 && log.status_code < 300);
@@ -3710,6 +3834,580 @@ curl -X POST ${baseUrl}/chat/completions \\
         <td data-label="Details" class="cell-details">${escapeHtml(log.error_message || "Completed")}</td>
       `;
       el.logsTableBody.appendChild(tr);
+    });
+  }
+
+  // --- Graph view ----------------------------------------------------------
+
+  const GRAPH_COLORS = [
+    "#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#a78bfa",
+    "#22d3ee", "#fb923c", "#4ade80", "#e879f9", "#facc15",
+    "#38bdf8", "#f87171",
+  ];
+
+  const GRAPH_RANGE_MS = {
+    "1h": 3600 * 1000,
+    "6h": 6 * 3600 * 1000,
+    "24h": 24 * 3600 * 1000,
+    "7d": 7 * 24 * 3600 * 1000,
+  };
+
+  function graphProviderColor(providerId) {
+    const ids = Array.from(new Set(state.logs.map((log) => log.plugin_id || "load_balancer"))).sort();
+    const index = Math.max(0, ids.indexOf(providerId));
+    return GRAPH_COLORS[index % GRAPH_COLORS.length];
+  }
+
+  function graphProviderName(providerId) {
+    const plugin = state.plugins.find((p) => p.id === providerId);
+    return plugin ? plugin.name : providerId;
+  }
+
+  function graphLogs() {
+    const now = Date.now();
+    const rangeMs = state.graphRange === "all" ? null : GRAPH_RANGE_MS[state.graphRange];
+    return state.logs.filter((log) => {
+      if (!log.timestamp) return false;
+      if (state.graphProviders.size > 0 && !state.graphProviders.has(log.plugin_id || "load_balancer")) {
+        return false;
+      }
+      if (rangeMs !== null && now - log.timestamp * 1000 > rangeMs) return false;
+      return true;
+    });
+  }
+
+  function graphBuckets(logs) {
+    const now = Date.now();
+    const rangeMs = state.graphRange === "all" ? null : GRAPH_RANGE_MS[state.graphRange];
+    let start;
+    let bucketCount;
+    if (rangeMs === null) {
+      const oldest = logs.reduce((min, log) => Math.min(min, log.timestamp * 1000), now);
+      const span = Math.max(now - oldest, 15 * 60 * 1000);
+      bucketCount = 24;
+      start = now - span;
+    } else {
+      start = now - rangeMs;
+      bucketCount = state.graphRange === "7d" ? 14 : 12;
+    }
+    const bucketMs = Math.max(1, (now - start) / bucketCount);
+
+    const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+      start: start + index * bucketMs,
+      end: start + (index + 1) * bucketMs,
+      totals: {},
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cacheRead: 0,
+      cacheablePrompt: 0,
+      latencySum: 0,
+      latencyCount: 0,
+      errors: 0,
+    }));
+
+    logs.forEach((log) => {
+      const ts = log.timestamp * 1000;
+      let index = Math.floor((ts - start) / bucketMs);
+      if (index < 0) index = 0;
+      if (index >= bucketCount) index = bucketCount - 1;
+      const bucket = buckets[index];
+      const providerId = log.plugin_id || "load_balancer";
+      const prompt = Number(log.prompt_tokens || 0);
+      const completion = Number(log.completion_tokens || 0);
+      const cacheRead = Number(log.cache_read_input_tokens || 0);
+      const cacheCreated = Number(log.cache_creation_input_tokens || 0);
+
+      bucket.requests += 1;
+      bucket.promptTokens += prompt;
+      bucket.completionTokens += completion;
+      bucket.cacheRead += cacheRead;
+      bucket.cacheablePrompt += Math.max(prompt, cacheRead + cacheCreated);
+      bucket.latencySum += Number(log.latency_ms || 0);
+      bucket.latencyCount += 1;
+      if (log.status !== "success" || (log.status_code && (log.status_code < 200 || log.status_code >= 300))) {
+        bucket.errors += 1;
+      }
+
+      const entry = bucket.totals[providerId] || { requests: 0, tokens: 0, cacheRead: 0, cacheablePrompt: 0, latencySum: 0, latencyCount: 0, errors: 0 };
+      entry.requests += 1;
+      entry.tokens += prompt + completion;
+      entry.cacheRead += cacheRead;
+      entry.cacheablePrompt += Math.max(prompt, cacheRead + cacheCreated);
+      entry.latencySum += Number(log.latency_ms || 0);
+      entry.latencyCount += 1;
+      if (log.status !== "success") entry.errors += 1;
+      bucket.totals[providerId] = entry;
+    });
+
+    return buckets;
+  }
+
+  function bucketMetricValue(bucket, providerId) {
+    const entry = bucket.totals[providerId];
+    if (state.graphMetric === "requests") return entry ? entry.requests : 0;
+    if (state.graphMetric === "cache") {
+      if (!entry || entry.cacheablePrompt <= 0) return null;
+      return (entry.cacheRead / entry.cacheablePrompt) * 100;
+    }
+    if (state.graphMetric === "latency") {
+      if (!entry || entry.latencyCount <= 0) return null;
+      return entry.latencySum / entry.latencyCount;
+    }
+    return entry ? entry.tokens : 0;
+  }
+
+  function bucketMetricTotal(bucket) {
+    if (state.graphMetric === "requests") return bucket.requests;
+    if (state.graphMetric === "cache") {
+      return bucket.cacheablePrompt > 0 ? (bucket.cacheRead / bucket.cacheablePrompt) * 100 : null;
+    }
+    if (state.graphMetric === "latency") {
+      return bucket.latencyCount > 0 ? bucket.latencySum / bucket.latencyCount : null;
+    }
+    return bucket.promptTokens + bucket.completionTokens;
+  }
+
+  function formatCompactNumber(value) {
+    if (value === null || value === undefined || isNaN(value)) return "—";
+    const abs = Math.abs(value);
+    if (abs >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
+    if (abs >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+    if (abs >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+    return `${Math.round(value * 10) / 10}`;
+  }
+
+  function metricLabel() {
+    return {
+      tokens: "Tokens",
+      requests: "Requests",
+      cache: "Cache Hit Rate",
+      latency: "Average Latency",
+    }[state.graphMetric];
+  }
+
+  function metricValueLabel(value) {
+    if (value === null || value === undefined) return "—";
+    if (state.graphMetric === "cache") return `${Math.round(value * 10) / 10}%`;
+    if (state.graphMetric === "latency") return `${Math.round(value)} ms`;
+    return formatCompactNumber(value);
+  }
+
+  function renderGraphProviderFilters() {
+    if (!el.graphProviderFilters) return;
+    const providerIds = Array.from(new Set(state.logs.map((log) => log.plugin_id || "load_balancer"))).sort();
+    el.graphProviderFilters.innerHTML = "";
+
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = `status-provider-tab ${state.graphProviders.size === 0 ? "active" : ""}`;
+    allBtn.textContent = "All Providers";
+    allBtn.addEventListener("click", () => {
+      state.graphProviders.clear();
+      renderGraphView();
+    });
+    el.graphProviderFilters.appendChild(allBtn);
+
+    providerIds.forEach((providerId) => {
+      const isActive = state.graphProviders.has(providerId);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `status-provider-tab ${isActive ? "active" : ""}`;
+      btn.innerHTML = `<span class="graph-provider-dot" style="background: ${graphProviderColor(providerId)};${isActive ? "" : "opacity:0.55;"}"></span><span>${escapeHtml(graphProviderName(providerId))}</span>`;
+      btn.addEventListener("click", () => {
+        if (state.graphProviders.has(providerId)) {
+          state.graphProviders.delete(providerId);
+        } else {
+          state.graphProviders.add(providerId);
+        }
+        renderGraphView();
+      });
+      el.graphProviderFilters.appendChild(btn);
+    });
+  }
+
+  function renderGraphKpis(logs) {
+    const requests = logs.length;
+    const successes = logs.filter((log) => log.status === "success").length;
+    const successRate = requests > 0 ? Math.round((successes / requests) * 1000) / 10 : 100;
+    const promptTokens = logs.reduce((sum, log) => sum + Number(log.prompt_tokens || 0), 0);
+    const completionTokens = logs.reduce((sum, log) => sum + Number(log.completion_tokens || 0), 0);
+    const cacheRead = logs.reduce((sum, log) => sum + Number(log.cache_read_input_tokens || 0), 0);
+    const cacheable = logs.reduce((sum, log) => sum + Math.max(Number(log.prompt_tokens || 0), Number(log.cache_read_input_tokens || 0) + Number(log.cache_creation_input_tokens || 0)), 0);
+    const cacheRate = cacheable > 0 ? Math.round((cacheRead / cacheable) * 1000) / 10 : 0;
+    const latency = requests > 0
+      ? logs.reduce((sum, log) => sum + Number(log.latency_ms || 0), 0) / requests
+      : 0;
+    const errors = logs.filter((log) => log.status !== "success").length;
+
+    if (el.graphKpiRequests) el.graphKpiRequests.textContent = String(requests);
+    if (el.graphKpiSuccess) el.graphKpiSuccess.textContent = `${successRate}% success`;
+    if (el.graphKpiTokens) el.graphKpiTokens.textContent = formatCompactNumber(promptTokens + completionTokens);
+    if (el.graphKpiTokensSub) el.graphKpiTokensSub.textContent = `${formatCompactNumber(promptTokens)} in / ${formatCompactNumber(completionTokens)} out`;
+    if (el.graphKpiCache) el.graphKpiCache.textContent = `${cacheRate}%`;
+    if (el.graphKpiCacheSub) el.graphKpiCacheSub.textContent = `${formatCompactNumber(cacheRead)} cached tokens`;
+    if (el.graphKpiLatency) el.graphKpiLatency.textContent = `${Math.round(latency)} ms`;
+    if (el.graphKpiErrors) el.graphKpiErrors.textContent = `${errors} error${errors === 1 ? "" : "s"}`;
+  }
+
+  function renderGraphTimeseries(logs) {
+    if (!el.graphTimeseriesContainer) return;
+    const container = el.graphTimeseriesContainer;
+    container.innerHTML = "";
+
+    if (logs.length === 0) {
+      container.innerHTML = `<div class="graph-empty-state">No requests match this provider filter and time range yet.</div>`;
+      if (el.graphTimeseriesLegend) el.graphTimeseriesLegend.innerHTML = "";
+      return;
+    }
+
+    const buckets = graphBuckets(logs);
+    const providerIds = Array.from(new Set(logs.map((log) => log.plugin_id || "load_balancer"))).sort();
+
+    if (el.graphTimeseriesLegend) {
+      el.graphTimeseriesLegend.innerHTML = providerIds.map((providerId) => `
+        <span class="graph-legend-item">
+          <span class="graph-legend-swatch" style="background: ${graphProviderColor(providerId)};"></span>
+          <span>${escapeHtml(graphProviderName(providerId))}</span>
+        </span>
+      `).join("");
+    }
+
+    const width = 860;
+    const height = 270;
+    const padLeft = 48;
+    const padRight = 14;
+    const padTop = 14;
+    const padBottom = 26;
+    const plotW = width - padLeft - padRight;
+    const plotH = height - padTop - padBottom;
+
+    const isLineMetric = state.graphMetric === "cache" || state.graphMetric === "latency";
+    let maxValue = 0;
+    buckets.forEach((bucket) => {
+      if (isLineMetric) {
+        const value = bucketMetricTotal(bucket);
+        if (value !== null && value > maxValue) maxValue = value;
+      } else {
+        const total = providerIds.reduce((sum, providerId) => sum + (bucketMetricValue(bucket, providerId) || 0), 0);
+        if (total > maxValue) maxValue = total;
+      }
+    });
+    if (maxValue <= 0) maxValue = 1;
+
+    const svgNs = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.setAttribute("class", "graph-svg");
+
+    const add = (tag, attrs, text) => {
+      const node = document.createElementNS(svgNs, tag);
+      Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, value));
+      if (text !== undefined) node.textContent = text;
+      svg.appendChild(node);
+      return node;
+    };
+
+    // Gridlines + y labels
+    const gridSteps = 4;
+    for (let step = 0; step <= gridSteps; step += 1) {
+      const y = padTop + plotH - (plotH * step) / gridSteps;
+      add("line", {
+        x1: padLeft, y1: y, x2: width - padRight, y2: y,
+        stroke: "rgba(255,255,255,0.07)", "stroke-width": 1,
+      });
+      const value = (maxValue * step) / gridSteps;
+      const label = state.graphMetric === "cache"
+        ? `${Math.round(value)}%`
+        : state.graphMetric === "latency"
+          ? `${Math.round(value)}ms`
+          : formatCompactNumber(value);
+      add("text", {
+        x: padLeft - 8, y: y + 3.5, "text-anchor": "end",
+        fill: "#71717a", "font-size": "10", "font-family": "var(--font-mono)",
+      }, label);
+    }
+
+    const slotW = plotW / buckets.length;
+    const barGap = Math.min(3, slotW * 0.18);
+    const barW = Math.max(1, slotW - barGap);
+
+    if (!isLineMetric) {
+      buckets.forEach((bucket, index) => {
+        const x = padLeft + index * slotW + barGap / 2;
+        let stackY = padTop + plotH;
+        providerIds.forEach((providerId) => {
+          const value = bucketMetricValue(bucket, providerId) || 0;
+          if (value <= 0) return;
+          const h = Math.max(0.4, (value / maxValue) * plotH);
+          stackY -= h;
+          add("rect", {
+            x, y: stackY, width: barW, height: h,
+            fill: graphProviderColor(providerId),
+            opacity: 0.88,
+            rx: Math.min(2, barW / 3),
+          });
+        });
+      });
+    } else {
+      providerIds.forEach((providerId) => {
+        const points = [];
+        buckets.forEach((bucket, index) => {
+          const value = bucketMetricValue(bucket, providerId);
+          if (value === null) return;
+          const x = padLeft + index * slotW + slotW / 2;
+          const y = padTop + plotH - (value / maxValue) * plotH;
+          points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+        });
+        if (points.length === 0) return;
+        add("polyline", {
+          points: points.join(" "),
+          fill: "none",
+          stroke: graphProviderColor(providerId),
+          "stroke-width": 2,
+          "stroke-linejoin": "round",
+          "stroke-linecap": "round",
+        });
+        buckets.forEach((bucket, index) => {
+          const value = bucketMetricValue(bucket, providerId);
+          if (value === null) return;
+          const x = padLeft + index * slotW + slotW / 2;
+          const y = padTop + plotH - (value / maxValue) * plotH;
+          add("circle", {
+            cx: x, cy: y, r: 2.4,
+            fill: graphProviderColor(providerId),
+            stroke: "#151519", "stroke-width": 1,
+          });
+        });
+      });
+    }
+
+    // X labels (max ~7)
+    const labelEvery = Math.max(1, Math.ceil(buckets.length / 7));
+    buckets.forEach((bucket, index) => {
+      if (index % labelEvery !== 0 && index !== buckets.length - 1) return;
+      const x = padLeft + index * slotW + slotW / 2;
+      const date = new Date(bucket.start);
+      const label = state.graphRange === "7d" || state.graphRange === "all"
+        ? `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:00`
+        : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+      add("text", {
+        x, y: height - 8, "text-anchor": "middle",
+        fill: "#71717a", "font-size": "10", "font-family": "var(--font-mono)",
+      }, label);
+    });
+
+    // Hover columns
+    const tooltip = document.createElement("div");
+    tooltip.className = "graph-tooltip";
+    tooltip.hidden = true;
+
+    buckets.forEach((bucket, index) => {
+      const hover = document.createElementNS(svgNs, "rect");
+      hover.setAttribute("x", padLeft + index * slotW);
+      hover.setAttribute("y", padTop);
+      hover.setAttribute("width", slotW);
+      hover.setAttribute("height", plotH);
+      hover.setAttribute("fill", "transparent");
+      hover.style.cursor = "crosshair";
+      hover.addEventListener("mousemove", (event) => {
+        const stageRect = container.getBoundingClientRect();
+        const rows = providerIds
+          .map((providerId) => ({ providerId, value: bucketMetricValue(bucket, providerId) }))
+          .filter((row) => row.value !== null && row.value !== undefined && row.value !== 0)
+          .sort((a, b) => (b.value || 0) - (a.value || 0));
+        const timeLabel = new Date(bucket.start).toLocaleString();
+        tooltip.innerHTML = `
+          <div class="graph-tooltip-title">${escapeHtml(timeLabel)}</div>
+          ${rows.length === 0 ? `<div class="graph-tooltip-row"><span style="color: var(--ink-muted);">No activity</span></div>` : rows.map((row) => `
+            <div class="graph-tooltip-row">
+              <span style="display: inline-flex; align-items: center; gap: 6px; min-width: 0;">
+                <span class="graph-legend-swatch" style="background: ${graphProviderColor(row.providerId)};"></span>
+                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(graphProviderName(row.providerId))}</span>
+              </span>
+              <strong>${escapeHtml(metricValueLabel(row.value))}</strong>
+            </div>
+          `).join("")}
+          <div class="graph-tooltip-row" style="border-top: 1px solid var(--border-subtle); margin-top: 4px; padding-top: 4px;">
+            <span style="color: var(--ink-muted);">Total</span>
+            <strong>${escapeHtml(metricValueLabel(bucketMetricTotal(bucket)))}</strong>
+          </div>
+        `;
+        tooltip.hidden = false;
+        const left = Math.min(stageRect.width - 200, Math.max(6, event.clientX - stageRect.left + 14));
+        const top = Math.max(6, event.clientY - stageRect.top - 12);
+        tooltip.style.left = `${left}px`;
+        tooltip.style.top = `${top}px`;
+      });
+      hover.addEventListener("mouseleave", () => {
+        tooltip.hidden = true;
+      });
+      svg.appendChild(hover);
+    });
+
+    container.appendChild(svg);
+    container.appendChild(tooltip);
+  }
+
+  function renderGraphPoolCapacity() {
+    if (!el.graphPoolCapacityContainer) return;
+    const container = el.graphPoolCapacityContainer;
+    container.innerHTML = "";
+
+    const accountsToDisplay = currentStatusAccounts();
+    const { pools } = buildUsagePools(accountsToDisplay, getQuotaDataMap());
+    if (el.graphPoolCountBadge) {
+      el.graphPoolCountBadge.textContent = `${pools.length} pool${pools.length === 1 ? "" : "s"}`;
+    }
+
+    const visiblePools = pools.filter((pool) => pool.poolRemaining !== null);
+    if (visiblePools.length === 0) {
+      container.innerHTML = `<div class="graph-empty-state" style="min-height: 120px;">No live quota windows reported.</div>`;
+      return;
+    }
+
+    visiblePools.forEach((pool) => {
+      const pct = Math.round(pool.poolRemaining * 100);
+      const row = document.createElement("div");
+      row.className = "graph-hbar-row";
+      row.innerHTML = `
+        <div class="graph-hbar-head">
+          <span class="graph-hbar-label">
+            <span class="pool-tier-badge ${pool.tierPro ? "is-pro" : ""}" style="font-size: 10px;">${escapeHtml(pool.tierLabel)}</span>
+            <span class="truncate">${escapeHtml(pool.providerName)}</span>
+            <span class="pool-count-pill">×${pool.accountTotal}</span>
+          </span>
+          <span class="graph-hbar-value" style="color: ${quotaBarColor(pct)};">${pct}% left</span>
+        </div>
+        <div class="graph-hbar-track">
+          <div class="graph-hbar-fill" style="width: ${pct}%; background: ${quotaBarColor(pct)};"></div>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  function renderGraphProviderBreakdown(logs) {
+    if (!el.graphProviderBreakdownContainer) return;
+    const container = el.graphProviderBreakdownContainer;
+    container.innerHTML = "";
+    if (el.graphBreakdownBadge) {
+      el.graphBreakdownBadge.textContent = "Requests & Tokens";
+    }
+
+    if (logs.length === 0) {
+      container.innerHTML = `<div class="graph-empty-state" style="min-height: 120px;">No request activity in this range.</div>`;
+      return;
+    }
+
+    const byProvider = new Map();
+    logs.forEach((log) => {
+      const providerId = log.plugin_id || "load_balancer";
+      const entry = byProvider.get(providerId) || { requests: 0, tokens: 0 };
+      entry.requests += 1;
+      entry.tokens += Number(log.prompt_tokens || 0) + Number(log.completion_tokens || 0);
+      byProvider.set(providerId, entry);
+    });
+
+    const rows = Array.from(byProvider.entries()).sort((a, b) => b[1].tokens - a[1].tokens);
+    const maxTokens = Math.max(1, ...rows.map(([, entry]) => entry.tokens));
+
+    rows.forEach(([providerId, entry]) => {
+      const share = Math.round((entry.tokens / maxTokens) * 100);
+      const row = document.createElement("div");
+      row.className = "graph-hbar-row";
+      row.innerHTML = `
+        <div class="graph-hbar-head">
+          <span class="graph-hbar-label">
+            <span class="graph-legend-swatch" style="background: ${graphProviderColor(providerId)};"></span>
+            <span class="truncate">${escapeHtml(graphProviderName(providerId))}</span>
+          </span>
+          <span class="graph-hbar-value">${entry.requests} req · ${formatCompactNumber(entry.tokens)} tok</span>
+        </div>
+        <div class="graph-hbar-track">
+          <div class="graph-hbar-fill" style="width: ${share}%; background: ${graphProviderColor(providerId)};"></div>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  function renderGraphView() {
+    if (!el.statusViewGraph) return;
+    renderGraphProviderFilters();
+    const logs = graphLogs();
+    renderGraphKpis(logs);
+
+    if (el.graphChartTitle) el.graphChartTitle.textContent = `${metricLabel()} Over Time`;
+    if (el.graphChartSubtitle) {
+      const count = state.graphProviders.size;
+      el.graphChartSubtitle.textContent = count === 0
+        ? "All Providers"
+        : count === 1
+          ? graphProviderName(Array.from(state.graphProviders)[0])
+          : `${count} providers`;
+    }
+
+    renderGraphTimeseries(logs);
+    renderGraphPoolCapacity();
+    renderGraphProviderBreakdown(logs);
+
+    if (el.graphMetricTabs) {
+      el.graphMetricTabs.querySelectorAll(".graph-seg-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.metric === state.graphMetric);
+      });
+    }
+    if (el.graphRangeTabs) {
+      el.graphRangeTabs.querySelectorAll(".graph-seg-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.range === state.graphRange);
+      });
+    }
+  }
+
+  function setStatusView(view) {
+    state.statusView = view === "graph" ? "graph" : "overview";
+    if (el.statusViewOverview) {
+      el.statusViewOverview.hidden = state.statusView !== "overview";
+      el.statusViewOverview.classList.toggle("active", state.statusView === "overview");
+    }
+    if (el.statusViewGraph) {
+      el.statusViewGraph.hidden = state.statusView !== "graph";
+      el.statusViewGraph.classList.toggle("active", state.statusView === "graph");
+    }
+    if (el.statusViewBtns) {
+      el.statusViewBtns.forEach((btn) => {
+        const active = btn.dataset.statusView === state.statusView;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      });
+    }
+    if (state.statusView === "graph") {
+      renderGraphView();
+    }
+  }
+
+  if (el.statusViewBtns) {
+    el.statusViewBtns.forEach((btn) => {
+      btn.addEventListener("click", () => setStatusView(btn.dataset.statusView));
+    });
+  }
+
+  if (el.graphMetricTabs) {
+    el.graphMetricTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".graph-seg-btn");
+      if (!btn) return;
+      state.graphMetric = btn.dataset.metric || "tokens";
+      renderGraphView();
+    });
+  }
+
+  if (el.graphRangeTabs) {
+    el.graphRangeTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".graph-seg-btn");
+      if (!btn) return;
+      state.graphRange = btn.dataset.range || "all";
+      renderGraphView();
     });
   }
 
