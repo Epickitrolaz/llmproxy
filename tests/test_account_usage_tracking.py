@@ -207,6 +207,55 @@ def test_openrouter_credits_reports_missing_key(monkeypatch):
     assert "error" in result
 
 
+class _FakeFreeTierClient(_FakeAsyncClient):
+    async def get(self, url: str, headers: dict | None = None):
+        if url.endswith("/key"):
+            return _FakeResponse(
+                200,
+                {
+                    "data": {
+                        "label": "free-key",
+                        "limit": None,
+                        "limit_remaining": None,
+                        "usage": 0.159940697,
+                        "is_free_tier": True,
+                        "free_model_daily_requests": {
+                            "used": 10,
+                            "limit": 50,
+                            "remaining": 40,
+                        },
+                    }
+                },
+            )
+        if url.endswith("/credits"):
+            return _FakeResponse(
+                200,
+                {"data": {"total_credits": 0, "total_usage": 0.159940697}},
+            )
+        return _FakeResponse(404, {})
+
+
+def test_openrouter_free_tier_avoids_negative_credits_and_reports_daily_quota(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeFreeTierClient)
+    account = Account(
+        provider_id="openrouter",
+        name="OpenRouter Free",
+        api_key="sk-or-free",
+    )
+
+    result = asyncio.run(fetch_openrouter_credits(account))
+
+    assert "error" not in result
+    assert "available_credits" not in result
+    buckets = result["groups"][0]["buckets"]
+    assert buckets[0]["bucketId"] == "openrouter_free_daily"
+    assert buckets[0]["displayName"] == "Free Daily Requests"
+    assert buckets[0]["usedPercent"] == pytest.approx(20.0)
+    assert buckets[0]["remainingFraction"] == pytest.approx(0.8)
+
+
 def test_dashboard_exposes_toggle_and_credit_rendering():
     root = Path(__file__).resolve().parent.parent
     html = (root / "llmproxy" / "static" / "index.html").read_text(encoding="utf-8")

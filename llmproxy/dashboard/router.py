@@ -1543,8 +1543,42 @@ async def fetch_openrouter_credits(account: Account) -> Dict[str, Any]:
                 result["is_free_tier"] = key_data.get("is_free_tier")
                 remaining = key_data.get("limit_remaining")
                 if remaining is not None:
-                    result["available_credits"] = float(remaining)
+                    result["available_credits"] = max(0.0, float(remaining))
                     result["source"] = "key"
+
+                free_daily = key_data.get("free_model_daily_requests")
+                if isinstance(free_daily, dict):
+                    try:
+                        daily_limit = float(free_daily.get("limit"))
+                        daily_remaining = float(free_daily.get("remaining"))
+                    except (TypeError, ValueError):
+                        daily_limit = None
+                        daily_remaining = None
+                    if daily_limit is not None and daily_limit > 0 and daily_remaining is not None:
+                        from datetime import datetime, timedelta, timezone
+
+                        next_midnight = (
+                            datetime.now(timezone.utc) + timedelta(days=1)
+                        ).replace(hour=0, minute=0, second=0, microsecond=0)
+                        used_pct = max(
+                            0.0,
+                            min(100.0, ((daily_limit - daily_remaining) / daily_limit) * 100.0),
+                        )
+                        rem_frac = max(0.0, min(1.0, daily_remaining / daily_limit))
+                        result["groups"] = [
+                            {
+                                "displayName": "OpenRouter Free Models",
+                                "buckets": [
+                                    {
+                                        "bucketId": "openrouter_free_daily",
+                                        "displayName": "Free Daily Requests",
+                                        "usedPercent": round(used_pct, 2),
+                                        "remainingFraction": round(rem_frac, 4),
+                                        "resetTime": next_midnight.isoformat().replace("+00:00", "Z"),
+                                    }
+                                ],
+                            }
+                        ]
             else:
                 last_error = f"OpenRouter /key returned HTTP {key_resp.status_code}"
         except Exception as exc:
@@ -1561,8 +1595,11 @@ async def fetch_openrouter_credits(account: Account) -> Dict[str, Any]:
                     if total_usage is not None:
                         result["total_usage"] = total_usage
                     if total_credits is not None and total_usage is not None:
-                        result["available_credits"] = float(total_credits) - float(total_usage)
-                        result["source"] = "credits"
+                        total_credits_f = float(total_credits)
+                        total_usage_f = float(total_usage)
+                        if total_credits_f > 0 or not result.get("is_free_tier"):
+                            result["available_credits"] = max(0.0, total_credits_f - total_usage_f)
+                            result["source"] = "credits"
                 else:
                     last_error = (
                         f"OpenRouter /credits returned HTTP {credits_resp.status_code}"
@@ -1570,7 +1607,7 @@ async def fetch_openrouter_credits(account: Account) -> Dict[str, Any]:
             except Exception as exc:
                 last_error = f"OpenRouter /credits request failed: {exc}"
 
-    if result.get("available_credits") is None and last_error:
+    if result.get("available_credits") is None and not result.get("groups") and last_error:
         result["error"] = last_error
     return result
 
@@ -1808,10 +1845,13 @@ async def get_provider_usage_status():
         if acc.disable_usage_tracking:
             return None
 
+        plugin = plugin_manager.get_plugin(acc.provider_id)
+        if plugin is not None and not getattr(plugin.metadata, "supports_usage_meter", False):
+            return None
+
         quota: Optional[Dict[str, Any]] = stored_usage_limits(acc)
 
         if quota is None:
-            plugin = plugin_manager.get_plugin(acc.provider_id)
             if plugin is None:
                 return None
             implementation = getattr(type(plugin), "fetch_usage_quota", None)
@@ -1822,6 +1862,15 @@ async def get_provider_usage_status():
             except Exception as exc:  # pragma: no cover - defensive
                 quota = {"error": str(exc)}
             if not isinstance(quota, dict):
+                return None
+
+        if not quota.get("error"):
+            has_groups = isinstance(quota.get("groups"), list) and any(
+                isinstance(g, dict) and g.get("buckets") for g in (quota.get("groups") or [])
+            )
+            has_balance = isinstance(quota.get("balance"), dict)
+            has_summary = isinstance(quota.get("summary"), list) and len(quota.get("summary") or []) > 0
+            if not (has_groups or has_balance or has_summary):
                 return None
 
         payload = dict(quota)

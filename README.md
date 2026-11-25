@@ -153,8 +153,10 @@ provider's native ID in `upstream_model`:
 | `antigravity` | `ag` | `ag/gemini-3.8-flash` |
 | `codex` | `cx` | `cx/gpt-6-luna` |
 | `gemini` | `gm` | `gm/gemini-3.8-flash` |
+| `groqcloud` | `groq` | `groq/openai/gpt-oss-120b` |
 | `mistral_vibe` | `mv` | `mv/mistral-medium-3.5` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
+| `munito_ai` | `munito` | `munito/deepseek-ai/deepseek-v4.1-flash-1017` |
 | `nous_oauth` | `np` | `np/qwen/qwen4-max:free` |
 | `openai_compatible` | `compat` | `compat/default-model` |
 | `opencode_free` | `oc` | `oc/deepseek-v4.1-flash-free` |

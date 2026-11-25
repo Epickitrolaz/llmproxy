@@ -317,6 +317,7 @@ class AntigravityPlugin(BasePlugin):
             author="9Router",
             enabled=True,
             filename="antigravity.py",
+            supports_usage_meter=True,
             oauth_login=True,
             oauth_local_import=True,
             oauth_hint="Google OAuth loopback redirect with auto-refreshing tokens",

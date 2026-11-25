@@ -102,6 +102,7 @@ class CodexPlugin(BasePlugin):
             author="OpenAI / Codex",
             enabled=True,
             filename="codex.py",
+            supports_usage_meter=True,
             oauth_login=True,
             oauth_local_import=True,
             oauth_hint="ChatGPT OAuth 2.0 PKCE loopback redirect with auto-refreshing tokens",
