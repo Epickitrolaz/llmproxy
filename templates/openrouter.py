@@ -66,6 +66,7 @@ class OpenRouterPlugin(BasePlugin):
             author="OpenRouter",
             enabled=True,
             filename="openrouter.py",
+            supports_usage_meter=True,
             variables=[
                 PluginVariable(
                     name="base_url",

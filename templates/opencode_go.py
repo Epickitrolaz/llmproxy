@@ -350,6 +350,7 @@ class OpenCodeGoPlugin(BasePlugin):
             author="OpenCode",
             enabled=True,
             filename="opencode_go.py",
+            supports_usage_meter=True,
             variables=[
                 PluginVariable(
                     name="base_url",

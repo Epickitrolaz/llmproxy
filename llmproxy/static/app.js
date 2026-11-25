@@ -3336,6 +3336,11 @@ curl -X POST ${baseUrl}/chat/completions \\
     // Fetch live quota for Antigravity and Codex accounts if requested fresh or not cached yet
     if (fetchFreshQuota || !state.cachedQuotaData) {
       if (!state.cachedQuotaData) state.cachedQuotaData = {};
+      if (fetchFreshQuota) {
+        accountsToDisplay.forEach((acc) => {
+          delete state.cachedQuotaData[acc.id];
+        });
+      }
 
       const antigravityAccounts = accountsToDisplay.filter((a) => a.provider_id === "antigravity");
       const codexAccounts = accountsToDisplay.filter((a) => a.provider_id === "codex");
@@ -3425,10 +3430,20 @@ curl -X POST ${baseUrl}/chat/completions \\
       ]);
     }
     const quotaDataMap = state.cachedQuotaData || {};
+    const hasRenderableUsage = (quota) => {
+      if (!quota || quota.error) return false;
+      if (typeof quota.available_credits === "number") return true;
+      if (quota.balance && typeof quota.balance === "object") return true;
+      if (Array.isArray(quota.summary) && quota.summary.length > 0) return true;
+      if (Array.isArray(quota.groups) && quota.groups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0)) {
+        return true;
+      }
+      return false;
+    };
     const usageAccounts = accountsToDisplay.filter((acc) => {
       if (acc.disable_usage_tracking) return false;
       const quota = quotaDataMap[acc.id];
-      return Boolean(quota && !quota.error);
+      return hasRenderableUsage(quota);
     });
 
     state.usageProviderIds = new Set(usageAccounts.map((account) => account.provider_id));
@@ -3464,10 +3479,11 @@ curl -X POST ${baseUrl}/chat/completions \\
       let limitsHtml = "";
       const quota = quotaDataMap[acc.id];
       const isOpenRouterAccount = acc.provider_id === "openrouter";
+      const hasGroups = Boolean(quota && Array.isArray(quota.groups) && quota.groups.some((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0));
 
       if (isOpenRouterAccount) {
-        // OpenRouter has no per-account quota bars; show the live credit
-        // balance directly and prominently.
+        // OpenRouter has no per-account quota bars on paid plans; show the live
+        // credit balance directly, or fall back to Free Daily Requests when present.
         const availableCredits = quota && typeof quota.available_credits === "number"
           ? quota.available_credits
           : null;
@@ -3478,7 +3494,7 @@ curl -X POST ${baseUrl}/chat/completions \\
               <span class="credits-label">available credits</span>
             </div>
           `;
-        } else {
+        } else if (!hasGroups) {
           const creditsError = quota && quota.error ? quota.error : "loading credits...";
           limitsHtml = `
             <div class="credits-panel credits-panel-unavailable" title="${escapeHtml(creditsError)}">
@@ -3487,7 +3503,9 @@ curl -X POST ${baseUrl}/chat/completions \\
             </div>
           `;
         }
-      } else if (quota && quota.groups && quota.groups.length > 0) {
+      }
+      if (!isOpenRouterAccount || hasGroups && !(quota && typeof quota.available_credits === "number")) {
+       if (hasGroups) {
         quota.groups.forEach((grp) => {
           (grp.buckets || []).forEach((b) => {
             const bucketKey = b.bucketId || b.displayName || "limit";
@@ -3531,6 +3549,7 @@ curl -X POST ${baseUrl}/chat/completions \\
             `;
           });
         });
+       }
       }
 
       if (quota && quota.balance && typeof quota.balance === "object") {

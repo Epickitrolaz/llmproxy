@@ -43,9 +43,15 @@ _ORDER = {
     "tokens": 4,
 }
 
-# Compound duration values such as "44s", "1m30s", or "2h".
-_DURATION_PART_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[smhd])", re.IGNORECASE)
-_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+# Compound duration values such as "44s", "1m30s", "547ms", or "2h".
+_DURATION_PART_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|[smhd])", re.IGNORECASE)
+_UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+_WINDOW_RESET_SUFFIXES = (
+    (("_second", "_seconds", "_1s"), 1.0),
+    (("_minute", "_minutes", "_1m"), 60.0),
+    (("_hour", "_hours", "_1h"), 3600.0),
+    (("_day", "_days", "_1d"), 86400.0),
+)
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -132,6 +138,26 @@ def _label_for(window: str) -> str:
     return _LABELS.get(window, window.replace("_", " ").replace("-", " ").title())
 
 
+def _inferred_window_seconds(window: str) -> Optional[float]:
+    lower = str(window or "").lower()
+    for suffixes, seconds in _WINDOW_RESET_SUFFIXES:
+        if lower.endswith(suffixes):
+            return seconds
+    return None
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def rate_limit_groups_from_headers(
     headers: Mapping[str, Any],
     now: Optional[datetime] = None,
@@ -154,7 +180,16 @@ def rate_limit_groups_from_headers(
         if limit is None or remaining is None or limit <= 0:
             continue
         used = max(0.0, min(100.0, ((limit - remaining) / limit) * 100.0))
-        reset_time = _parse_reset_time(entry.get("reset"), now=now)
+        current = now or datetime.now(timezone.utc)
+        reset_time = _parse_reset_time(entry.get("reset"), now=current)
+        if reset_time is None:
+            inferred_seconds = _inferred_window_seconds(entry["window"])
+            if inferred_seconds is not None:
+                reset_time = (
+                    (current + timedelta(seconds=inferred_seconds))
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
         bucket_id = entry["window"]
         if entry["scope"]:
             bucket_id = f"{entry['scope']}_{bucket_id}"
@@ -208,6 +243,8 @@ def capture_rate_limit_headers(
 
     Returns ``True`` when at least one usable window was found.
     """
+    if getattr(account, "disable_usage_tracking", False):
+        return False
     groups = rate_limit_groups_from_headers(headers)
     if not groups:
         return False
@@ -221,8 +258,16 @@ def capture_rate_limit_headers(
     return True
 
 
-def stored_usage_limits(account: Any) -> Optional[Dict[str, Any]]:
-    """Return the last captured usage snapshot for an account, if any."""
+def stored_usage_limits(
+    account: Any,
+    now: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the last captured usage snapshot for an account, if any.
+
+    Windows whose reset timestamp has already elapsed are normalized to 0% used
+    (100% remaining) so stale rate-limit snapshots do not report old usage
+    after the upstream window has rolled over.
+    """
     extra = account.extra_config if isinstance(account.extra_config, dict) else {}
     snapshot = extra.get("usage_limits")
     if not isinstance(snapshot, dict):
@@ -230,7 +275,45 @@ def stored_usage_limits(account: Any) -> Optional[Dict[str, Any]]:
     groups = snapshot.get("groups")
     if not isinstance(groups, list) or not groups:
         return None
-    return snapshot
+
+    current = now or datetime.now(timezone.utc)
+    checked_at = _as_float(snapshot.get("checked_at"))
+    normalized_groups: List[Dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        raw_buckets = group.get("buckets")
+        if not isinstance(raw_buckets, list):
+            continue
+        buckets: List[Dict[str, Any]] = []
+        for raw_bucket in raw_buckets:
+            if not isinstance(raw_bucket, dict):
+                continue
+            bucket = dict(raw_bucket)
+            reset_dt = _parse_iso_utc(bucket.get("resetTime"))
+            if reset_dt is None and checked_at is not None:
+                inferred_seconds = _inferred_window_seconds(
+                    str(bucket.get("bucketId") or "")
+                )
+                if inferred_seconds is not None:
+                    reset_dt = datetime.fromtimestamp(
+                        checked_at + inferred_seconds, tz=timezone.utc
+                    )
+                    bucket["resetTime"] = reset_dt.isoformat().replace("+00:00", "Z")
+            if reset_dt is not None and reset_dt <= current:
+                bucket["usedPercent"] = 0.0
+                bucket["remainingFraction"] = 1.0
+            buckets.append(bucket)
+        if buckets:
+            new_group = dict(group)
+            new_group["buckets"] = buckets
+            normalized_groups.append(new_group)
+
+    if not normalized_groups:
+        return None
+    result = dict(snapshot)
+    result["groups"] = normalized_groups
+    return result
 
 
 __all__ = [

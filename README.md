@@ -149,13 +149,21 @@ provider's native ID in `upstream_model`:
 
 | Template | Prefix | Example exposed ID |
 |---|---|---|
+| `agentrouter` | `ar` | `ar/gpt-5.6-sol` |
 | `anthropic_proxy` | `ap` | `ap/claude-opus-5-5` |
 | `antigravity` | `ag` | `ag/gemini-3.8-flash` |
+| `cloudflare_workers_ai` | `cf` | `cf/openai/gpt-oss-120b` |
 | `codex` | `cx` | `cx/gpt-6-luna` |
 | `gemini` | `gm` | `gm/gemini-3.8-flash` |
+| `groqcloud` | `groq` | `groq/openai/gpt-oss-120b` |
 | `mistral_vibe` | `mv` | `mv/mistral-medium-3.5` |
 | `mock_provider` | `mock` | `mock/mock-gpt-4o` |
+| `modelscope` | `ms` | `ms/Qwen/Qwen3.5-27B` |
+| `moonmath_zro` | `zro` | `zro/deepseek-v4.1-flash` |
+| `munito_ai` | `munito` | `munito/deepseek-ai/deepseek-v4.1-flash-1017` |
+| `nanogpt` | `ng` | `ng/qwen/qwen3.8-27b-uncensored` |
 | `nous_oauth` | `np` | `np/qwen/qwen4-max:free` |
+| `nvidia_nim` | `nim` | `nim/nvidia/nemotron-3-ultra-550b-a55b` |
 | `openai_compatible` | `compat` | `compat/default-model` |
 | `opencode_free` | `oc` | `oc/deepseek-v4.1-flash-free` |
 | `opencode_go` | `ocg` | `ocg/gpt-6-luna` |
