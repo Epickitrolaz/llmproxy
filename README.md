@@ -96,7 +96,7 @@ The only components hard-coded into the router are the **monochrome web dashboar
   - Metered accounts can disable **Track usage &amp; quota** individually, which stops local request counters and rate-limit cooldowns for unlimited or externally billed endpoints. Providers without a usage meter show no quota section at all.
   - OpenRouter accounts display their live available credit balance as prominent text instead of a usage bar.
   - OpenCode Go accounts display live rolling, weekly, and monthly usage from the Go usage API.
-  - **CLIProxyAPI-compatible usage hub**: T3 Code and OpenCode can read pooled account limits through `/v0/management/auth-files` and `/v0/management/api-call`. The hub URL and management key are shown on the **Overview** tab. OpenCode Go accounts are included with the `opencode` provider kind.
+  - **CLIProxyAPI-compatible usage hub**: T3 Code and OpenCode can read pooled account limits through `/v0/management/auth-files`, `/v0/management/auth-files/models`, and `/v0/management/api-call`. Every provider account is listed (with `tier`, `tier_label`, and `pool_id`), and `/v0/management/usage` returns the same provider/tier-grouped windows as the Status tab: combined remaining capacity, pooled credits, and the per-account roster. The hub URL and management key are shown on the **Overview** tab. OpenCode Go accounts are included with the `opencode` provider kind.
   - **Persistent Request Audit Logs**: All requests, latency metrics, token estimations, and errors are saved to disk (`data/request_logs.json`) and preserved across server restarts.
 - **Interactive Chat Playground**:
   - Balanced 1:1 split between model parameters and the chat thread.

@@ -24,7 +24,9 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from llmproxy.core.interface import BasePlugin
 from llmproxy.core.manager import plugin_manager
+from llmproxy.core.usage import stored_usage_limits
 from llmproxy.schemas import Account
 
 router = APIRouter(prefix="/v0/management", tags=["management"])
@@ -33,6 +35,7 @@ CODEX_BASE = "https://chatgpt.com/backend-api/wham"
 ANTIGRAVITY_SUMMARY_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+GROK_USAGE_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 
 # Only these exact upstream requests may be performed with an account token.
 _ALLOWED_CALLS: Dict[str, set[Tuple[str, str]]] = {
@@ -48,6 +51,9 @@ _ALLOWED_CALLS: Dict[str, set[Tuple[str, str]]] = {
     "claude": {
         ("GET", CLAUDE_USAGE_URL),
     },
+    "xai": {
+        ("GET", GROK_USAGE_URL),
+    },
     "opencode": {
         ("GET", "https://opencode.ai/zen/go/v1/usage"),
         ("GET", "https://opencode.ai/zen/v1/usage"),
@@ -60,6 +66,9 @@ _PROVIDER_KINDS = {
     "claude_code": "claude",
     "opencode_free": "opencode",
     "opencode_go": "opencode",
+    "xai": "xai",
+    "grok": "xai",
+    "grok_cli": "xai",
 }
 
 _BLOCKED_HEADERS = {
@@ -138,6 +147,330 @@ def _normalize_url(url: str) -> str:
     return url.strip().rstrip("/")
 
 
+# ---------------------------------------------------------------------
+# Tier grouping and pooled usage (mirrors the dashboard Status tab)
+# ---------------------------------------------------------------------
+
+_TIER_LABELS = {
+    "free-tier": "Free",
+    "g1-pro-tier": "Google AI Pro",
+    "g1-ultra-tier": "Google AI Ultra",
+    "free": "Free",
+    "plus": "Plus",
+    "pro": "Pro",
+    "team": "Team",
+    "business": "Business",
+    "enterprise": "Enterprise",
+    "standard": "Standard",
+}
+_PRO_TIER_RE = re.compile(r"pro|ultra|plus|team|business|enterprise", re.IGNORECASE)
+
+
+def _account_tier(account: Account, quota: Optional[Dict[str, Any]]) -> Tuple[str, str, bool]:
+    """Return ``(tier_key, tier_label, is_paid)`` for an account and its quota."""
+    extra = account.extra_config if isinstance(account.extra_config, dict) else {}
+    q = quota or {}
+    provider_id = account.provider_id
+
+    if provider_id == "antigravity":
+        raw = str(q.get("tier") or extra.get("tier") or "free-tier")
+        label = str(
+            q.get("tier_name")
+            or extra.get("tier_name")
+            or _TIER_LABELS.get(raw)
+            or raw
+        )
+        return raw.lower(), label, bool(_PRO_TIER_RE.search(raw))
+    if provider_id == "codex":
+        raw = str(q.get("plan_type") or extra.get("plan_type") or "standard")
+        return raw.lower(), _TIER_LABELS.get(raw, raw), bool(_PRO_TIER_RE.search(raw))
+    if provider_id == "openrouter":
+        is_free = q.get("is_free_tier") is True
+        return ("free" if is_free else "paid"), ("Free" if is_free else "Paid"), not is_free
+    if provider_id == "opencode_go":
+        return "go", "Go", True
+
+    raw = str(extra.get("tier") or q.get("tier") or extra.get("plan_type") or q.get("plan_type") or "standard")
+    return raw.lower(), _TIER_LABELS.get(raw, raw), False
+
+
+def _quota_has_usage(quota: Optional[Dict[str, Any]]) -> bool:
+    """True when a quota snapshot has something the dashboard can render."""
+    if not isinstance(quota, dict) or quota.get("error"):
+        return False
+    if isinstance(quota.get("available_credits"), (int, float)):
+        return True
+    if isinstance(quota.get("balance"), dict):
+        return True
+    if isinstance(quota.get("summary"), list) and quota.get("summary"):
+        return True
+    groups = quota.get("groups")
+    return isinstance(groups, list) and any(
+        isinstance(group, dict) and group.get("buckets") for group in groups
+    )
+
+
+def _remaining_fraction(bucket: Dict[str, Any]) -> float:
+    value = bucket.get("remainingFraction")
+    if isinstance(value, (int, float)):
+        return min(1.0, max(0.0, float(value)))
+    used = bucket.get("usedPercent")
+    if isinstance(used, (int, float)):
+        return min(1.0, max(0.0, 1.0 - float(used) / 100.0))
+    return 1.0
+
+
+def _account_status(account: Account, quota: Optional[Dict[str, Any]]) -> str:
+    if isinstance(quota, dict) and quota.get("error"):
+        return "no_data"
+    until = float(getattr(account, "rate_limited_until", 0) or 0)
+    if until > time.time():
+        return "cooldown"
+    if not account.enabled:
+        return "disabled"
+    return "active"
+
+
+async def _fetch_account_quota(account: Account) -> Optional[Dict[str, Any]]:
+    """Resolve a normalized quota snapshot for any provider."""
+    if account.disable_usage_tracking:
+        return None
+
+    # Imported lazily to avoid a module import cycle with the dashboard router.
+    from llmproxy.dashboard import router as dashboard_router
+
+    try:
+        if account.provider_id == "antigravity":
+            return await dashboard_router.fetch_antigravity_quota(account)
+        if account.provider_id == "codex":
+            return await dashboard_router.fetch_codex_quota(account)
+        if account.provider_id == "openrouter":
+            return await dashboard_router.fetch_openrouter_credits(account)
+        if account.provider_id == "opencode_go":
+            return await dashboard_router.fetch_opencode_go_quota(account)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": str(exc)}
+
+    plugin = plugin_manager.get_plugin(account.provider_id)
+    if plugin is None or not getattr(plugin.metadata, "supports_usage_meter", False):
+        return None
+
+    stored = stored_usage_limits(account)
+    if stored is not None:
+        return stored
+
+    implementation = getattr(type(plugin), "fetch_usage_quota", None)
+    if implementation is None or implementation is BasePlugin.fetch_usage_quota:
+        return None
+
+    cfg = plugin_manager.configs.get(account.provider_id) or {}
+    variables = cfg.get("variables") if isinstance(cfg, dict) else {}
+    try:
+        quota = await plugin.fetch_usage_quota(
+            account, variables if isinstance(variables, dict) else {}
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": str(exc)}
+    return quota if isinstance(quota, dict) else None
+
+
+def _provider_name(provider_id: str) -> str:
+    plugin = plugin_manager.get_plugin(provider_id)
+    return plugin.metadata.name if plugin is not None else provider_id
+
+
+def _provider_pinned(provider_id: str) -> bool:
+    plugin = plugin_manager.get_plugin(provider_id)
+    cfg = plugin_manager.configs.get(provider_id) or {}
+    pinned = cfg.get("pinned") if isinstance(cfg, dict) else None
+    if pinned is None:
+        pinned = getattr(getattr(plugin, "metadata", None), "pinned", False)
+    return bool(pinned)
+
+
+def _build_usage_pools(
+    accounts: List[Account],
+    quotas: Dict[str, Optional[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Group accounts by provider and subscription tier, aggregating windows."""
+    pools: Dict[str, Dict[str, Any]] = {}
+
+    for account in accounts:
+        quota = quotas.get(account.id)
+        if quota is None:
+            continue
+
+        tier_key, tier_label, paid = _account_tier(account, quota)
+        key = f"{account.provider_id}::{tier_key}"
+        pool = pools.get(key)
+        if pool is None:
+            pool = {
+                "id": key,
+                "provider": _provider_kind(account.provider_id) or account.provider_id,
+                "provider_id": account.provider_id,
+                "provider_name": _provider_name(account.provider_id),
+                "tier": tier_key,
+                "tier_label": tier_label,
+                "plan": tier_label,
+                "paid": paid,
+                "pinned": _provider_pinned(account.provider_id),
+                "accounts": [],
+                "renderable": False,
+                "groups": {},
+                "credits": None,
+                "balances": {},
+                "summaries": {},
+            }
+            pools[key] = pool
+
+        pool["accounts"].append(account)
+        if _quota_has_usage(quota):
+            pool["renderable"] = True
+        if isinstance(quota, dict) and isinstance(quota.get("available_credits"), (int, float)):
+            pool["credits"] = (pool["credits"] or 0.0) + float(quota["available_credits"])
+        balance = quota.get("balance") if isinstance(quota, dict) else None
+        if isinstance(balance, dict) and isinstance(balance.get("value"), (int, float)):
+            label = str(balance.get("label") or "available balance")
+            pool["balances"][label] = pool["balances"].get(label, 0.0) + float(balance["value"])
+        summary = quota.get("summary") if isinstance(quota, dict) else None
+        if isinstance(summary, list):
+            for item in summary:
+                if not isinstance(item, dict) or not isinstance(item.get("value"), (int, float)):
+                    continue
+                label = str(item.get("label") or "")
+                if label:
+                    pool["summaries"][label] = pool["summaries"].get(label, 0.0) + float(item["value"])
+
+        for group in (quota.get("groups") or []) if isinstance(quota, dict) else []:
+            if not isinstance(group, dict) or not isinstance(group.get("buckets"), list):
+                continue
+            group_name = str(group.get("displayName") or "Usage")
+            buckets = pool["groups"].setdefault(group_name, {})
+            for bucket in group["buckets"]:
+                if not isinstance(bucket, dict):
+                    continue
+                bucket_id = str(bucket.get("bucketId") or bucket.get("displayName") or "limit")
+                entry = buckets.setdefault(
+                    bucket_id,
+                    {
+                        "bucketId": bucket_id,
+                        "displayName": str(bucket.get("displayName") or bucket_id),
+                        "fractions": [],
+                        "resets": [],
+                        "count": 0,
+                    },
+                )
+                entry["fractions"].append(_remaining_fraction(bucket))
+                if bucket.get("resetTime"):
+                    entry["resets"].append(str(bucket["resetTime"]))
+                entry["count"] += 1
+
+    result: List[Dict[str, Any]] = []
+    for pool in pools.values():
+        if not pool["renderable"]:
+            continue
+
+        groups: List[Dict[str, Any]] = []
+        windows: List[Dict[str, Any]] = []
+        all_fractions: List[float] = []
+        for group_name, buckets in pool["groups"].items():
+            rendered: List[Dict[str, Any]] = []
+            for entry in buckets.values():
+                fractions = entry["fractions"]
+                if not fractions:
+                    continue
+                remaining = sum(fractions) / len(fractions)
+                all_fractions.append(remaining)
+                resets = sorted(
+                    (value for value in entry["resets"] if value),
+                )
+                bucket_payload = {
+                    "bucketId": entry["bucketId"],
+                    "displayName": entry["displayName"],
+                    "usedPercent": round((1.0 - remaining) * 100.0, 2),
+                    "remainingFraction": round(remaining, 4),
+                    "resetTime": resets[0] if resets else None,
+                    "accountCount": entry["count"],
+                }
+                rendered.append(bucket_payload)
+                windows.append(
+                    {
+                        "id": entry["bucketId"],
+                        "label": entry["displayName"],
+                        "group": group_name,
+                        **{key: bucket_payload[key] for key in ("usedPercent", "remainingFraction", "resetTime")},
+                        "accounts": entry["count"],
+                    }
+                )
+            if rendered:
+                groups.append({"displayName": group_name, "buckets": rendered})
+
+        pool_accounts = [
+            {
+                "id": account.id,
+                "auth_index": account.id,
+                "name": account.name,
+                "email": _account_email(account),
+                "enabled": account.enabled,
+                "disabled": not account.enabled,
+                "status": _account_status(account, quotas.get(account.id)),
+                "error": (quotas.get(account.id) or {}).get("error")
+                if isinstance(quotas.get(account.id), dict)
+                else None,
+            }
+            for account in pool["accounts"]
+        ]
+
+        remaining_fraction = (
+            sum(all_fractions) / len(all_fractions) if all_fractions else None
+        )
+        result.append(
+            {
+                "id": pool["id"],
+                "provider": pool["provider"],
+                "provider_id": pool["provider_id"],
+                "provider_name": pool["provider_name"],
+                "tier": pool["tier"],
+                "tier_label": pool["tier_label"],
+                "plan": pool["plan"],
+                "paid": pool["paid"],
+                "pinned": pool["pinned"],
+                "account_count": len(pool_accounts),
+                "active_accounts": sum(1 for item in pool_accounts if item["status"] == "active"),
+                "cooldown_accounts": sum(1 for item in pool_accounts if item["status"] == "cooldown"),
+                "error_accounts": sum(1 for item in pool_accounts if item["status"] == "no_data"),
+                "remaining_fraction": round(remaining_fraction, 4)
+                if remaining_fraction is not None
+                else None,
+                "used_percent": round((1.0 - remaining_fraction) * 100.0, 2)
+                if remaining_fraction is not None
+                else None,
+                "credits": round(pool["credits"], 4) if pool["credits"] is not None else None,
+                "balances": [
+                    {"label": label, "value": round(value, 4)}
+                    for label, value in pool["balances"].items()
+                ],
+                "summaries": [
+                    {"label": label, "value": round(value, 4)}
+                    for label, value in pool["summaries"].items()
+                ],
+                "groups": groups,
+                "windows": windows,
+                "accounts": pool_accounts,
+            }
+        )
+
+    result.sort(
+        key=lambda item: (
+            not item["pinned"],
+            not item["paid"],
+            item["provider_name"].lower(),
+            item["tier_label"].lower(),
+        )
+    )
+    return result
+
+
 def _build_headers(account: Account, provider: str, supplied: Optional[Dict[str, str]]) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     for name, value in (supplied or {}).items():
@@ -176,7 +509,7 @@ async def _refresh_account_if_needed(account: Account, provider: str, force: boo
     if not force and account.api_key and (expires_at <= 0 or expires_at - time.time() >= 120):
         return
 
-    plugin = plugin_manager.plugins.get(provider)
+    plugin = plugin_manager.plugins.get(account.provider_id)
     if plugin is None:
         return
     try:
@@ -201,6 +534,18 @@ async def _execute_api_call(account: Account, provider: str, call: ManagementApi
     if not account.api_key:
         return {"status_code": 401, "body": json.dumps({"error": "account_has_no_token"})}
 
+    # CLIProxyAPI clients (including T3 Code) send ``data`` as a JSON-encoded
+    # string. Forwarding it verbatim would post a quoted JSON string upstream,
+    # so decode it back into the object the provider expects.
+    body_data: Any = call.data
+    if isinstance(body_data, str):
+        raw = body_data.strip()
+        if raw:
+            try:
+                body_data = json.loads(raw)
+            except (TypeError, ValueError):
+                body_data = raw
+
     await _refresh_account_if_needed(account, provider)
 
     proxy_url, _ = plugin_manager.resolve_request_proxy(
@@ -216,7 +561,7 @@ async def _execute_api_call(account: Account, provider: str, call: ManagementApi
         ) as client:
             if method == "GET":
                 return await client.get(url, headers=headers)
-            return await client.post(url, headers=headers, json=call.data)
+            return await client.post(url, headers=headers, json=body_data)
 
     try:
         response = await perform()
@@ -238,15 +583,27 @@ async def list_auth_files(request: Request):
 
     files: List[Dict[str, Any]] = []
     for account in plugin_manager.get_accounts():
-        provider = _provider_kind(account.provider_id)
-        if not provider or not _provider_enabled(account.provider_id):
+        if not _provider_enabled(account.provider_id):
             continue
+
+        # Known CLIProxyAPI provider kinds keep their canonical name so T3 Code
+        # can probe them. Other LLMProxy providers are still listed with their
+        # own id, plus tier/pool metadata, so clients that understand them can
+        # group and render their usage too.
+        provider = _provider_kind(account.provider_id) or account.provider_id
+        quota = stored_usage_limits(account)
+        tier_key, tier_label, _paid = _account_tier(account, quota)
 
         entry: Dict[str, Any] = {
             "id": account.id,
             "auth_index": account.id,
+            "name": account.name,
             "provider": provider,
+            "provider_id": account.provider_id,
             "disabled": not account.enabled,
+            "tier": tier_key,
+            "tier_label": tier_label,
+            "pool_id": f"{account.provider_id}::{tier_key}",
         }
 
         email = _account_email(account)
@@ -273,6 +630,85 @@ async def list_auth_files(request: Request):
         files.append(entry)
 
     return {"files": files}
+
+
+@router.get("/auth-files/models")
+async def list_auth_file_models(request: Request, name: str = ""):
+    """Return the model IDs routed through one account.
+
+    T3 Code probes ``auth-files/models?name=<account id>`` after listing auth
+    files, so the response must be ``{"models": [{"id": ...}]}``.
+    """
+    _authorize(request)
+
+    account = _find_account(name)
+    if account is None and name:
+        account = next(
+            (
+                candidate
+                for candidate in plugin_manager.get_accounts()
+                if candidate.name == name or _account_email(candidate) == name
+            ),
+            None,
+        )
+    if account is None:
+        raise HTTPException(status_code=404, detail={"error": "unknown_account"})
+
+    seen: set[str] = set()
+    models: List[Dict[str, str]] = []
+    provider_models = plugin_manager.get_plugin_models(account.provider_id)
+    for model in provider_models:
+        if not getattr(model, "enabled", True) or model.id in seen:
+            continue
+        seen.add(model.id)
+        models.append({"id": model.id, "name": model.name})
+
+    # Virtual load-balancing rules that route to this provider's models.
+    target_ids = {model.id for model in provider_models}
+    for rule in plugin_manager.get_load_balancing_rules():
+        if not rule.enabled or rule.model_id in seen:
+            continue
+        if any(target in target_ids for target in rule.targets):
+            seen.add(rule.model_id)
+            models.append({"id": rule.model_id, "name": rule.name})
+
+    return {"models": models}
+
+
+@router.get("/usage")
+async def grouped_usage(request: Request, provider: Optional[str] = None):
+    """Return every provider's usage windows grouped by subscription tier.
+
+    This mirrors the dashboard Status tab: accounts sharing a provider and plan
+    collapse into one pool with combined remaining capacity, while a different
+    tier (for example a Google free plan next to Google AI Pro) stays separate.
+    """
+    _authorize(request)
+
+    accounts = [
+        account
+        for account in plugin_manager.get_accounts()
+        if _provider_enabled(account.provider_id)
+        and (provider is None or account.provider_id == provider)
+    ]
+
+    quotas_list = await asyncio.gather(
+        *(_fetch_account_quota(account) for account in accounts),
+        return_exceptions=True,
+    )
+    quotas: Dict[str, Optional[Dict[str, Any]]] = {}
+    for account, quota in zip(accounts, quotas_list):
+        if isinstance(quota, Exception):
+            quotas[account.id] = {"error": str(quota)}
+        else:
+            quotas[account.id] = quota
+
+    pools = _build_usage_pools(accounts, quotas)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "providers": sorted({pool["provider_id"] for pool in pools}),
+        "pools": pools,
+    }
 
 
 @router.post("/api-call")
